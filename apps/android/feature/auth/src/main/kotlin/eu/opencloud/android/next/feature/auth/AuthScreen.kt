@@ -27,7 +27,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import eu.opencloud.android.next.core.designsystem.theme.OpenCloudColor
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 
 @Composable
@@ -152,7 +151,7 @@ fun AuthScreen(
                 Text(
                     message,
                     modifier = Modifier.padding(OpenCloudDimensions.SpacingMd),
-                    color = OpenCloudColor.Error,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
         }

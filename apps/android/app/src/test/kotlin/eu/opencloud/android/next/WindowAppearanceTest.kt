@@ -18,7 +18,7 @@ class WindowAppearanceTest {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val activity = controller.get()
         try {
-            val dark = Color.rgb(16, 20, 22)
+            val dark = Color.rgb(17, 24, 28)
             activity.updateTaskBackground(true, dark)
             activity
                 .getSharedPreferences(

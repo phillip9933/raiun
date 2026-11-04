@@ -9,7 +9,7 @@ import java.lang.reflect.Proxy
 class BasicCredentialPersistenceTest {
     @Test fun `both encrypted fields use one checked commit with existing keys`() {
         val storage = Storage()
-        persistBasicCredentials(storage.preferences, "account", "alice", "secret") { "encrypted:$it" }
+        persistBasicCredentials(storage.preferences, "account", "alice", "secret") { _, value -> "encrypted:$value" }
         assertEquals(
             mapOf("basic.username.account" to "encrypted:alice", "basic.account" to "encrypted:secret"),
             storage.values,
@@ -21,7 +21,12 @@ class BasicCredentialPersistenceTest {
     @Test fun `failed commit propagates without publishing half a credential`() {
         val storage = Storage(commitSucceeds = false)
         assertThrows(IllegalStateException::class.java) {
-            persistBasicCredentials(storage.preferences, "account", "alice", "secret") { "encrypted:$it" }
+            persistBasicCredentials(
+                storage.preferences,
+                "account",
+                "alice",
+                "secret",
+            ) { _, value -> "encrypted:$value" }
         }
         assertEquals(2, storage.staged.size)
         assertEquals(emptyMap<String, String>(), storage.values)
@@ -32,11 +37,11 @@ class BasicCredentialPersistenceTest {
         val storage = Storage()
         storage.values["basic.account"] = "old"
         assertThrows(IllegalArgumentException::class.java) {
-            persistBasicCredentials(storage.preferences, "account", "", "secret") { it }
+            persistBasicCredentials(storage.preferences, "account", "", "secret") { _, value -> value }
         }
         assertThrows(IllegalStateException::class.java) {
-            persistBasicCredentials(storage.preferences, "account", "alice", "secret") {
-                if (it == "secret") error("Encryption failed.") else "encrypted:$it"
+            persistBasicCredentials(storage.preferences, "account", "alice", "secret") { _, value ->
+                if (value == "secret") error("Encryption failed.") else "encrypted:$value"
             }
         }
         assertEquals(mapOf("basic.account" to "old"), storage.values)

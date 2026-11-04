@@ -29,12 +29,11 @@ import org.robolectric.RuntimeEnvironment
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 @RunWith(RobolectricTestRunner::class)
 class VaultOfflineStoreTest {
@@ -65,7 +64,15 @@ class VaultOfflineStoreTest {
                 isVaultRoot = true,
             )
         identity = VaultIdentity(account.id, server, "drive", "vault-id")
-        store = VaultOfflineStore(root, { currentAccount }, { { true } }, EndpointPolicy(true), { FakeCipher() })
+        store =
+            VaultOfflineStore(
+                root,
+                { currentAccount },
+                { { true } },
+                EndpointPolicy(true),
+                { VaultOfflineTestCipher() },
+                durability = jvmOfflineDurability(root),
+            )
     }
 
     @After fun tearDown() {
@@ -109,7 +116,8 @@ class VaultOfflineStoreTest {
                 { currentAccount },
                 { { true } },
                 EndpointPolicy(true),
-                { FakeCipher() },
+                { VaultOfflineTestCipher() },
+                durability = jvmOfflineDurability(root),
                 beforePublication = {
                     publishing.countDown()
                     check(release.await(5, TimeUnit.SECONDS))
@@ -202,6 +210,60 @@ class VaultOfflineStoreTest {
                 session.close()
             }
         }
+
+    @Test fun existingSessionRefreshWaitsForRejectedPublicationAndCannotExposeCandidate() =
+        runBlocking {
+            assertExistingReaderWaitsForRejectedPublication { session, _ ->
+                val output = ByteArrayOutputStream()
+                session.download(session.list().single(), output)
+                output.toString(Charsets.UTF_8.name())
+            }
+        }
+
+    @Test fun existingSessionReadWaitsForRejectedPublicationAndKeepsOldRootUsable() =
+        runBlocking {
+            assertExistingReaderWaitsForRejectedPublication { session, issued ->
+                val output = ByteArrayOutputStream()
+                session.download(issued, output)
+                output.toString(Charsets.UTF_8.name())
+            }
+        }
+
+    private suspend fun assertExistingReaderWaitsForRejectedPublication(
+        read: suspend (VaultOfflineSession, VaultFolder) -> String,
+    ) {
+        PendingPublicationFixture().use { fixture ->
+            fixture.initialize()
+            val existing = fixture.existingSession()
+            val issued = existing.list().single()
+            val published = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val readerStarted = CountDownLatch(1)
+            val workers = Executors.newFixedThreadPool(2)
+            try {
+                fixture.afterPublication = {
+                    published.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                }
+                val publication = workers.submit<Unit> { runBlocking { fixture.complete { false } } }
+                assertTrue(published.await(5, TimeUnit.SECONDS))
+                val reader =
+                    workers.submit<String> {
+                        readerStarted.countDown()
+                        runBlocking { read(existing, issued) }
+                    }
+                assertTrue(readerStarted.await(5, TimeUnit.SECONDS))
+                assertThrows(TimeoutException::class.java) { reader.get(150, TimeUnit.MILLISECONDS) }
+                release.countDown()
+                publication.get(5, TimeUnit.SECONDS)
+                assertEquals("previous", reader.get(5, TimeUnit.SECONDS))
+                fixture.assertContent("previous")
+            } finally {
+                release.countDown()
+                workers.shutdownNow()
+            }
+        }
+    }
 
     @Test fun cancellationAfterPublicationRestoresPreviousVerifiedCopy() =
         runBlocking {
@@ -414,13 +476,16 @@ class VaultOfflineStoreTest {
                 { currentAccount },
                 { { true } },
                 EndpointPolicy(true),
-                { FakeCipher() },
+                { VaultOfflineTestCipher() },
+                durability = jvmOfflineDurability(root),
                 afterPublication = { afterPublication() },
                 publicationAccepted = { transferId, _ -> transfers.transfer(transferId)?.state == "SUCCEEDED" },
             )
         lateinit var job: VaultDownloadJob
         var publishingJob: VaultDownloadJob? = null
         private lateinit var session: VaultOfflineSession
+
+        fun existingSession(): VaultOfflineSession = session
 
         suspend fun initialize() {
             database.accountDao().upsert(account)
@@ -488,7 +553,8 @@ class VaultOfflineStoreTest {
                 { currentAccount },
                 { { true } },
                 EndpointPolicy(true),
-                { FakeCipher() },
+                { VaultOfflineTestCipher() },
+                durability = jvmOfflineDurability(directory),
                 publicationAccepted = { transferId, _ -> transfers.transfer(transferId)?.state == "SUCCEEDED" },
             )
 
@@ -660,48 +726,4 @@ class VaultOfflineStoreTest {
     private fun fakeCiphertext(plain: ByteArray) = ByteArray(32) { 7 } + plain + ByteArray(16) { 9 }
 
     private fun hex(value: String) = value.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-
-    private class FakeCipher : VaultCipherEngine {
-        override fun createIntegrityToken() = "proof"
-
-        override fun verifyIntegrityToken(base64Token: String) = true
-
-        override fun decryptName(encrypted: String) = encrypted
-
-        override fun decryptPath(encrypted: String) = encrypted
-
-        override fun encryptName(plain: String) = plain
-
-        override fun encryptPath(plain: String) = plain
-
-        override fun encryptContent(
-            input: InputStream,
-            output: OutputStream,
-            maximumPlaintextBytes: Long,
-        ): Long = 0L
-
-        override fun decryptContent(
-            input: InputStream,
-            output: OutputStream,
-            maximumPlaintextBytes: Long,
-        ): Long {
-            val bytes = input.readBytes()
-            require(
-                bytes.size >= 48 &&
-                    bytes.take(32).all { it == 7.toByte() } &&
-                    bytes.takeLast(16).all { it == 9.toByte() },
-            )
-            val plain = bytes.copyOfRange(32, bytes.size - 16)
-            require(plain.size.toLong() <= maximumPlaintextBytes)
-            output.write(plain)
-            val size = plain.size.toLong()
-            plain.fill(0)
-            bytes.fill(0)
-            return size
-        }
-
-        override fun exportKeyMaterial() = ByteArray(80)
-
-        override fun close() = Unit
-    }
 }

@@ -6,6 +6,9 @@ import androidx.work.WorkerParameters
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.TransferEntity
+import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.typedState
+import eu.opencloud.android.next.core.database.vaultOfflineGroups
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.safeMessage
@@ -92,8 +95,12 @@ internal suspend fun completeVaultPendingDownloads(
     publish: suspend (VaultDownloadJob, VaultDownloadStore, () -> Boolean, suspend () -> Boolean) -> Unit,
 ) = withContext(Dispatchers.IO) {
     val coroutine = currentCoroutineContext()
+    val groups = store.vaultOfflineGroups()
+    val owner = groups.captureOwner(identity.accountId)
     var afterId = ""
     while (true) {
+        // A folder publishes one complete snapshot; individual files wait behind its captured base.
+        if (owner != null && groups.active(owner, identity.driveId, identity.remoteVaultId) != null) return@withContext
         val pending =
             store.awaitingCiphertextDownloadsPage(
                 identity.accountId,
@@ -103,6 +110,11 @@ internal suspend fun completeVaultPendingDownloads(
             )
         if (pending.isEmpty()) break
         for (transfer in pending) {
+            if (owner != null &&
+                groups.active(owner, identity.driveId, identity.remoteVaultId) != null
+            ) {
+                return@withContext
+            }
             if (!VaultDownloadStore.publishing.add(transfer.id)) continue
             val attempt = payloads.beginAttempt(transfer.id, transfer.accountId)
             try {
@@ -167,7 +179,13 @@ internal suspend fun completeVaultPendingDownloads(
 fun forgetVaultDownloads(
     context: Context,
     accountId: String,
-) = VaultDownloadStore(context).forgetAccount(accountId)
+    capturedGroupOwner: eu.opencloud.android.next.core.database.VaultGroupOwner? = null,
+) {
+    require(capturedGroupOwner == null || capturedGroupOwner.accountId == accountId)
+    // Never recapture an owner here: a delayed cleanup must not adopt a replacement account incarnation.
+    if (capturedGroupOwner != null) VaultOfflineGroupPlanStore(context).forget(capturedGroupOwner)
+    VaultDownloadStore(context).forgetAccount(accountId)
+}
 
 internal interface VaultDownloadExecution {
     fun beginLease(accountId: String): () -> Boolean
@@ -211,7 +229,9 @@ class VaultDownloadWorker internal constructor(
     ): Result {
         val current = store.transfer(transferId)
         val sameWorker = current?.workId == null || current.workId == id.toString()
-        return if (sameWorker && current?.state in setOf("QUEUED", "RUNNING", "RETRY")) {
+        val unavailable = current != null && store.account(current.accountId) == null
+        if (current?.typedState == TransferState.UNKNOWN || unavailable) return Result.failure()
+        return if (sameWorker && current?.typedState?.isRunnable == true) {
             Result.retry()
         } else {
             Result.success()
@@ -223,6 +243,8 @@ class VaultDownloadWorker internal constructor(
         withContext(Dispatchers.IO) {
             val transferId = inputData.getString(TransferWorker.TRANSFER_ID) ?: return@withContext Result.failure()
             val pending = store.transfer(transferId) ?: return@withContext Result.success()
+            if (pending.typedState == TransferState.UNKNOWN) return@withContext Result.failure()
+            if (!pending.typedState.isRunnable) return@withContext Result.success()
             if (pending.notBeforeEpochMillis > System.currentTimeMillis()) return@withContext Result.retry()
             val transfer =
                 store.claimTransfer(transferId, id.toString(), System.currentTimeMillis())

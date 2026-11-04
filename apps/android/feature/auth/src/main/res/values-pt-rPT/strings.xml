@@ -25,4 +25,5 @@
     <string name="auth_oidc_session_expired">A sessão expirou ou não pôde ser verificada. Inicie sessão novamente.</string>
     <string name="auth_sign_in_cancelled">O início de sessão foi cancelado ou rejeitado.</string>
     <string name="auth_certificate_untrusted">A ligação segura falhou. Verifique o certificado do servidor e qualquer certificado de cliente necessário nas definições de ligação ao servidor.</string>
+    <string name="auth_oidc_issuer_unverified">A resposta de início de sessão do navegador não identificou o fornecedor esperado. Peça ao administrador que verifique o suporte para issuer (iss) e tente novamente.</string>
 </resources>

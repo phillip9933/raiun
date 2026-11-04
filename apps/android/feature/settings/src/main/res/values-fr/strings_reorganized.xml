@@ -9,7 +9,7 @@
     <string name="settings_encrypted_preferences_summary">Choix biométriques pour les dossiers et Spaces chiffrés</string>
     <string name="settings_permissions">Autorisations</string>
     <string name="settings_permissions_summary">Accès aux métadonnées des photos et vidéos</string>
-    <string name="settings_encrypted_preferences_explanation">Ces choix sont enregistrés sur cet appareil. La réinitialisation d’un choix supprime sa clé biométrique enregistrée, si elle existe. Après déverrouillage de cet emplacement chiffré avec son mot de passe, Raiun pourra vous le demander à nouveau.</string>
+    <string name="settings_encrypted_preferences_explanation">Ces choix sont enregistrés sur cet appareil. La liste comprend les accès mémorisés sur ce téléphone, les propositions refusées et tout accès biométrique antérieur. La réinitialisation d’un emplacement efface ses choix de déverrouillage locaux ; Raiun pourra vous le proposer à nouveau après authentification avec son mot de passe.</string>
     <string name="settings_encrypted_preferences_empty">Aucun choix biométrique pour les emplacements chiffrés de ce compte.</string>
     <string name="settings_encrypted_preferences_failed">Impossible de lire les préférences de chiffrement.</string>
     <string name="settings_encrypted_folder">Dossier</string>

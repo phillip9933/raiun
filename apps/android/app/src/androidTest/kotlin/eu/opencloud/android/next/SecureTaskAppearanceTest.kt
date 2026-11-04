@@ -46,7 +46,7 @@ class SecureTaskAppearanceTest {
         try {
             cancelAutomaticUnlock(instrumentation, unlockMonitor, lock.deviceSecure)
             val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val expected = Color.rgb(16, 20, 22)
+            val expected = Color.rgb(17, 24, 28)
             val deadline = SystemClock.uptimeMillis() + 5000
             var actual = 0
             while (actual != expected && SystemClock.uptimeMillis() < deadline) {

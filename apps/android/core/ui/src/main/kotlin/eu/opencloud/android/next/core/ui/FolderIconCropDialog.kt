@@ -57,6 +57,13 @@ fun FolderIconCropDialog(
     val zoomIn = stringResource(R.string.folder_crop_zoom_in)
     val zoomOut = stringResource(R.string.folder_crop_zoom_out)
     val reset = stringResource(R.string.folder_crop_reset)
+    val panActions =
+        listOf(
+            stringResource(R.string.folder_crop_pan_left) to Offset(-1f, 0f),
+            stringResource(R.string.folder_crop_pan_right) to Offset(1f, 0f),
+            stringResource(R.string.folder_crop_pan_up) to Offset(0f, -1f),
+            stringResource(R.string.folder_crop_pan_down) to Offset(0f, 1f),
+        )
     AlertDialog(
         onDismissRequest = onCancel,
         title = { Text(stringResource(R.string.folder_crop_title)) },
@@ -105,7 +112,20 @@ fun FolderIconCropDialog(
                                         crop = FolderIconCrop()
                                         true
                                     },
-                                )
+                                ) +
+                                panActions.map { (label, direction) ->
+                                    CustomAccessibilityAction(label) {
+                                        crop =
+                                            crop.transformed(
+                                                sourceSize,
+                                                viewport,
+                                                Offset(viewport / 2, viewport / 2),
+                                                direction * (viewport / 4),
+                                                1f,
+                                            )
+                                        true
+                                    }
+                                }
                         },
                 )
                 Text(stringResource(R.string.folder_crop_hint))

@@ -38,6 +38,7 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     implementation(project(":core:datastore"))
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(project(":core:sync"))

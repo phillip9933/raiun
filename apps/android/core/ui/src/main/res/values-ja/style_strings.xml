@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="folder_crop_pan_left">画像を左に移動</string>
+    <string name="folder_crop_pan_right">画像を右に移動</string>
+    <string name="folder_crop_pan_up">画像を上に移動</string>
+    <string name="folder_crop_pan_down">画像を下に移動</string>
+</resources>

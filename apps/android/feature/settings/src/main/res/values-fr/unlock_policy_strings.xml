@@ -1,0 +1,10 @@
+<resources>
+    <string name="settings_encrypted_ask_every_time">Demander à chaque fois</string>
+    <string name="settings_encrypted_unlock_session_explanation">Lorsque l’option est activée, Raiun exige un nouveau déverrouillage par mot de passe ou biométrie à chaque fois et supprime les clés mémorisées sur ce téléphone ; les anciennes clés biométriques restent disponibles pour un déverrouillage par utilisation. Lorsqu’elle est désactivée, les emplacements mémorisés peuvent être rouverts après le redémarrage de Raiun, tant que le téléphone est déverrouillé. Les appareils non pris en charge ou dépourvus de verrouillage sécurisé exigent une nouvelle authentification à chaque fois.</string>
+    <string name="settings_encrypted_unlock_policy_failed">Impossible de modifier le réglage de déverrouillage. Réessayez.</string>
+    <string name="settings_encrypted_phone_remembered">Mémorisé sur ce téléphone</string>
+    <string name="settings_encrypted_phone_declined">Mémorisation sur ce téléphone refusée</string>
+    <string name="settings_encrypted_reset_title_device">Oublier ce coffre sur ce téléphone ?</string>
+    <string name="settings_encrypted_reset_explanation_device">Raiun supprimera le choix de déverrouillage enregistré sur ce téléphone et la clé locale de %1$s. Vous devrez vous authentifier à nouveau avant de pouvoir le mémoriser.</string>
+    <string name="settings_encrypted_forget_phone">Oublier sur ce téléphone</string>
+</resources>

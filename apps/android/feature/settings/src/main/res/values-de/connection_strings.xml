@@ -1,13 +1,53 @@
 <resources>
-    <string name="connection_title">Serververbindung</string><string name="connection_wifi_title">Lokaler WLAN-Server</string>
-    <string name="connection_wifi_summary">Verwende die lokale Adresse dieses Servers nur im ausgewählten WLAN.</string><string name="connection_wifi_enabled">WLAN-Routing aktivieren</string>
-    <string name="connection_server_scope">Diese Einstellungen gelten für alle Konten mit genau dieser Serveradresse.</string>
-    <string name="connection_canonical">Öffentliche Serveradresse</string><string name="connection_local">Lokale HTTPS-Adresse</string><string name="connection_ssid">WLAN-Name (SSID)</string>
-    <string name="connection_current_wifi">Aktuelles WLAN verwenden</string><string name="connection_location_explanation">Android benötigt die Berechtigung für den genauen Standort und aktivierte Standortdienste, um den verbundenen WLAN-Namen zu lesen. Raiun nutzt ihn nur zum Abgleich mit diesem gespeicherten Netzwerk.</string>
-    <string name="connection_status">Verbindungsstatus: %1$s</string><string name="connection_status_disabled">Öffentliche Adresse</string><string name="connection_status_active">Lokale Adresse in diesem WLAN verfügbar</string><string name="connection_status_location">Genauen Standort erlauben und Standortdienste aktivieren</string><string name="connection_status_not_wifi">Das verbundene Netzwerk ist kein WLAN</string><string name="connection_status_ssid">WLAN-Name nicht verfügbar</string><string name="connection_status_mismatch">In diesem WLAN wird die öffentliche Adresse verwendet</string>
-    <string name="connection_mode">Routing-Auswahl</string><string name="connection_mode_public">Öffentlich</string><string name="connection_mode_automatic">Automatisch</string><string name="connection_mode_local">Lokal</string><string name="connection_mode_help">Lokales Routing gilt nur im gespeicherten WLAN. In anderen Netzwerken wird immer die öffentliche Adresse verwendet.</string>
+    <string name="connection_title">WLAN und Zertifikate</string>
+    <string name="connection_wifi_title">Zugriff über lokales WLAN</string>
+    <string name="connection_wifi_summary">Verwende eine lokale Serveradresse in deinem WLAN. In anderen Netzwerken wird die öffentliche Adresse verwendet.</string>
+    <string name="connection_wifi_enabled">Lokalen Zugriff im WLAN verwenden</string>
+    <string name="connection_server_scope">Gilt für alle Konten, die diesen Server verwenden.</string>
+    <string name="connection_canonical">Öffentliche Adresse</string>
+    <string name="connection_local">Lokale Serveradresse (HTTPS)</string>
+    <string name="connection_ssid">WLAN-Name</string>
+    <string name="connection_current_wifi">Aktuelles WLAN verwenden</string>
+    <string name="connection_location_explanation">Android benötigt die Berechtigung für den genauen Standort und aktivierte Standortdienste, um den verbundenen WLAN-Namen zu lesen. Raiun nutzt ihn nur zum Abgleich mit diesem gespeicherten Netzwerk.</string>
+    <string name="connection_status">Verbindungsstatus: %1$s</string>
+    <string name="connection_status_disabled">Öffentliche Adresse</string>
+    <string name="connection_status_active">Lokale Adresse in diesem WLAN verfügbar</string>
+    <string name="connection_status_location">Genauen Standort erlauben und Standortdienste aktivieren</string>
+    <string name="connection_status_not_wifi">Das verbundene Netzwerk ist kein WLAN</string>
+    <string name="connection_status_ssid">WLAN-Name nicht verfügbar</string>
+    <string name="connection_status_mismatch">In diesem WLAN wird die öffentliche Adresse verwendet</string>
+    <string name="connection_mode">Verbindungspräferenz</string>
+    <string name="connection_mode_public">Immer öffentliche Adresse verwenden</string>
+    <string name="connection_mode_automatic">Automatisch wechseln</string>
+    <string name="connection_mode_local">Lokal</string>
+    <string name="connection_mode_help">Lokales Routing gilt nur im gespeicherten WLAN. In anderen Netzwerken wird immer die öffentliche Adresse verwendet.</string>
     <string name="connection_local_tls_note">Der lokale Endpunkt muss denselben HTTPS-Port und Pfad verwenden, den öffentlichen Hostnamen akzeptieren und ein dafür gültiges Zertifikat bereitstellen.</string>
-    <string name="connection_test">Gespeicherte Verbindung testen</string><string name="connection_test_note">Dieser schreibgeschützte Test verwendet die gespeicherte HTTPS-Adresse und die TLS-Vertrauenseinstellungen. Ungespeicherte Änderungen werden nicht berücksichtigt.</string><string name="connection_test_running">Wird getestet…</string><string name="connection_test_success">Der Server hat erfolgreich geantwortet.</string><string name="connection_test_failed">Server nicht erreichbar. Prüfe HTTPS-Adresse und Netzwerk.</string>
-    <string name="connection_cert_title">TLS-Clientzertifikat</string><string name="connection_cert_summary">Wähle ein Zertifikat für ausdrücklich angegebene HTTPS-Ursprünge.</string><string name="connection_cert_origins">HTTPS-Ursprünge (einer pro Zeile)</string><string name="connection_cert_select">Zertifikat auswählen</string><string name="connection_cert_selected">Ein Zertifikat ist für diesen Server ausgewählt.</string><string name="connection_cert_none">Kein Zertifikat ausgewählt.</string><string name="connection_cert_remove">Zertifikat entfernen</string><string name="connection_cert_note">Der Android-Zertifikatsdialog gewährt Raiun Zugriff auf den Schlüssel. Der separate Browser für die Anmeldung hat eigenen Zertifikatszugriff. OAuth-Zertifikat-gebundene Tokens werden nicht unterstützt.</string>
-    <string name="connection_save">Speichern</string><string name="connection_cancel">Abbrechen</string><string name="connection_invalid">Prüfe HTTPS-Adressen, passenden lokalen Pfad und Port, WLAN-Namen und Zertifikatsursprünge.</string><string name="connection_saved">Verbindungseinstellungen gespeichert.</string><string name="connection_error">Verbindungseinstellungen konnten nicht gespeichert werden. Bitte versuche es erneut.</string>
+    <string name="connection_test">Gespeicherte Verbindung testen</string>
+    <string name="connection_test_note">Prüft nur gespeicherte Einstellungen. Speichere deine Änderungen vor dem Test.</string>
+    <string name="connection_test_running">Wird getestet…</string>
+    <string name="connection_test_success">Der Server hat erfolgreich geantwortet.</string>
+    <string name="connection_test_failed">Server nicht erreichbar. Prüfe HTTPS-Adresse und Netzwerk.</string>
+    <string name="connection_cert_title">Anmeldezertifikat</string>
+    <string name="connection_cert_summary">Nur erforderlich, wenn dein Server ein Clientzertifikat verlangt.</string>
+    <string name="connection_cert_origins">Zugelassene HTTPS-Websites (eine pro Zeile)</string>
+    <string name="connection_cert_select">Zertifikat auswählen</string>
+    <string name="connection_cert_selected">Zertifikat ausgewählt</string>
+    <string name="connection_cert_none">Nicht eingerichtet</string>
+    <string name="connection_cert_remove">Zertifikat nicht mehr verwenden</string>
+    <string name="connection_cert_note">Der Android-Zertifikatsdialog gewährt Raiun Zugriff auf den Schlüssel. Der separate Browser für die Anmeldung hat eigenen Zertifikatszugriff. OAuth-Zertifikat-gebundene Tokens werden nicht unterstützt.</string>
+    <string name="connection_save">Speichern</string>
+    <string name="connection_cancel">Abbrechen</string>
+    <string name="connection_invalid">Prüfe HTTPS-Adressen, passenden lokalen Pfad und Port, WLAN-Namen und Zertifikatsursprünge.</string>
+    <string name="connection_saved">Verbindungseinstellungen gespeichert.</string>
+    <string name="connection_error">Verbindungseinstellungen konnten nicht gespeichert werden. Bitte versuche es erneut.</string>
+    <string name="connection_summary">Zugriff über lokales Netzwerk und Anmeldung mit Zertifikat</string>
+    <string name="connection_server_heading">Für diesen Server</string>
+    <string name="connection_wifi_help">Informationen zum lokalen WLAN-Zugriff</string>
+    <string name="connection_cert_help">Informationen zu Anmeldezertifikaten</string>
+    <string name="connection_cert_configure">Einrichten</string>
+    <string name="connection_cert_hide">Optionen ausblenden</string>
+    <string name="connection_cert_removing">Raiun verwendet dieses Zertifikat nach dem Speichern nicht mehr.</string>
+    <string name="connection_undo">Rückgängig</string>
+    <string name="connection_help_done">Verstanden</string>
+    <string name="connection_origins_help">Gib HTTPS-Webadressen ohne Pfad ein, eine pro Zeile. Nur diese Websites dürfen dein Zertifikat erhalten.</string>
 </resources>

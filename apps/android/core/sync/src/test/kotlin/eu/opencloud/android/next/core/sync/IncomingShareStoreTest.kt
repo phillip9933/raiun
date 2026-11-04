@@ -34,6 +34,44 @@ class IncomingShareStoreTest {
         availableBytes: (File) -> Long = { it.usableSpace },
     ) = IncomingShareStore(context, availableBytes) { _, _ -> true }
 
+    @Test fun `own private providers are rejected before querying or opening`() =
+        runBlocking<Unit> {
+            val context = RuntimeEnvironment.getApplication()
+            val original = File(context.cacheDir, "private-source").apply { writeText("private") }
+            listOf("documents", "vault-export", "android-updates").forEach { suffix ->
+                val authority = "${context.packageName}.$suffix"
+                val provider = SharedProvider(original)
+                register(provider, authority)
+                val batch = UUID.randomUUID().toString()
+                assertThrows(IllegalArgumentException::class.java) {
+                    runBlocking { store(context).stage(batch, listOf(Uri.parse("content://$authority/source"))) {} }
+                }
+                assertThrows(IllegalArgumentException::class.java) {
+                    runBlocking {
+                        store(
+                            context,
+                        ).stage(UUID.randomUUID().toString(), listOf(Uri.parse("content://0@$authority/source"))) {}
+                    }
+                }
+                assertEquals(0, provider.queries)
+                assertEquals(0, provider.opens)
+                assertFalse(store(context).isStaged(batch))
+            }
+        }
+
+    @Test fun `external granted backup and similar authority sources remain usable without provider visibility`() =
+        runBlocking<Unit> {
+            val context = RuntimeEnvironment.getApplication()
+            val original = File(context.cacheDir, "backup-source").apply { writeText("backup bytes") }
+            listOf("external.backup", "${context.packageName}.vault-export.other").forEach { authority ->
+                register(SharedProvider(original), authority)
+                val batch = UUID.randomUUID().toString()
+                val files = store(context).stage(batch, listOf(Uri.parse("content://$authority/backup.jwlibrary"))) {}
+                assertEquals("backup bytes", files.single().payload.readText())
+                store(context).discard(batch)
+            }
+        }
+
     @Test fun `misleading size does not weaken streamed limit and failed low-space intake removes partial files`() =
         runBlocking<Unit> {
             val context = RuntimeEnvironment.getApplication()
@@ -245,14 +283,17 @@ class IncomingShareStoreTest {
             assertFalse(File(context.noBackupFilesDir, "incoming-shares/$interruptedBatch").exists())
         }
 
-    private fun register(provider: SharedProvider) {
+    private fun register(
+        provider: SharedProvider,
+        authority: String = "incoming.test",
+    ) {
         provider.attachInfo(
             RuntimeEnvironment.getApplication(),
             android.content.pm.ProviderInfo().apply {
-                authority = "incoming.test"
+                this.authority = authority
             },
         )
-        ShadowContentResolver.registerProviderInternal("incoming.test", provider)
+        ShadowContentResolver.registerProviderInternal(authority, provider)
     }
 
     @Test fun `partially queued batch retains destination after restart and cannot switch accounts`() =
@@ -281,6 +322,9 @@ class IncomingShareStoreTest {
         private val name: String? = null,
         private val declaredSize: Long? = null,
     ) : ContentProvider() {
+        var queries = 0
+        var opens = 0
+
         override fun onCreate() = true
 
         override fun getType(uri: Uri): String? = null
@@ -288,7 +332,10 @@ class IncomingShareStoreTest {
         override fun openFile(
             uri: Uri,
             mode: String,
-        ): ParcelFileDescriptor = ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY)
+        ): ParcelFileDescriptor {
+            opens++
+            return ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY)
+        }
 
         override fun query(
             uri: Uri,
@@ -297,6 +344,7 @@ class IncomingShareStoreTest {
             selectionArgs: Array<out String>?,
             sortOrder: String?,
         ) = MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)).apply {
+            queries++
             addRow(arrayOf(name ?: uri.lastPathSegment, declaredSize))
         }
 

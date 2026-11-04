@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_color">Cor da conta</string>
+    <string name="account_color_edit">Editar</string>
+    <string name="account_color_automatic">Automático</string>
+    <string name="account_color_device_only">Altera apenas o aspeto desta conta neste telemóvel.</string>
+    <string name="account_color_light_preview">Claro</string>
+    <string name="account_color_dark_preview">Escuro</string>
+    <string name="account_color_save_failed">Não foi possível guardar a cor da conta. Tente novamente.</string>
+    <string name="account_color_teal">Verde-petróleo</string>
+    <string name="account_color_jade">Jade</string>
+    <string name="account_color_purple">Roxo</string>
+    <string name="account_color_rose">Rosa</string>
+    <string name="account_color_amber">Âmbar</string>
+    <string name="account_color_blue">Azul</string>
+    <string name="account_color_forest">Verde-floresta</string>
+    <string name="account_color_plum">Ameixa</string>
+    <string name="account_color_save">Guardar</string>
+</resources>

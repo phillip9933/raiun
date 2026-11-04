@@ -12,6 +12,7 @@ import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.database.SpaceEntity
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.datastore.LocalDiagnostics
 import eu.opencloud.android.next.core.datastore.SettingsRepository
 import eu.opencloud.android.next.core.datastore.TransferDiagnostic
@@ -59,7 +60,8 @@ abstract class TransferWorker(
         withContext(Dispatchers.IO) {
             val transferId = inputData.getString(TRANSFER_ID) ?: return@withContext Result.failure()
             val pending = store.transfer(transferId) ?: return@withContext Result.failure()
-            if (pending.state !in setOf("QUEUED", "RUNNING", "RETRY")) return@withContext Result.success()
+            if (pending.typedState == TransferState.UNKNOWN) return@withContext Result.failure()
+            if (!pending.typedState.isRunnable) return@withContext Result.success()
             if (pending.workId != null && pending.workId != id.toString()) return@withContext Result.success()
             if (pending.notBeforeEpochMillis > now()) return@withContext Result.retry()
             val transfer =
@@ -125,7 +127,7 @@ abstract class TransferWorker(
                 val latest = ownedCurrent(running)
                 store.updateActiveTransfer(
                     latest.copy(
-                        state = TransferState.CONFLICT.name,
+                        state = TransferState.CONFLICT.persistedValue,
                         error = "An item with this name already exists.",
                         errorCode = "CONFLICT",
                         updatedAtEpochMillis = now(),
@@ -154,7 +156,7 @@ abstract class TransferWorker(
                 if (failure.canRetryTransfer(latest)) {
                     store.updateActiveTransfer(
                         latest.copy(
-                            state = TransferState.RETRY.name,
+                            state = TransferState.RETRY.persistedValue,
                             error = failure.safeMessage(),
                             errorCode = failure.diagnosticCode(),
                             notBeforeEpochMillis = failure.retryDeadline(now()),
@@ -185,7 +187,7 @@ abstract class TransferWorker(
         } else {
             store.updateActiveTransfer(
                 latest.copy(
-                    state = TransferState.SUCCEEDED.name,
+                    state = TransferState.SUCCEEDED.persistedValue,
                     bytesTransferred = latest.bytesTotal,
                     error = null,
                     errorCode = null,
@@ -213,8 +215,10 @@ abstract class TransferWorker(
     private suspend fun unclaimedResult(transferId: String): Result {
         val current = store.transfer(transferId)
         val sameWorker = current?.workId == null || current.workId == id.toString()
+        val unavailable = current != null && store.account(current.accountId) == null
+        if (current?.typedState == TransferState.UNKNOWN || unavailable) return Result.failure()
         return if (sameWorker &&
-            current?.state in setOf("QUEUED", "RUNNING", "RETRY")
+            current?.typedState?.isRunnable == true
         ) {
             Result.retry()
         } else {
@@ -291,7 +295,7 @@ abstract class TransferWorker(
     ): Result {
         store.updateActiveTransfer(
             transfer.copy(
-                state = TransferState.FAILED.name,
+                state = TransferState.FAILED.persistedValue,
                 error = message,
                 errorCode = code,
                 updatedAtEpochMillis = now(),
@@ -329,7 +333,7 @@ private fun TransferEntity.beginAttempt(
     shared: Boolean,
 ): TransferEntity =
     copy(
-        state = TransferState.RUNNING.name,
+        state = TransferState.RUNNING.persistedValue,
         attemptCount = attemptCount + 1,
         error = null,
         errorCode = null,

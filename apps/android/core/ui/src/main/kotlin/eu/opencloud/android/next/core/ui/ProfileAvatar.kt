@@ -1,22 +1,25 @@
 package eu.opencloud.android.next.core.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.sync.AccountProfiles
 import eu.opencloud.android.next.core.sync.ProfileAppearance
@@ -28,7 +31,7 @@ fun ProfileAvatar(
     name: String = "",
 ) {
     val context = LocalContext.current
-    val revision by AccountProfiles.revision.collectAsState()
+    val revision by AccountProfiles.revision.collectAsStateWithLifecycle()
     val profile by androidx.compose.runtime.key(accountId, name, revision) {
         produceState(ProfileAppearance(name)) {
             val cached = AccountProfiles.load(context, accountId, refresh = false)
@@ -40,9 +43,13 @@ fun ProfileAvatar(
     Surface(
         modifier.size(OpenCloudDimensions.AvatarSize),
         shape = CircleShape,
-        color = MaterialTheme.colorScheme.primaryContainer,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        border = BorderStroke(OpenCloudDimensions.StrokeRegular, accountAccent(accountId)),
     ) {
-        Box(contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.fillMaxSize().padding(OpenCloudDimensions.StrokeRegular).clip(CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
             val bitmap = profile.image
             if (bitmap != null) {
                 Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
@@ -52,7 +59,7 @@ fun ProfileAvatar(
                         .trim()
                         .firstOrNull()
                         ?.uppercase() ?: "?",
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
         }

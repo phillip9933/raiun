@@ -7,6 +7,8 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteException
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -121,32 +123,34 @@ internal class BoundaryManifest(
         }
     }
 
-    fun requireChildren(
+    /** One expected record is decoded at a time; no SQLite cursor spans a suspend snapshot lookup. */
+    suspend fun requireChildren(
         parent: Long,
-        children: List<BoundaryEntry>,
+        children: BoundaryDirectorySnapshot,
         destination: Boolean = false,
-    ) = manifestStorage {
-        val actual = children.associateBy { it.id }
-        if (actual.size != children.size) throw OpenCloudException(OpenCloudError.InvalidResponse)
-        var count = 0
-        database
-            .rawQuery(
-                "SELECT sequence, parent, identity, payload FROM entry WHERE parent = ?",
-                arrayOf(parent.toString()),
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    val record = decodeCursor(cursor)
-                    val expected = if (destination) record.destination else record.source
-                    val child = actual[expected.id]
-                    if (child == null ||
-                        !sameBoundaryEntry(expected, child)
-                    ) {
-                        throw OpenCloudException(OpenCloudError.PreconditionFailed)
-                    }
-                    count++
-                }
+    ) {
+        currentCoroutineContext().ensureActive()
+        children.page(children.totalCount, 1)
+        var previous = 0L
+        var count = 0L
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val record =
+                manifestStorage {
+                    next("parent = $parent AND sequence > $previous", "sequence ASC")
+                } ?: break
+            val expected = if (destination) record.destination else record.source
+            val child = children.findById(expected.id)
+            if (child == null || !sameBoundaryEntry(expected, child)) {
+                throw OpenCloudException(OpenCloudError.PreconditionFailed)
             }
-        if (count != children.size) throw OpenCloudException(OpenCloudError.PreconditionFailed)
+            count = Math.addExact(count, 1L)
+            previous = record.sequence
+        }
+        if (count != children.totalCount) throw OpenCloudException(OpenCloudError.PreconditionFailed)
+        currentCoroutineContext().ensureActive()
+        children.page(children.totalCount, 1)
+        currentCoroutineContext().ensureActive()
     }
 
     private fun next(

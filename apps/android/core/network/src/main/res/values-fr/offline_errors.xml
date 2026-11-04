@@ -1,0 +1,5 @@
+<resources>
+    <string name="error_encrypted_unlock_failed">Impossible de déverrouiller les données chiffrées enregistrées. Vérifiez le mot de passe de chiffrement ou rétablissez la connexion et réessayez.</string>
+    <string name="error_offline_snapshot_changed">La copie hors connexion a changé. Aucun fichier existant n’a été remplacé. Enregistrez à nouveau le dossier hors connexion.</string>
+    <string name="error_offline_group_busy">Une mise à jour hors connexion est déjà en cours pour cet emplacement chiffré. Attendez qu’elle se termine ou annulez-la avant d’en lancer une autre.</string>
+</resources>

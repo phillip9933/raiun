@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="auth_account_cleanup_pending">Le nettoyage du compte est encore en cours sur ce téléphone. Ouvrez Comptes pour vérifier le nettoyage avant de vous reconnecter.</string>
+</resources>

@@ -77,9 +77,7 @@ class ProviderFolderOperations(
             val safeName = name.requireValidSegment()
             refresh(accountId, spaceId, parentId, allowed)
             check(
-                store.children(accountId, spaceId, parentId).none {
-                    it.name == safeName
-                },
+                store.child(accountId, spaceId, parentId, safeName) == null,
             ) { "A document with that name already exists." }
             val account = requireNotNull(store.account(accountId)?.takeIf { it.isActive })
             val space = requireNotNull(store.space(accountId, spaceId))
@@ -101,7 +99,7 @@ class ProviderFolderOperations(
                 }
             refresh(accountId, spaceId, parentId, allowed)
             val created =
-                store.children(accountId, spaceId, parentId).singleOrNull { it.name == safeName }
+                store.child(accountId, spaceId, parentId, safeName)
                     ?: throw FileNotFoundException(
                         "The server has not confirmed the new document. Refresh before retrying.",
                     )
@@ -141,7 +139,7 @@ class ProviderFolderOperations(
                 client(account.serverUrl),
             ).renameFile(webDavRoot(space).mutationChildUrl(current.path), safeName, current.eTag, token)
             refresh(current.accountId, current.spaceId, current.parentId, allowed)
-            store.children(current.accountId, current.spaceId, current.parentId).singleOrNull { it.name == safeName }
+            store.child(current.accountId, current.spaceId, current.parentId, safeName)
                 ?: throw FileNotFoundException("The server has not confirmed the renamed document.")
         }
 

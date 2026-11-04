@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -16,6 +17,7 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import com.github.takahirom.roborazzi.captureRoboImage
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudTheme
+import eu.opencloud.android.next.ui.VaultDirectoryPageState
 import eu.opencloud.android.next.ui.VaultEntryAction
 import eu.opencloud.android.next.ui.VaultLocationKindUi
 import eu.opencloud.android.next.ui.VaultRouteCallbacks
@@ -25,6 +27,7 @@ import eu.opencloud.android.next.ui.VaultRouteMode
 import eu.opencloud.android.next.ui.VaultRouteState
 import eu.opencloud.android.next.ui.VaultScreen
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -209,6 +212,15 @@ class EncryptedBrowserActionsTest {
                 VaultScreen(
                     state.value,
                     callbacks().copy(
+                        onBeginDestinationPicker = { id, path ->
+                            assertEquals("folder", id)
+                            events += "load:$path"
+                            state.value =
+                                state.value.copy(
+                                    destinationPickerPath = path,
+                                    destinationPickerEntries = rootEntries,
+                                )
+                        },
                         onLoadDestinationFolders = { path ->
                             events += "load:$path"
                             state.value =
@@ -257,6 +269,74 @@ class EncryptedBrowserActionsTest {
         )
     }
 
+    @Test fun destinationPagingControlsPreserveFilesAsDisabledChoices() {
+        val file = VaultRouteEntry("file", "Visible.txt", "Visible.txt", false, false, 50, "text/plain")
+        val folder = VaultRouteEntry("folder190", "Folder 190", "Folder190", true, false, 0, null)
+        val state =
+            mutableStateOf(
+                contents().copy(
+                    destinationPickerPath = "",
+                    destinationPickerEntries = listOf(folder, file),
+                    destinationPickerPage = VaultDirectoryPageState(128, 301, 2, true),
+                ),
+            )
+        val pages = mutableListOf<Boolean>()
+        val opened = mutableListOf<String>()
+        compose.setContent {
+            OpenCloudTheme {
+                VaultScreen(
+                    state.value,
+                    callbacks().copy(
+                        onBeginDestinationPicker = { id, path ->
+                            assertEquals("folder", id)
+                            opened += path
+                        },
+                        onLoadDestinationFolders = { opened += it },
+                        onDismissDestinationPicker = {
+                            state.value =
+                                state.value.copy(
+                                    destinationPickerPath = null,
+                                    destinationPickerEntries = emptyList(),
+                                    destinationPickerPage = null,
+                                )
+                        },
+                        onDestinationPage = { previous ->
+                            pages += previous
+                            state.value =
+                                state.value.copy(
+                                    destinationPickerPage =
+                                        VaultDirectoryPageState(
+                                            if (previous) 128 else 130,
+                                            301,
+                                            2,
+                                            true,
+                                        ),
+                                )
+                        },
+                    ),
+                )
+            }
+        }
+        compose.onNodeWithContentDescription("Actions for Documents").performClick()
+        compose.onNodeWithText("Move").performClick()
+        compose.onNodeWithText("129–130 of 301").assertExists()
+        compose.onNodeWithContentDescription("New").assertDoesNotExist()
+        val nextBounds = compose.onNodeWithText("Next").fetchSemanticsNode().boundsInRoot
+        val placeBounds = compose.onNodeWithText("Move here").fetchSemanticsNode().boundsInRoot
+        assertTrue(nextBounds.bottom <= placeBounds.top)
+        compose.onNodeWithText("Visible.txt").performClick()
+        compose.runOnIdle { assertEquals(listOf(""), opened) }
+        compose.onNodeWithText("Next").performClick()
+        compose.onNodeWithText("131–132 of 301").assertExists()
+        compose.onNodeWithText("Previous").performClick()
+        compose.runOnIdle { assertEquals(listOf(false, true), pages) }
+        compose.onNodeWithText("Folder 190").performClick()
+        compose.runOnIdle { assertEquals(listOf("", "Folder190"), opened) }
+        compose.onNodeWithText("Cancel").performClick()
+        compose.onNodeWithContentDescription("New").assertIsDisplayed().performClick()
+        compose.onNodeWithContentDescription("Close new actions").assertIsDisplayed().performClick()
+    }
+
     @Test fun copyUsesTheSameInVaultFolderPicker() {
         val state =
             mutableStateOf(
@@ -272,6 +352,11 @@ class EncryptedBrowserActionsTest {
                 VaultScreen(
                     state.value,
                     callbacks().copy(
+                        onBeginDestinationPicker = { id, path ->
+                            assertEquals("file", id)
+                            events += "load:$path"
+                            state.value = state.value.copy(destinationPickerPath = path)
+                        },
                         onLoadDestinationFolders = { path ->
                             events += "load:$path"
                             state.value = state.value.copy(destinationPickerPath = path)

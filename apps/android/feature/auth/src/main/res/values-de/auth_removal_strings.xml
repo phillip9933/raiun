@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="auth_account_cleanup_pending">Die Kontobereinigung auf diesem Smartphone ist noch nicht abgeschlossen. Öffne „Konten“, um die Bereinigung zu prüfen, bevor du dich erneut anmeldest.</string>
+</resources>

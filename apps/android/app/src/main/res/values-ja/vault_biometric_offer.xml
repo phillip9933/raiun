@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="vault_phone_remember_offer_title">このスマートフォンで記憶しますか？</string>
+    <string name="vault_phone_remember_offer_message">Raiunはこのスマートフォンでこの保管庫を安全に記憶し、Raiunの再起動後やスマートフォンのロック解除後に再び開けるようにできます。暗号化パスワードのバックアップを安全に保管してください。他の端末で利用する場合やこのスマートフォンを紛失した場合にも必要です。</string>
+    <string name="vault_phone_remember_offer_accept">このスマートフォンで記憶</string>
+    <string name="vault_phone_remember_offer_decline">毎回確認する</string>
     <string name="vault_biometric_offer_title">生体認証でロックを解除しますか？</string>
     <string name="vault_biometric_offer_message">指紋または対応する顔認証を使って、この暗号化フォルダーまたはSpaceを再び開けます。このスマートフォンでのみ機能します。暗号化パスワードのバックアップを安全に保管してください。他の端末で利用する場合、生体認証をリセットした場合、またはこのスマートフォンを紛失した場合には、パスワードが必要です。</string>
     <string name="vault_biometric_offer_accept">生体認証を設定</string>

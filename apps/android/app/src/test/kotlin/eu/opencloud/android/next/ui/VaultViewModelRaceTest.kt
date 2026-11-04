@@ -7,6 +7,8 @@ import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.security.VaultIdentity
 import eu.opencloud.android.next.core.security.VaultPreferenceStatus
 import eu.opencloud.android.next.core.security.VaultPreferenceTargetKind
+import eu.opencloud.android.next.core.security.VaultRememberBinding
+import eu.opencloud.android.next.core.security.VaultRememberChoice
 import eu.opencloud.android.next.core.sync.VaultFolder
 import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.core.sync.VaultLocationKind
@@ -48,6 +50,7 @@ class VaultViewModelRaceTest {
         val cases =
             mapOf(
                 OpenCloudError.DirectoryListingTooLarge to VaultRouteError.LISTING_TOO_LARGE,
+                OpenCloudError.EncryptedOfflineIndexFull to VaultRouteError.OFFLINE_INDEX_FULL,
                 OpenCloudError.LocalStorage to VaultRouteError.LOCAL_STORAGE,
                 OpenCloudError.LocalStorageWriteFailed to VaultRouteError.LOCAL_SAVE,
                 OpenCloudError.SourceUnavailable to VaultRouteError.SOURCE_UNAVAILABLE,
@@ -130,7 +133,7 @@ class VaultViewModelRaceTest {
             model.leaveRoute()
         }
 
-    @Test fun `retrying the same offline download triggers verification again after an empty queue`() =
+    @Test fun `unlock recovers receipts with an empty queue and a retry of the same download verifies again`() =
         runTest {
             Dispatchers.setMain(StandardTestDispatcher(testScheduler))
             val pendingIds = MutableStateFlow<String?>(null)
@@ -153,17 +156,17 @@ class VaultViewModelRaceTest {
                 )
                 model.unlock("secret".toCharArray())
                 advanceUntilIdle()
-                assertEquals(0, completions)
+                assertEquals(1, completions)
 
                 pendingIds.value = "same-download"
                 advanceUntilIdle()
-                assertEquals(1, completions)
+                assertEquals(2, completions)
                 pendingIds.value = null
                 advanceUntilIdle()
-                assertEquals(1, completions)
+                assertEquals(2, completions)
                 pendingIds.value = "same-download"
                 advanceUntilIdle()
-                assertEquals(2, completions)
+                assertEquals(3, completions)
             } finally {
                 model.leaveRoute()
             }
@@ -390,6 +393,7 @@ class VaultViewModelRaceTest {
             assertEquals(false, viewModel.state.value.biometricOfferPending)
 
             viewModel.lock()
+            advanceUntilIdle()
             viewModel.unlock("secret".toCharArray())
             advanceUntilIdle()
 
@@ -506,12 +510,7 @@ class VaultViewModelRaceTest {
                     entries = listOf(folder("notes.txt")),
                     previewBlock = { suspendCoroutine { pendingPreview = it } },
                 )
-            val viewModel =
-                VaultViewModel(
-                    ApplicationProvider.getApplicationContext<Application>(),
-                    TestRepository(unlockBlock = { _, _, _, _ -> session }),
-                    TestBiometricStore(),
-                )
+            val viewModel = newViewModel(TestRepository(unlockBlock = { _, _, _, _ -> session }))
             viewModel.enterRoute(ACCOUNT)
             runCurrent()
             viewModel.selectLocation(
@@ -549,12 +548,7 @@ class VaultViewModelRaceTest {
                     entries = listOf(folder("private.txt")),
                     previewBlock = { throw OpenCloudException(OpenCloudError.AccessDenied) },
                 )
-            val viewModel =
-                VaultViewModel(
-                    ApplicationProvider.getApplicationContext<Application>(),
-                    TestRepository(unlockBlock = { _, _, _, _ -> session }),
-                    TestBiometricStore(),
-                )
+            val viewModel = newViewModel(TestRepository(unlockBlock = { _, _, _, _ -> session }))
             viewModel.enterRoute(ACCOUNT)
             runCurrent()
             viewModel.selectLocation(
@@ -589,13 +583,12 @@ class VaultViewModelRaceTest {
             val locations = listOf(location, location.copy(remoteVaultId = "other-vault", title = "Other vault"))
             val store = TestBiometricStore()
             val viewModel =
-                VaultViewModel(
-                    ApplicationProvider.getApplicationContext<Application>(),
+                newViewModel(
                     TestRepository(
                         unlockBlock = { _, _, _, _ -> error("Unlock is not used in this test.") },
                         locations = locations,
                     ),
-                    store,
+                    biometricStore = store,
                 )
             viewModel.enterRoute(ACCOUNT)
             runCurrent()
@@ -640,12 +633,50 @@ class VaultViewModelRaceTest {
     internal fun newViewModel(
         repository: TestRepository,
         preferences: VaultOfferPreferences = TestVaultOfferPreferences(),
+        biometricStore: VaultBiometricKeyStore = TestBiometricStore(),
     ) = VaultViewModel(
         ApplicationProvider.getApplicationContext<Application>(),
         repository,
-        TestBiometricStore(),
+        biometricStore,
         preferences,
+        ioDispatcher = Dispatchers.Main,
+        adapters =
+            VaultViewModelAdapters(
+                ApplicationProvider.getApplicationContext<Application>(),
+                deviceRemember = UnsupportedDeviceRememberAccess,
+            ),
     )
+
+    private object UnsupportedDeviceRememberAccess : VaultDeviceRememberAccess {
+        override fun isSupported() = false
+
+        override fun begin(
+            identity: VaultIdentity,
+            binding: VaultRememberBinding,
+        ): VaultDeviceRememberAccess.Admission? = null
+
+        override fun remember(
+            admission: VaultDeviceRememberAccess.Admission?,
+            identity: VaultIdentity,
+            binding: VaultRememberBinding,
+            verifiedKeyMaterial: ByteArray,
+            permit: () -> Boolean,
+        ) = false
+
+        override fun restore(
+            identity: VaultIdentity,
+            binding: VaultRememberBinding,
+            permit: () -> Boolean,
+        ): VaultDeviceRememberKey? = null
+
+        override fun choice(identity: VaultIdentity): VaultRememberChoice? = null
+
+        override fun hasRemembered(identity: VaultIdentity) = false
+
+        override fun decline(identity: VaultIdentity) = Unit
+
+        override fun forget(identity: VaultIdentity) = Unit
+    }
 
     private class TestVaultOfferPreferences : VaultOfferPreferences {
         private val values = mutableMapOf<VaultIdentity, VaultPreferenceStatus>()
@@ -732,14 +763,8 @@ class VaultViewModelRaceTest {
         override suspend fun exportVerifiedKeyMaterial() = exportBlock()
 
         override fun observePendingOffline(): Flow<Unit> =
-            pendingOfflineIds?.pendingOfflineCompletionEvents()
-                ?: if (offlineBlock !=
-                    null
-                ) {
-                    kotlinx.coroutines.flow.flowOf(Unit)
-                } else {
-                    kotlinx.coroutines.flow.emptyFlow()
-                }
+            // Unlock now performs the initial recovery pass. Explicit IDs model subsequent queue changes.
+            pendingOfflineIds?.pendingOfflineCompletionEvents() ?: kotlinx.coroutines.flow.emptyFlow()
 
         override suspend fun completePendingOffline() {
             offlineBlock?.invoke()

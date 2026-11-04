@@ -46,8 +46,8 @@ import java.io.File
 import java.io.InputStream
 
 /**
- * Foreground-only encrypted scan. The callback must capture the current unlocked route session.
- * SDK outputs stay in non-backed-up app-private storage until upload or explicit discard.
+ * Foreground encrypted preparation. The callback captures the current unlocked route session.
+ * SDK plaintext stays private until ciphertext is queued or the scan is discarded.
  */
 @Composable
 internal fun VaultScannerRoute(
@@ -75,7 +75,7 @@ internal fun VaultScannerRoute(
         onClose()
     }
 
-    // SDK outputs and direct network uploads both surface arbitrary I/O failures.
+    // SDK output and ciphertext preparation can both surface arbitrary I/O failures.
     @Suppress("TooGenericExceptionCaught")
     fun submit(output: ScanOutput) {
         if (uploading || closed) return
@@ -90,7 +90,7 @@ internal fun VaultScannerRoute(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
-                    // Direct uploads can have an uncertain server outcome; never retry this plaintext output.
+                    // Earlier members may already be committed jobs; never silently queue the batch again.
                     error = true
                     uploadJob = null
                     discardScanSession(scanSession)

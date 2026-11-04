@@ -135,7 +135,7 @@ class SharedDownloadStore(
                     lease.share.id == current.scope.shareId
             if (current != expected ||
                 !validLease ||
-                current.transfer.state !in setOf("FAILED", "CANCELLED", "RETRY")
+                !current.transfer.typedState.allowsRetryWithoutConflictDecision
             ) {
                 return@withTransaction null
             }

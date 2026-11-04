@@ -2,8 +2,12 @@ package eu.opencloud.android.next.core.sync
 
 import android.content.Context
 import android.util.AtomicFile
+import eu.opencloud.android.next.core.database.FileBrowserDatabase
+import eu.opencloud.android.next.core.database.FileBrowserStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
@@ -18,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap
 class ScanUploadStore private constructor(
     private val context: Context,
     private val enqueue: suspend (ScanUploadLocation, SharedUploadSource) -> Unit,
+    private val isActiveAccount: suspend (String) -> Boolean,
     @Suppress("UNUSED_PARAMETER") private val constructionMarker: Unit,
 ) {
     constructor(context: Context) : this(
@@ -30,15 +35,18 @@ class ScanUploadStore private constructor(
                 source,
             )
         },
+        { accountId -> FileBrowserStore(FileBrowserDatabase.create(context)).account(accountId) != null },
         Unit,
     )
 
     internal constructor(
         context: Context,
+        isActiveAccount: suspend (String) -> Boolean = { true },
         enqueue: suspend (String, String, String, SharedUploadSource) -> Unit,
     ) : this(
         context.applicationContext,
         { destination, source -> enqueue(destination.accountId, destination.spaceId, destination.parentPath, source) },
+        isActiveAccount,
         Unit,
     )
 
@@ -49,19 +57,23 @@ class ScanUploadStore private constructor(
         accountId: String,
         spaceId: String,
         parentPath: String,
-    ): String {
-        require(accountId.isNotBlank() && spaceId.isNotBlank())
-        val sessionId = UUID.randomUUID().toString()
-        val directory = directory(sessionId).apply { check(mkdirs() || isDirectory) }
-        writeJson(
-            AtomicFile(File(directory, DESTINATION_FILE)),
-            JSONObject()
-                .put("account", accountId)
-                .put("space", spaceId)
-                .put("parent", parentPath),
-        )
-        return sessionId
-    }
+    ): String =
+        runBlocking(Dispatchers.IO) {
+            inventoryLock.withLock {
+                require(accountId.isNotBlank() && spaceId.isNotBlank())
+                check(isActiveAccount(accountId)) { "The scan account is no longer available." }
+                val sessionId = UUID.randomUUID().toString()
+                val directory = directory(sessionId).apply { check(mkdirs() || isDirectory) }
+                writeJson(
+                    AtomicFile(File(directory, DESTINATION_FILE)),
+                    JSONObject()
+                        .put("account", accountId)
+                        .put("space", spaceId)
+                        .put("parent", parentPath),
+                )
+                sessionId
+            }
+        }
 
     fun location(sessionId: String): ScanUploadLocation =
         requireNotNull(readDestination(directory(sessionId))) { "The scan upload session is unavailable." }
@@ -177,18 +189,20 @@ class ScanUploadStore private constructor(
     }
 
     /** Called during account removal after transfer work has been stopped. */
-    internal suspend fun clearAccount(accountId: String) {
-        if (Files.isSymbolicLink(root.toPath())) return
-        root.listFiles().orEmpty().filter(File::isDirectory).forEach { directory ->
-            if (Files.isSymbolicLink(directory.toPath())) return@forEach
-            val sessionId = runCatching { UUID.fromString(directory.name).toString() }.getOrNull() ?: return@forEach
-            gate(sessionId).withLock {
-                if (readDestination(directory)?.accountId == accountId) {
-                    check(directory.deleteRecursively()) { "Some scanner output files could not be removed." }
+    internal suspend fun clearAccount(accountId: String) =
+        inventoryLock.withLock {
+            accountRemovalInventory(root).forEach { directory ->
+                val sessionId = UUID.fromString(directory.name).toString()
+                check(sessionId == directory.name)
+                gate(sessionId).withLock {
+                    val destination =
+                        checkNotNull(readDestination(directory)) { "Scanner session ownership is unavailable." }
+                    if (destination.accountId == accountId) {
+                        check(deleteVaultJobTree(directory)) { "Some scanner output files could not be removed." }
+                    }
                 }
             }
         }
-    }
 
     private fun validateOutput(
         directory: File,
@@ -410,6 +424,7 @@ class ScanUploadStore private constructor(
         val COMMITTED_EXPORT_DIRECTORY =
             Regex("scan-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")
         val gates = ConcurrentHashMap<String, Mutex>()
+        val inventoryLock = Mutex()
     }
 }
 

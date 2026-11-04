@@ -10,7 +10,11 @@ internal class VaultAutomaticBiometricPrompt {
     ): Boolean {
         // An explicit relock after viewing content must not immediately reopen the fingerprint prompt.
         if (state.mode == VaultRouteMode.CONTENTS) consumed = true
-        val ready = state.mode == VaultRouteMode.UNLOCK && !state.loading && state.error == null
+        val ready =
+            state.mode == VaultRouteMode.UNLOCK &&
+                !state.loading &&
+                state.error == null &&
+                state.allowAutomaticBiometric
         val usableEnrollment = state.biometricEnrolled && !state.biometricNeedsForget
         val eligible = resumed && ready && usableEnrollment
         if (consumed || !eligible) {

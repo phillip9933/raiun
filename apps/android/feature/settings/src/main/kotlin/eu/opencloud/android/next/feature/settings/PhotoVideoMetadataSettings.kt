@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material3.Card
@@ -30,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import eu.opencloud.android.next.core.datastore.PhotoMetadataPreferences
@@ -118,12 +120,18 @@ internal fun PhotoVideoMetadataSettings(
                 style = MaterialTheme.typography.bodySmall,
             )
             ListItem(
+                modifier =
+                    Modifier.toggleable(
+                        value = askForLocationPermission,
+                        role = Role.Switch,
+                        onValueChange = onAskForLocationPermissionChange,
+                    ),
                 headlineContent = { Text(stringResource(R.string.settings_ask_for_photo_location)) },
                 supportingContent = {
                     Text(stringResource(R.string.settings_ask_for_photo_location_description))
                 },
                 trailingContent = {
-                    Switch(askForLocationPermission, onCheckedChange = onAskForLocationPermissionChange)
+                    Switch(askForLocationPermission, onCheckedChange = null)
                 },
                 colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest),
             )

@@ -27,7 +27,6 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +43,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.documentsprovider.sharedFileViewIntent
@@ -75,7 +75,7 @@ internal fun IncomingBrowserRoute(
                 performCopyAction = backend::changeCopy,
             )
         }
-    val state by controller.state.collectAsState()
+    val state by controller.state.collectAsStateWithLifecycle()
     var folderActions by remember(account) { mutableStateOf<IncomingBrowserItem.Folder?>(null) }
     var openError by remember(account) { mutableStateOf<String?>(null) }
     var preview by remember(account) { mutableStateOf<IncomingBrowserItem.File?>(null) }
@@ -83,8 +83,8 @@ internal fun IncomingBrowserRoute(
         eu.opencloud.android.next.core.datastore.SettingsRepository
             .create(context)
             .settings
-    }.collectAsState(
-        initial =
+    }.collectAsStateWithLifecycle(
+        initialValue =
             eu.opencloud.android.next.core.datastore
                 .UserSettings(),
     )

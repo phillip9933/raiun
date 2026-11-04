@@ -39,4 +39,5 @@
     <string name="error_directory_listing_too_large">Le serveur a renvoyé une liste de dossier trop volumineuse pour être traitée en toute sécurité par Raiun. Essayez d’ouvrir un sous-dossier plus petit.</string>
     <string name="error_local_storage_write_failed">Impossible d’enregistrer le fichier sur cet appareil. Vérifiez l’espace de stockage et réessayez.</string>
     <string name="error_source_changed">Le fichier sélectionné a changé pendant la préparation de l’envoi. Sélectionnez-le à nouveau avant de l’envoyer.</string>
+    <string name="error_encrypted_offline_index_full">Cet emplacement chiffré a atteint sa limite de métadonnées hors connexion. Retirez des éléments hors connexion de cet emplacement avant de réessayer.</string>
 </resources>

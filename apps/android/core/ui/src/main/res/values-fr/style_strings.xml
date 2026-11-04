@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="folder_crop_pan_left">Déplacer l’image vers la gauche</string>
+    <string name="folder_crop_pan_right">Déplacer l’image vers la droite</string>
+    <string name="folder_crop_pan_up">Déplacer l’image vers le haut</string>
+    <string name="folder_crop_pan_down">Déplacer l’image vers le bas</string>
+</resources>

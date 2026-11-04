@@ -1,0 +1,5 @@
+<resources>
+    <string name="error_encrypted_unlock_failed">Não foi possível desbloquear os dados encriptados guardados. Verifique a palavra-passe de encriptação ou volte a ligar-se e tente novamente.</string>
+    <string name="error_offline_snapshot_changed">A cópia offline foi alterada. Nenhum ficheiro existente foi substituído. Guarde novamente a pasta para acesso offline.</string>
+    <string name="error_offline_group_busy">Já está em curso uma atualização offline para esta localização encriptada. Aguarde pela conclusão ou cancele-a antes de iniciar outra.</string>
+</resources>

@@ -3,6 +3,8 @@ package eu.opencloud.android.next.core.sync
 import android.content.Context
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
+import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.typedState
 import kotlinx.coroutines.CancellationException
 
 class DocumentEditReconciler(
@@ -43,9 +45,9 @@ class DocumentEditReconciler(
                 val transfer = store.transfer(edit.id) ?: return
                 check(transfer.accountId == edit.accountId && transfer.spaceId == edit.spaceId)
                 check(transfer.direction == "UPLOAD")
-                when (transfer.state) {
-                    "SUCCEEDED" -> drafts.settleSubmission(edit, succeeded = true)
-                    "CANCELLED" -> drafts.settleSubmission(edit, succeeded = false)
+                when (transfer.typedState) {
+                    TransferState.SUCCEEDED -> drafts.settleSubmission(edit, succeeded = true)
+                    TransferState.CANCELLED -> drafts.settleSubmission(edit, succeeded = false)
                     else -> Unit // Missing history is not proof that the upload succeeded; preserve the draft.
                 }
             }

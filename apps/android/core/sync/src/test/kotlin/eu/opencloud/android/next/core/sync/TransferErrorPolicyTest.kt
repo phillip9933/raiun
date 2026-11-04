@@ -8,6 +8,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TransferErrorPolicyTest {
+    @Test fun `encrypted offline index capacity requires cleanup before retry`() {
+        val error = OpenCloudError.EncryptedOfflineIndexFull
+        org.junit.Assert.assertEquals("ENCRYPTED_OFFLINE_INDEX_FULL", error.diagnosticCode())
+        assertFalse(error.canRetryTransfer(0))
+        assertFalse(error.safeMessage().contains("server", ignoreCase = true))
+        assertFalse(error.safeMessage().contains("device storage", ignoreCase = true))
+        assertTrue(error.safeMessage().contains("this location"))
+    }
+
     @Test fun `oversized listing is actionable and never automatically retried`() {
         val error = OpenCloudError.DirectoryListingTooLarge
         org.junit.Assert.assertEquals("DIRECTORY_LISTING_TOO_LARGE", error.diagnosticCode())

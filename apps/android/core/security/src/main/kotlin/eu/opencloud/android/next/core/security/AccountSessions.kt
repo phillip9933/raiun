@@ -7,6 +7,7 @@ import eu.opencloud.android.next.core.model.auth.AuthTokens
 import eu.opencloud.android.next.core.model.auth.OidcClientRegistration
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
+import eu.opencloud.android.next.core.network.bearerAuthorizationHeader
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -45,6 +46,7 @@ class AccountSessions(
                     refresh(current)
                 } catch (exception: OpenCloudException) {
                     if (exception.error == OpenCloudError.ClientRegistrationRequired) {
+                        VaultUnlockSession.forgetProcessAccount(accountId)
                         generation(accountId).incrementAndGet()
                         credentials
                             .readClientRegistration(
@@ -53,13 +55,21 @@ class AccountSessions(
                         credentials.remove(accountId)
                     }
                     if (exception.error == OpenCloudError.AuthenticationRequired) {
+                        VaultUnlockSession.forgetProcessAccount(accountId)
                         generation(accountId).incrementAndGet()
                         credentials.remove(accountId)
                     }
                     throw exception
                 }
             if (refreshed.expiresAtEpochSeconds <= now) reauthenticate()
-            val committed = refreshed.copy(refreshToken = refreshed.refreshToken ?: current.refreshToken)
+            val replacementRefreshToken = refreshed.refreshToken
+            if (replacementRefreshToken != null && replacementRefreshToken.isBlank()) invalidTokens()
+            val committed =
+                refreshed.copy(
+                    refreshToken = refreshed.refreshToken ?: current.refreshToken,
+                    scope = refreshed.scope ?: current.scope,
+                )
+            committed.bearerAuthorizationHeader()
             credentials.saveTokens(accountId, committed)
             committed
         }
@@ -70,6 +80,8 @@ class AccountSessions(
         registration: OidcClientRegistration? = null,
     ): Unit =
         synchronized(lock(accountId)) {
+            tokens.bearerAuthorizationHeader()
+            VaultUnlockSession.forgetProcessAccount(accountId)
             generation(accountId).incrementAndGet()
             if (registration == null) {
                 credentials.saveTokens(accountId, tokens)
@@ -82,6 +94,7 @@ class AccountSessions(
     /** Returns only after any in-flight refresh has finished, then removes its committed result. */
     fun remove(accountId: String) =
         synchronized(lock(accountId)) {
+            VaultUnlockSession.forgetProcessAccount(accountId)
             generation(accountId).incrementAndGet()
             credentials.remove(accountId)
         }
@@ -91,6 +104,8 @@ class AccountSessions(
     private fun generation(accountId: String): AtomicLong = generations.computeIfAbsent(accountId) { AtomicLong() }
 
     private fun reauthenticate(): Nothing = throw OpenCloudException(OpenCloudError.AuthenticationRequired)
+
+    private fun invalidTokens(): Nothing = throw OpenCloudException(OpenCloudError.InvalidResponse)
 
     companion object {
         private const val REFRESH_SKEW_SECONDS = 60L

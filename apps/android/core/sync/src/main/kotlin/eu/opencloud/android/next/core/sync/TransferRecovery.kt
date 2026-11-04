@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.TransferEntity
+import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.typedState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 
@@ -37,8 +39,9 @@ internal fun reconcileVaultPayloads(
 ) {
     fun retained(id: String): Boolean =
         runBlocking {
-            store.transfer(id)?.state !in setOf(null, "SUCCEEDED")
+            store.transfer(id)?.typedState?.let { it != TransferState.SUCCEEDED } == true
         }
     VaultUploadStore(context).reconcile(::retained)
     VaultDownloadStore(context).reconcile(::retained)
+    runBlocking { reconcileVaultOfflineGroups(context, store) }
 }

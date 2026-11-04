@@ -39,4 +39,5 @@
     <string name="error_directory_listing_too_large">El servidor devolvió una lista de carpeta mayor de lo que Raiun puede procesar de forma segura. Intenta abrir una subcarpeta más pequeña.</string>
     <string name="error_local_storage_write_failed">No se pudo guardar el archivo en este dispositivo. Comprueba el almacenamiento e inténtalo de nuevo.</string>
     <string name="error_source_changed">El archivo seleccionado cambió al preparar la subida. Selecciónalo de nuevo antes de subirlo.</string>
+    <string name="error_encrypted_offline_index_full">Esta ubicación cifrada ha alcanzado su límite de metadatos sin conexión. Quita algunos elementos sin conexión de esta ubicación antes de volver a intentarlo.</string>
 </resources>

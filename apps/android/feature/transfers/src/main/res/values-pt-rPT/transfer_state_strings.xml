@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_unknown_state">Esta transferência tem um estado guardado desconhecido. Foi mantida sem nova tentativa.</string>
+</resources>

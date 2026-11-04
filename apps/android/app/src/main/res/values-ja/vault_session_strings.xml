@@ -1,0 +1,7 @@
+<resources>
+    <string name="vault_verifying_key">キーを確認しています…</string>
+    <string name="vault_phone_session_issue">この端末でのセッション再利用に注意が必要です（コード %1$s）。</string>
+    <string name="vault_locking_remembered_access">記憶済みアクセスをロックしています…</string>
+    <string name="vault_phone_lock_failed">記憶済みアクセスをロックできませんでした。暗号化設定で保存済みアクセスを削除して、もう一度お試しください。</string>
+    <string name="vault_phone_remember_failed">この保管庫をこのスマートフォンで安全に記憶できませんでした。もう一度試すか、この選択をリセットしてください。</string>
+</resources>

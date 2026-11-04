@@ -2,6 +2,10 @@ package eu.opencloud.android.next.feature.transfers
 
 import androidx.compose.runtime.saveable.listSaver
 import eu.opencloud.android.next.core.database.TransferEntity
+import eu.opencloud.android.next.core.database.TransferInventoryFileType
+import eu.opencloud.android.next.core.database.TransferInventoryFilter
+import eu.opencloud.android.next.core.database.TransferInventoryStatus
+import eu.opencloud.android.next.core.model.TransferState
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -33,8 +37,8 @@ internal data class TransferFilters(
     private fun matchesStatus(state: String): Boolean =
         when (status) {
             TransferStatusFilter.ALL -> true
-            TransferStatusFilter.ACTIVE -> state in setOf("QUEUED", "RUNNING", "RETRY", "AWAITING_UNLOCK")
-            TransferStatusFilter.ATTENTION -> state in setOf("FAILED", "CONFLICT")
+            TransferStatusFilter.ACTIVE -> TransferState.fromPersisted(state).isActive
+            TransferStatusFilter.ATTENTION -> TransferState.fromPersisted(state).requiresAttention
             TransferStatusFilter.SUCCEEDED -> state == "SUCCEEDED"
             TransferStatusFilter.CANCELLED -> state == "CANCELLED"
         }
@@ -113,3 +117,34 @@ internal val transferFiltersSaver =
             )
         },
     )
+
+/** Inclusive local dates become exact epoch bounds, including short/long DST days. */
+internal fun TransferFilters.inventoryFilter(zone: ZoneId): TransferInventoryFilter {
+    val minimum = Instant.ofEpochMilli(Long.MIN_VALUE).atZone(zone).toLocalDate()
+    val maximum = Instant.ofEpochMilli(Long.MAX_VALUE).atZone(zone).toLocalDate()
+    val afterMaximum = startDate != null && startDate > maximum
+    val beforeMinimum = endDate != null && endDate < minimum
+    val reversed = startDate != null && endDate != null && startDate > endDate
+    val impossible = afterMaximum || beforeMinimum || reversed
+    val first =
+        startDate
+            ?.takeIf { it > minimum && it <= maximum }
+            ?.atStartOfDay(zone)
+            ?.toInstant()
+            ?.toEpochMilli()
+    val end =
+        endDate
+            ?.takeIf { it >= minimum && it < maximum }
+            ?.plusDays(1)
+            ?.atStartOfDay(zone)
+            ?.toInstant()
+            ?.toEpochMilli()
+    return TransferInventoryFilter(
+        direction,
+        TransferInventoryStatus.entries.first { it.name.equals(status.name, true) },
+        TransferInventoryFileType.entries.first { it.name.equals(fileType.name, true) },
+        first,
+        end,
+        impossible,
+    )
+}

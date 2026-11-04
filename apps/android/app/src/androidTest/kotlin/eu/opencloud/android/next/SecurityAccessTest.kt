@@ -33,12 +33,18 @@ class SecurityAccessTest {
             .putBoolean("documents", true)
             .commit()
         val unlockMonitor = instrumentation.addMonitor(DeviceUnlockActivity::class.java.name, null, false)
-        val activity =
-            instrumentation.startActivitySync(
-                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
+        val diagnostics = NativeUiDiagnostics("security-access")
+        var activity: android.app.Activity? = null
         try {
+            diagnostics.prepareDevice()
+            activity =
+                instrumentation.startActivitySync(
+                    Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            diagnostics.stage("activity-started")
+            diagnostics.stage("before-cancel-automatic-unlock")
             cancelAutomaticUnlock(instrumentation, unlockMonitor, lock.deviceSecure)
+            diagnostics.stage("after-cancel-automatic-unlock")
             instrumentation.waitForIdleSync()
             val deadline = android.os.SystemClock.uptimeMillis() + 5_000
             var lockVisible = false
@@ -46,6 +52,7 @@ class SecurityAccessTest {
                 lockVisible = hasLockText(instrumentation.uiAutomation.rootInActiveWindow)
                 if (!lockVisible) android.os.SystemClock.sleep(100)
             }
+            diagnostics.stage("assert-lock-visible")
             org.junit.Assert.assertTrue("The app must display its lock screen", lockVisible)
             org.junit.Assert.assertFalse(lock.canOpenApp())
             val provider = OpenCloudDocumentsProvider()
@@ -66,9 +73,12 @@ class SecurityAccessTest {
             assertThrows(
                 android.app.AuthenticationRequiredException::class.java,
             ) { provider.openDocument("locked", "r", null) }
+        } catch (error: Throwable) {
+            diagnostics.failure(error)
+            throw error
         } finally {
             instrumentation.removeMonitor(unlockMonitor)
-            instrumentation.runOnMainSync { activity.finish() }
+            instrumentation.runOnMainSync { activity?.finish() }
             preferences
                 .edit()
                 .putBoolean("enabled", wasEnabled)

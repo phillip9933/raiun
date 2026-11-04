@@ -20,7 +20,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -29,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.core.os.LocaleListCompat
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.datastore.Appearance
@@ -131,8 +131,8 @@ fun SettingsRoute(
     viewModel: SettingsViewModel = viewModel(),
     accountId: String? = null,
 ) {
-    val state by viewModel.state.collectAsState()
-    val diagnostics by viewModel.diagnostics.collectAsState()
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val diagnostics by viewModel.diagnostics.collectAsStateWithLifecycle()
     SettingsScreen(
         state,
         onNavigateBack,

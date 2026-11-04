@@ -4,16 +4,19 @@ import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -49,7 +52,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -64,6 +66,7 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.AccountEntity
@@ -126,7 +129,7 @@ fun SharesRoute(
     modifier: Modifier = Modifier,
     viewModel: SharesViewModel = viewModel(key = "shares-$accountId"),
 ) {
-    val state by viewModel.controller.state.collectAsState()
+    val state by viewModel.controller.state.collectAsStateWithLifecycle()
     LaunchedEffect(accountId) { viewModel.controller.load(accountId) }
     SharesScreen(
         state,
@@ -157,12 +160,12 @@ fun TopLevelSharesRoute(
             eu.opencloud.android.next.core.datastore.SettingsRepository
                 .create(context)
         }
-    val preferences by settings.settings.collectAsState(
-        initial =
+    val preferences by settings.settings.collectAsStateWithLifecycle(
+        initialValue =
             eu.opencloud.android.next.core.datastore
                 .UserSettings(),
     )
-    val state by viewModel.controller.state.collectAsState()
+    val state by viewModel.controller.state.collectAsStateWithLifecycle()
     LaunchedEffect(accountId) { viewModel.controller.load(accountId) }
     LaunchedEffect(initialFolder) {
         if (initialFolder != null) viewModel.controller.selectCategory(ShareCategory.WITH_ME)
@@ -190,19 +193,31 @@ fun ResourceSharesRoute(
     modifier: Modifier = Modifier,
     viewModel: SharesViewModel = viewModel(key = "resource-shares-$accountId-${resource.remoteId}"),
 ) {
-    val state by viewModel.controller.state.collectAsState()
+    val state by viewModel.controller.state.collectAsStateWithLifecycle()
     LaunchedEffect(accountId, resource.remoteId) { viewModel.controller.load(accountId, resource) }
-    ResourceSharesScreen(
-        state,
-        onNavigateBack,
-        viewModel.controller::searchRecipients,
-        viewModel.controller::createRecipientShare,
-        viewModel.controller::createPublicLink,
-        viewModel.controller::updatePermissions,
-        viewModel.controller::revoke,
-        viewModel.controller::dismissNotice,
-        modifier,
-    )
+    var guestsOpen by rememberSaveable(accountId, resource.spaceId, resource.remoteId) { mutableStateOf(false) }
+    BackHandler(enabled = guestsOpen) { guestsOpen = false }
+    if (guestsOpen) {
+        GuestInvitationsScreen(
+            accountId = accountId,
+            resource = resource,
+            onNavigateBack = { guestsOpen = false },
+            modifier = modifier,
+        )
+    } else {
+        ResourceSharesScreen(
+            state,
+            onNavigateBack,
+            viewModel.controller::searchRecipients,
+            viewModel.controller::createRecipientShare,
+            viewModel.controller::createPublicLink,
+            viewModel.controller::updatePermissions,
+            viewModel.controller::revoke,
+            viewModel.controller::dismissNotice,
+            modifier,
+            onGuests = { guestsOpen = true },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -352,6 +367,7 @@ fun ResourceSharesScreen(
     onDismissNotice: () -> Unit,
     modifier: Modifier = Modifier,
     initialInviteOpen: Boolean = false,
+    onGuests: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var showInvite by rememberSaveable { mutableStateOf(initialInviteOpen) }
@@ -420,6 +436,7 @@ fun ResourceSharesScreen(
                     ShareRow(share, onUpdatePermissions, onRevoke)
                 }
             }
+            guestAccessSection(onGuests, state.resource, sharingEnabled)
             externalSharing(
                 state,
                 publicSharingEnabled,
@@ -460,6 +477,11 @@ fun ResourceSharesScreen(
         onDismissNotice,
     )
 }
+
+private fun hasGuestInvitationTarget(resource: ResourceEntity?): Boolean =
+    resource?.let {
+        it.remoteId.isNotBlank() && it.spaceId.isNotBlank() && it.path.trim('/').isNotBlank()
+    } == true
 
 private fun androidx.compose.foundation.lazy.LazyListScope.externalSharing(
     state: SharesUiState,
@@ -987,8 +1009,12 @@ private fun ShareNotice(
 }
 
 private fun Context.copyPublicLink(link: TransientPublicLink) {
-    getSystemService(ClipboardManager::class.java)
-        .setPrimaryClip(ClipData.newPlainText(getString(R.string.shares_clipboard_label), link.valueForClipboard()))
+    val clip = ClipData.newPlainText(getString(R.string.shares_clipboard_label), link.valueForClipboard())
+    clip.description.extras =
+        android.os.PersistableBundle().apply {
+            putBoolean("android.content.extra.IS_SENSITIVE", true)
+        }
+    getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
 }
 
 @Composable
@@ -999,3 +1025,29 @@ private fun shareRowTitle(share: ShareEntity): String =
     } else {
         share.displayName ?: share.label ?: share.shareWith ?: share.path.substringAfterLast('/')
     }
+
+private fun androidx.compose.foundation.lazy.LazyListScope.guestAccessSection(
+    onGuests: (() -> Unit)?,
+    resource: ResourceEntity?,
+    sharingEnabled: Boolean,
+) {
+    if (onGuests != null && sharingEnabled && hasGuestInvitationTarget(resource)) {
+        item {
+            Text(stringResource(R.string.guest_access_heading), style = MaterialTheme.typography.titleMedium)
+        }
+        item {
+            Text(
+                stringResource(R.string.guest_access_description),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        item {
+            Button(onClick = onGuests, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.Person, null)
+                Spacer(Modifier.width(OpenCloudDimensions.SpacingXs))
+                Text(stringResource(R.string.guest_manage_access))
+            }
+        }
+    }
+}

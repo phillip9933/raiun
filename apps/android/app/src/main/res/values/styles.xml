@@ -1,10 +1,10 @@
 <resources>
     <style name="OpenCloudWindowLight" parent="Theme.AppCompat.Light.NoActionBar">
-        <item name="android:colorBackground">#FFFFFF</item>
-        <item name="android:windowBackground">#FFFFFF</item>
+        <item name="android:colorBackground">#F6F8FA</item>
+        <item name="android:windowBackground">#F6F8FA</item>
     </style>
     <style name="OpenCloudWindowDark" parent="Theme.AppCompat.NoActionBar">
-        <item name="android:colorBackground">#101416</item>
-        <item name="android:windowBackground">#101416</item>
+        <item name="android:colorBackground">#11181C</item>
+        <item name="android:windowBackground">#11181C</item>
     </style>
 </resources>

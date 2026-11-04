@@ -1,0 +1,5 @@
+<resources>
+    <string name="error_encrypted_unlock_failed">No se pudieron desbloquear los datos cifrados guardados. Comprueba la contraseña de cifrado o vuelve a conectarte e inténtalo de nuevo.</string>
+    <string name="error_offline_snapshot_changed">La copia sin conexión ha cambiado. No se ha sustituido ningún archivo existente. Guarda la carpeta sin conexión de nuevo.</string>
+    <string name="error_offline_group_busy">Ya hay una actualización sin conexión en curso para esta ubicación cifrada. Espera a que termine o cancélala antes de iniciar otra.</string>
+</resources>

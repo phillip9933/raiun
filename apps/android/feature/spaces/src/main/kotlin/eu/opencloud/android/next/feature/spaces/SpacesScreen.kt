@@ -31,7 +31,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,6 +43,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.core.net.toUri
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.SpaceEntity
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
@@ -78,7 +78,7 @@ fun SpacesRoute(
     onEncryptedLocationActions: (VaultLocation) -> Unit = {},
     refreshToken: Int = 0,
 ) {
-    val state by viewModel.state.collectAsState()
+    val state by viewModel.state.collectAsStateWithLifecycle()
     LaunchedEffect(accountId, refreshToken) { viewModel.load(accountId) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()

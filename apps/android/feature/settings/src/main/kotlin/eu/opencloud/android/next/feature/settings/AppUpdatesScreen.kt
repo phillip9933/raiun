@@ -9,7 +9,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -33,7 +34,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +47,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
@@ -88,7 +89,7 @@ fun AppUpdatesRoute(
     model: AppUpdatesViewModel = viewModel(),
 ) {
     val context = LocalContext.current
-    val state by model.state.collectAsState()
+    val state by model.state.collectAsStateWithLifecycle()
     AppUpdatesScreen(
         state = state,
         onNavigateBack = onNavigateBack,
@@ -127,7 +128,7 @@ data class UpdateActions(
     val onOpenLink: (String) -> Unit = {},
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AppUpdatesScreen(
     state: UpdateState,
@@ -155,7 +156,10 @@ fun AppUpdatesScreen(
         ) {
             Text(stringResource(R.string.updates_installed, state.installedVersion))
             Text(stringResource(R.string.updates_about), style = MaterialTheme.typography.bodyMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+                verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+            ) {
                 TextButton(onClick = { actions.onOpenLink(RaiunUpdates.PROJECT_URL) }) {
                     Text(stringResource(R.string.updates_project_link))
                 }
@@ -198,7 +202,10 @@ fun AppUpdatesScreen(
                 )
             }
             Text(stringResource(R.string.updates_channel), style = MaterialTheme.typography.titleSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+                verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+            ) {
                 FilterChip(
                     selected = state.channel == AndroidUpdateChannel.STABLE,
                     onClick = { actions.onChannel(AndroidUpdateChannel.STABLE) },
@@ -228,7 +235,7 @@ fun AppUpdatesScreen(
 @Composable
 fun AppUpdateNotice(model: AppUpdatesViewModel = viewModel()) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { model.checkWhenDue() }
-    val state by model.state.collectAsState()
+    val state by model.state.collectAsStateWithLifecycle()
     AppUpdateNoticeDialog(
         state = state,
         onDismiss = model.manager::dismissOffer,

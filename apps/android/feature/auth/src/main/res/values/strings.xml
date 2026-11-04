@@ -31,6 +31,7 @@
     <!-- Fixed authentication validation and callback messages. -->
     <string name="auth_required_fields">Enter the server address, username, and app password or token.</string>
     <string name="auth_oidc_session_expired">The sign-in session expired or could not be verified. Please sign in again.</string>
+    <string name="auth_oidc_issuer_unverified">The browser sign-in response did not identify the expected provider. Ask your administrator to review issuer (iss) support, then try again.</string>
     <string name="auth_sign_in_cancelled">Sign-in was cancelled or rejected.</string>
     <string name="auth_certificate_untrusted">The secure connection failed. Check the server certificate and any required client certificate in Server connection settings.</string>
 </resources>

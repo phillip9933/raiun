@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_color">アカウントの色</string>
+    <string name="account_color_edit">編集</string>
+    <string name="account_color_automatic">自動</string>
+    <string name="account_color_device_only">この端末でのアカウントの見た目だけを変更します。</string>
+    <string name="account_color_light_preview">ライト</string>
+    <string name="account_color_dark_preview">ダーク</string>
+    <string name="account_color_save_failed">アカウントの色を保存できませんでした。もう一度お試しください。</string>
+    <string name="account_color_teal">青緑</string>
+    <string name="account_color_jade">翡翠</string>
+    <string name="account_color_purple">紫</string>
+    <string name="account_color_rose">ローズ</string>
+    <string name="account_color_amber">アンバー</string>
+    <string name="account_color_blue">青</string>
+    <string name="account_color_forest">フォレストグリーン</string>
+    <string name="account_color_plum">プラム</string>
+    <string name="account_color_save">保存</string>
+</resources>

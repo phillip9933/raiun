@@ -1,5 +1,53 @@
 <resources>
-    <string name="connection_title">サーバー接続</string><string name="connection_wifi_title">Wi-Fiローカルサーバー</string><string name="connection_wifi_summary">選択したWi-Fiに接続している場合のみ、このサーバーのローカルアドレスを使用します。</string><string name="connection_wifi_enabled">Wi-Fiルーティングを有効にする</string><string name="connection_server_scope">この設定は、同じサーバーアドレスを使うすべてのアカウントに適用されます。</string><string name="connection_canonical">公開サーバーアドレス</string><string name="connection_local">ローカルHTTPSアドレス</string><string name="connection_ssid">Wi-Fiネットワーク名（SSID）</string><string name="connection_current_wifi">現在のWi-Fiを使用</string><string name="connection_location_explanation">接続中のWi-Fi名を読み取るには、Androidの正確な位置情報の許可と位置情報の有効化が必要です。Raiunは保存したネットワークとの照合にのみ使用します。</string>
-    <string name="connection_status">接続状態：%1$s</string><string name="connection_status_disabled">公開アドレス</string><string name="connection_status_active">このWi-Fiでローカルアドレスを利用できます</string><string name="connection_status_location">正確な位置情報を許可し、位置情報を有効にしてください</string><string name="connection_status_not_wifi">接続中のネットワークはWi-Fiではありません</string><string name="connection_status_ssid">Wi-Fi名を取得できません</string><string name="connection_status_mismatch">このWi-Fiでは公開アドレスを使用します</string><string name="connection_mode">ルート設定</string><string name="connection_mode_public">公開</string><string name="connection_mode_automatic">自動</string><string name="connection_mode_local">ローカル</string><string name="connection_mode_help">ローカルルーティングは保存したWi-Fiでのみ使用します。他のネットワークでは常に公開アドレスを使用します。</string><string name="connection_local_tls_note">ローカル接続先は同じHTTPSポートとパスを提供し、公開ホスト名を受け入れ、その公開ホスト名に対して有効な証明書を提示する必要があります。</string>
-    <string name="connection_test">保存済み接続をテスト</string><string name="connection_test_note">この読み取り専用テストでは、保存済みHTTPSアドレスと信頼済みTLS設定を使用します。未保存の変更は反映されません。</string><string name="connection_test_running">テスト中…</string><string name="connection_test_success">サーバーから応答がありました。</string><string name="connection_test_failed">サーバーに接続できません。HTTPSアドレスとネットワークを確認してください。</string><string name="connection_cert_title">TLSクライアント証明書</string><string name="connection_cert_summary">指定したHTTPSオリジン用の証明書を選択します。</string><string name="connection_cert_origins">HTTPSオリジン（1行に1つ）</string><string name="connection_cert_select">証明書を選択</string><string name="connection_cert_selected">このサーバーに証明書が選択されています。</string><string name="connection_cert_none">証明書は選択されていません。</string><string name="connection_cert_remove">証明書を削除</string><string name="connection_cert_note">Androidの証明書選択画面でRaiunに鍵へのアクセスが許可されます。サインインに使う別のブラウザーは独自の証明書アクセスを持ちます。OAuthの証明書バインドトークンには対応していません。</string><string name="connection_save">保存</string><string name="connection_cancel">キャンセル</string><string name="connection_invalid">HTTPS URL、ローカルのパスとポート、Wi-Fi名、証明書オリジンを確認してください。</string><string name="connection_saved">接続設定を保存しました。</string><string name="connection_error">接続設定を保存できませんでした。もう一度お試しください。</string>
+    <string name="connection_title">Wi-Fiと証明書</string>
+    <string name="connection_wifi_title">ローカルWi-Fiアクセス</string>
+    <string name="connection_wifi_summary">Wi-Fi接続中はサーバーのローカルアドレスを使用します。他のネットワークでは公開アドレスを使用します。</string>
+    <string name="connection_wifi_enabled">Wi-Fiでローカルアクセスを使用</string>
+    <string name="connection_server_scope">このサーバーを使うアカウントで共有されます。</string>
+    <string name="connection_canonical">公開アドレス</string>
+    <string name="connection_local">ローカルサーバーアドレス（HTTPS）</string>
+    <string name="connection_ssid">Wi-Fiネットワーク名</string>
+    <string name="connection_current_wifi">現在のWi-Fiを使用</string>
+    <string name="connection_location_explanation">接続中のWi-Fi名を読み取るには、Androidの正確な位置情報の許可と位置情報の有効化が必要です。Raiunは保存したネットワークとの照合にのみ使用します。</string>
+    <string name="connection_status">接続状態：%1$s</string>
+    <string name="connection_status_disabled">公開アドレス</string>
+    <string name="connection_status_active">このWi-Fiでローカルアドレスを利用できます</string>
+    <string name="connection_status_location">正確な位置情報を許可し、位置情報を有効にしてください</string>
+    <string name="connection_status_not_wifi">接続中のネットワークはWi-Fiではありません</string>
+    <string name="connection_status_ssid">Wi-Fi名を取得できません</string>
+    <string name="connection_status_mismatch">このWi-Fiでは公開アドレスを使用します</string>
+    <string name="connection_mode">接続方法</string>
+    <string name="connection_mode_public">常に公開アドレスを使用</string>
+    <string name="connection_mode_automatic">自動で切り替える</string>
+    <string name="connection_mode_local">ローカル</string>
+    <string name="connection_mode_help">ローカルルーティングは保存したWi-Fiでのみ使用します。他のネットワークでは常に公開アドレスを使用します。</string>
+    <string name="connection_local_tls_note">ローカル接続先は同じHTTPSポートとパスを提供し、公開ホスト名を受け入れ、その公開ホスト名に対して有効な証明書を提示する必要があります。</string>
+    <string name="connection_test">保存済み接続をテスト</string>
+    <string name="connection_test_note">保存済みの設定のみを確認します。テストの前に変更を保存してください。</string>
+    <string name="connection_test_running">テスト中…</string>
+    <string name="connection_test_success">サーバーから応答がありました。</string>
+    <string name="connection_test_failed">サーバーに接続できません。HTTPSアドレスとネットワークを確認してください。</string>
+    <string name="connection_cert_title">サインイン用証明書</string>
+    <string name="connection_cert_summary">サーバーがクライアント証明書を要求する場合にのみ必要です。</string>
+    <string name="connection_cert_origins">許可するHTTPSサイト（1行に1つ）</string>
+    <string name="connection_cert_select">証明書を選択</string>
+    <string name="connection_cert_selected">証明書を選択済み</string>
+    <string name="connection_cert_none">未設定</string>
+    <string name="connection_cert_remove">証明書を使用しない</string>
+    <string name="connection_cert_note">Androidの証明書選択画面でRaiunに鍵へのアクセスが許可されます。サインインに使う別のブラウザーは独自の証明書アクセスを持ちます。OAuthの証明書バインドトークンには対応していません。</string>
+    <string name="connection_save">保存</string>
+    <string name="connection_cancel">キャンセル</string>
+    <string name="connection_invalid">HTTPS URL、ローカルのパスとポート、Wi-Fi名、証明書オリジンを確認してください。</string>
+    <string name="connection_saved">接続設定を保存しました。</string>
+    <string name="connection_error">接続設定を保存できませんでした。もう一度お試しください。</string>
+    <string name="connection_summary">ローカルネットワークアクセスと証明書によるサインイン</string>
+    <string name="connection_server_heading">このサーバー</string>
+    <string name="connection_wifi_help">ローカルWi-Fiアクセスについて</string>
+    <string name="connection_cert_help">サインイン用証明書について</string>
+    <string name="connection_cert_configure">設定</string>
+    <string name="connection_cert_hide">オプションを隠す</string>
+    <string name="connection_cert_removing">保存すると、Raiunはこの証明書を使用しなくなります。</string>
+    <string name="connection_undo">元に戻す</string>
+    <string name="connection_help_done">了解</string>
+    <string name="connection_origins_help">HTTPSサイトのアドレスをパスなしで1行ずつ入力してください。証明書を受け取れるのは、ここに入力したサイトだけです。</string>
 </resources>

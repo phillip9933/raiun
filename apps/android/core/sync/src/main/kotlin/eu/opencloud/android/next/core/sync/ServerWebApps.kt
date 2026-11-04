@@ -14,6 +14,7 @@ import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.ServerWebApp
 import eu.opencloud.android.next.core.network.ServerWebAppClient
+import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.AppLock
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.Dispatchers
@@ -51,18 +52,28 @@ class ServerWebApps(
                 }.sortedWith(compareByDescending<ServerWebAppChoice> { it.app.isDefault }.thenBy { it.app.name })
         }
 
-    suspend fun open(
+    /** Always creates a fresh browser grant; embedded launch URLs/tokens are never used here. */
+    suspend fun prepareBrowser(
         resource: ResourceEntity,
         choice: ServerWebAppChoice,
-    ): String =
-        session(resource) { http, server, auth ->
-            val capabilities = OpenCloudApi(http).capabilities(server, auth)
-            if (choice.provider !in capabilities.appProviders ||
-                !choice.app.mimeType.equals(resource.mimeType, true)
-            ) {
-                denied()
-            }
-            ServerWebAppClient(http).openInWeb(server, choice.provider, auth, resource.remoteId, choice.app)
+    ): WebSessionLease<String> =
+        withContext(Dispatchers.IO) {
+            val permitted = beginPermit(resource)
+            val account = store.account(resource.accountId) ?: denied()
+            val url =
+                session(resource, permitted) { http, server, auth ->
+                    val capabilities = OpenCloudApi(http).capabilities(server, auth)
+                    if (choice.provider !in capabilities.appProviders ||
+                        !choice.app.mimeType.equals(resource.mimeType, true)
+                    ) {
+                        denied()
+                    }
+                    ServerWebAppClient(http).openInWeb(server, choice.provider, auth, resource.remoteId, choice.app)
+                }
+            WebSessionLease(url, permitted) {
+                requireResource(resource)
+                store.account(resource.accountId) == account
+            }.also { it.current() }
         }
 
     suspend fun prepareEmbedded(
@@ -71,10 +82,10 @@ class ServerWebApps(
         mode: EmbeddedWebAppMode = EmbeddedWebAppMode.VIEW,
     ): WebSessionLease<EmbeddedWebAppSession> =
         withContext(Dispatchers.IO) {
-            val permitted = AppLock(context).beginAppAction()
+            val permitted = beginPermit(resource)
             val account = store.account(resource.accountId) ?: denied()
             val prepared =
-                session(resource) { http, server, auth ->
+                session(resource, permitted) { http, server, auth ->
                     val capabilities = OpenCloudApi(http).capabilities(server, auth)
                     if (choice.provider !in capabilities.appProviders ||
                         !choice.app.mimeType.equals(resource.mimeType, true)
@@ -98,20 +109,25 @@ class ServerWebApps(
 
     private suspend fun <T> session(
         resource: ResourceEntity,
+        permitted: () -> Boolean = beginPermit(resource),
         work: (OkHttpClient, String, String) -> T,
     ): T =
         withContext(Dispatchers.IO) {
+            if (!permitted()) denied()
             val account = store.account(resource.accountId) ?: denied()
             requireResource(resource)
             if (!account.isActive) denied()
             val auth = WorkerAuthorizationProvider(context).authorization(account)
+            if (!permitted()) denied()
             val http = TlsPolicy(context).applyTo(OkHttpClient(), account.serverUrl)
             withRequestCancellation(http.dispatcher::cancelAll) {
                 currentCoroutineContext().ensureActive()
+                if (!permitted()) denied()
                 val result = work(http, account.serverUrl, auth)
                 currentCoroutineContext().ensureActive()
                 requireResource(resource)
                 if (store.account(resource.accountId) != account) denied()
+                if (!permitted()) denied()
                 result
             }
         }
@@ -122,6 +138,13 @@ class ServerWebApps(
         if (space.isDeleted || space.isDisabled) denied()
         val current = store.resource(resource.accountId, resource.spaceId, resource.remoteId)
         if (current != resource) throw OpenCloudException(OpenCloudError.PreconditionFailed)
+        store.requireAllowedVaultPath(resource.accountId, resource.spaceId, resource.path)
+    }
+
+    private fun beginPermit(resource: ResourceEntity): () -> Boolean {
+        val app = AppLock(context).beginAppAction()
+        val credentials = AccountSessions.get(context).beginLease(resource.accountId)
+        return { app() && credentials() }
     }
 
     private fun denied(): Nothing = throw OpenCloudException(OpenCloudError.AccessDenied)

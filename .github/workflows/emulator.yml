@@ -80,3 +80,4 @@ jobs:
           path: |
             apps/android/**/build/reports/androidTests/**
             apps/android/**/build/outputs/androidTest-results/**
+            apps/android/**/build/outputs/connected_android_test_additional_output/**

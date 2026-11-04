@@ -1,5 +1,64 @@
 # Changelog
 
+## 1.3.3
+
+### Fixes
+
+- Keep unrecognized saved transfers visible for attention without automatically retrying them, and require a successful download before opening cached data.
+- Prevent background transfers from starting while their account is unavailable or pending removal.
+
+### Improvements
+
+- Add an **Open in web app** file action for the server's configured document apps, alongside local **Open with**. Editing and collaboration depend on the server's supported providers.
+- Strengthen saved sign-in protection by binding encrypted records to their account and credential type, with checked migration of readable existing records.
+- On Android 15/API 35+, verify the launch caller could read each incoming shared URI; preserve the existing flow on older versions.
+- Separate encrypted destination-picker job and snapshot ownership while preserving session, lock and source checks.
+
+New credential records use a versioned format that older builds cannot read; downgrade is unsupported. See [credential storage](docs/CREDENTIAL-STORAGE.md) for migration and recovery boundaries.
+
+Transfer state values and Room schema 28 remain unchanged by this hardening. Sender-provenance guarantees remain limited on API 26–34. See [Android hardening](docs/ANDROID-HARDENING.md) for scope and acceptance limits.
+
+## 1.3.2
+
+### Bug fixes
+
+- Prevent folder listings from stalling when background work switches threads, and let interrupted copy/move operations safely retry.
+- Keep accounts on case-sensitive server paths separate while retaining existing account data.
+- Let unrelated file operations continue while an external editor downloads a document, and avoid loading an entire folder to look up one name.
+- Preserve unsaved connection settings across rotation and correctly save a replacement client certificate.
+- Resume incomplete account cleanup after interruptions, show its pending status, and preserve other accounts and unattributed recovery files.
+- Preserve cancellation and show safe error descriptions for actions from search results.
+
+### Improvements
+
+- Harden credential-key initialization, redact secret-bearing objects, mark copied sharing links as sensitive, and consistently filter encrypted locations from the Android file picker.
+- Reject Raiun's private providers during incoming sharing and explicitly enforce HTTPS in production.
+- Observe transfers and UI state more efficiently, improve cancellation responsiveness, and document the current architecture.
+
+This release migrates the local Room database from version 27 to 28 to retain pending account-removal records. Existing accounts and data migrate forward. Older builds cannot open the new database.
+
+## 1.3.1
+
+### Bug fixes
+
+- Finish each encrypted offline-plan database batch before background work can switch threads, preventing intermittent database locks while keeping a folder offline.
+- Fix Authelia sign-ins that succeeded but then received HTTP 401 for files by sending canonical Bearer headers, including for previously saved accounts.
+- Preserve saved credentials after unexplained token-endpoint 401 responses, and reject malformed token responses before they replace a usable grant.
+
+### Improvements
+
+- Validate exact issuer identifiers, advertised sign-in capabilities and browser-response issuers when RFC 9207 support is advertised, while retaining compatibility with providers that omit that optional capability.
+- Preserve omitted refresh-token and scope values during refresh, and reject malformed authentication metadata before sending or storing credentials.
+
+## 1.3.0
+
+- Add and manage OpenCloud guest invitations for files and folders; recipients open emailed links in their browser.
+- Improve Wi-Fi and certificate connection settings, account colors, account identity and light/dark styling.
+- Add an optional **Remember on this phone** choice for encrypted folders and Spaces on supported Android 15+ devices; the vault password is not saved.
+- Improve encrypted-folder offline access and large-folder browsing, copy/move, transfers and offline catalogs.
+- Fix sign-in discovery to use the server's configured Android client ID and scopes, including custom group-access scopes.
+- Encrypted offline metadata and the database format have changed. Older builds cannot read the new format; downgrade is not supported.
+
 ## 1.2.0
 
 - Match Navigation and permission buttons to the other settings controls, and align the Language selector beside its title.

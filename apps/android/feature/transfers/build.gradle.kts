@@ -29,6 +29,7 @@ android {
 
 dependencies {
     implementation(project(":core:database"))
+    implementation(project(":core:ui"))
     implementation(project(":core:designsystem"))
     implementation(project(":core:sync"))
     implementation(project(":core:security"))
@@ -41,6 +42,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
+    testImplementation(libs.androidx.room.ktx)
+    testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.test.manifest)

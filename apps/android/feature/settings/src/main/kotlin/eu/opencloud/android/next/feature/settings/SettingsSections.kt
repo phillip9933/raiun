@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -113,7 +114,8 @@ internal fun SettingsSections(
             Card(onClick = openConnection, modifier = Modifier.fillMaxWidth()) {
                 ListItem(
                     headlineContent = { Text(stringResource(R.string.connection_title)) },
-                    leadingContent = { Icon(Icons.Default.Security, null) },
+                    supportingContent = { Text(stringResource(R.string.connection_summary)) },
+                    leadingContent = { Icon(Icons.Default.Wifi, null) },
                     trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },
                     colors =
                         ListItemDefaults.colors(

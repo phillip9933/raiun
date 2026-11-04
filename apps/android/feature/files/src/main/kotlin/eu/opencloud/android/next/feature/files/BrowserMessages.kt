@@ -6,6 +6,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.typedState
 
 @Composable
 internal fun browserQuotaSummary(
@@ -27,10 +28,11 @@ internal fun browserQuotaSummary(
 
 @Composable
 internal fun browserTransferSummary(transfer: TransferEntity): String =
-    when (transfer.state) {
-        TransferState.CONFLICT.name -> stringResource(R.string.browser_transfer_conflict, transfer.displayName)
-        TransferState.FAILED.name -> stringResource(R.string.browser_transfer_failed, transfer.displayName)
-        TransferState.RETRY.name -> stringResource(R.string.browser_transfer_retrying, transfer.displayName)
+    when (transfer.typedState) {
+        TransferState.CONFLICT -> stringResource(R.string.browser_transfer_conflict, transfer.displayName)
+        TransferState.FAILED -> stringResource(R.string.browser_transfer_failed, transfer.displayName)
+        TransferState.UNKNOWN -> stringResource(R.string.browser_transfer_unknown, transfer.displayName)
+        TransferState.RETRY -> stringResource(R.string.browser_transfer_retrying, transfer.displayName)
         else ->
             stringResource(
                 R.string.browser_transfer_direction,

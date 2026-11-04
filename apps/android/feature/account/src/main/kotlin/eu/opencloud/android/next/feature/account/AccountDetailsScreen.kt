@@ -16,7 +16,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -29,7 +28,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -38,8 +36,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.AccountEntity
+import eu.opencloud.android.next.core.designsystem.component.HorizontalDivider
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.ui.ProfileAvatar
 
@@ -50,7 +50,7 @@ fun AccountDetailsRoute(
     modifier: Modifier = Modifier,
     model: AccountDetailsViewModel = viewModel(key = "profile-${account.id}"),
 ) {
-    val state by model.state.collectAsState()
+    val state by model.state.collectAsStateWithLifecycle()
     val picker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) model.changePhoto(account.id, uri)
@@ -137,6 +137,7 @@ fun AccountDetailsScreen(
                     color = MaterialTheme.colorScheme.error,
                 )
             }
+            AccountColorSetting(account)
             AccountFields(account, state.profile)
         }
     }

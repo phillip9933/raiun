@@ -1,0 +1,5 @@
+<resources>
+    <string name="error_encrypted_unlock_failed">This saved encrypted data could not be unlocked. Check the encryption password or reconnect and try again.</string>
+    <string name="error_offline_snapshot_changed">The offline copy changed. No existing files were replaced. Save the folder offline again.</string>
+    <string name="error_offline_group_busy">An offline folder update is already active for this encrypted location. Finish or cancel it before starting another.</string>
+</resources>

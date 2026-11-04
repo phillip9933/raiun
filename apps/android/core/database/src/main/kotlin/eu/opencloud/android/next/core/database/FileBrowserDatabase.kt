@@ -1,6 +1,7 @@
 package eu.opencloud.android.next.core.database
 
 import android.content.Context
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Delete
@@ -50,13 +51,19 @@ import kotlinx.coroutines.flow.Flow
         SharedVaultExclusion::class,
         ExcludedCacheEntity::class,
         VaultExclusion::class,
+        AccountIncarnationEntity::class,
+        VaultOfflineGroupEntity::class,
+        VaultOfflineGroupMemberEntity::class,
+        VaultOfflineGroupPublicationEntity::class,
     ],
-    version = 26,
+    version = 28,
     exportSchema = true,
 )
 @TypeConverters(FileBrowserConverters::class)
 abstract class FileBrowserDatabase : RoomDatabase() {
     internal val snapshotVersions = SnapshotVersions()
+    internal val transferInventoryVersions = SnapshotVersions()
+    internal val temporaryCopyVersions = SnapshotVersions()
     internal val incomingShareVersions = SnapshotVersions()
     internal val sharedFolderVersions = SnapshotVersions()
 
@@ -67,6 +74,10 @@ abstract class FileBrowserDatabase : RoomDatabase() {
     abstract fun resourceDao(): ResourceDao
 
     abstract fun transferDao(): TransferDao
+
+    abstract fun transferInventoryDao(): TransferInventoryDao
+
+    abstract fun vaultOfflineGroupDao(): VaultOfflineGroupDao
 
     abstract fun folderBackupDao(): FolderBackupDao
 
@@ -280,6 +291,8 @@ abstract class FileBrowserDatabase : RoomDatabase() {
                 MIGRATION_23_24,
                 MIGRATION_24_25,
                 MIGRATION_25_26,
+                MIGRATION_26_27,
+                MIGRATION_27_28,
             )
     }
 }
@@ -312,6 +325,7 @@ data class AccountEntity(
     val publicLinkExpirationSupported: Boolean = false,
     val publicLinkExpirationEnforced: Boolean = false,
     val publicLinkExpirationDays: Int? = null,
+    @ColumnInfo(defaultValue = "0") val removalPending: Boolean = false,
 )
 
 @Entity(
@@ -393,7 +407,7 @@ data class TransferEntity(
     val mimeType: String?,
     val bytesTotal: Long,
     val bytesTransferred: Long = 0,
-    val state: String = TransferState.QUEUED.name,
+    val state: String = TransferState.QUEUED.persistedValue,
     val error: String? = null,
     val workId: String? = null,
     val overwrite: Boolean = false,
@@ -414,7 +428,7 @@ data class TransferEntity(
 
 enum class TransferDirection { UPLOAD, DOWNLOAD }
 
-enum class TransferState { QUEUED, RUNNING, RETRY, CONFLICT, AWAITING_UNLOCK, SUCCEEDED, FAILED, CANCELLED }
+typealias TransferState = eu.opencloud.android.next.core.model.TransferState
 
 @Entity(
     tableName = "folder_backups",
@@ -465,6 +479,21 @@ data class ShareEntity(
 
 @Dao
 interface AccountDao {
+    @Query("SELECT * FROM accounts WHERE removalPending = 1")
+    suspend fun pendingRemovals(): List<AccountEntity>
+
+    @Query("SELECT COUNT(*) FROM accounts WHERE removalPending = 1")
+    fun observePendingRemovalCount(): Flow<Int>
+
+    @Query("SELECT * FROM accounts WHERE id = :accountId LIMIT 1")
+    suspend fun stored(accountId: String): AccountEntity?
+
+    @Query("UPDATE accounts SET removalPending = 1, isActive = 0 WHERE id = :accountId")
+    suspend fun markRemoving(accountId: String)
+
+    @Query("SELECT * FROM accounts")
+    suspend fun all(): List<AccountEntity>
+
     @Query("SELECT id FROM accounts")
     suspend fun allIds(): List<String>
 
@@ -527,6 +556,9 @@ interface ResourceDao {
     @androidx.room.RawQuery
     suspend fun directoryRows(query: androidx.sqlite.db.SupportSQLiteQuery): List<ResourceDirectoryRow>
 
+    @androidx.room.RawQuery
+    suspend fun collectionRows(query: androidx.sqlite.db.SupportSQLiteQuery): List<ResourceCollectionRow>
+
     @Query(
         "UPDATE resources SET path = :newPath || substr(path, length(:oldPath) + 1) " +
             "WHERE accountId = :accountId AND spaceId = :spaceId " +
@@ -562,6 +594,9 @@ interface ResourceDao {
         "SELECT r.* FROM resources r JOIN spaces s ON s.accountId = r.accountId AND s.driveId = r.spaceId " +
             "JOIN accounts a ON a.id = r.accountId WHERE r.accountId = :accountId AND a.isActive = 1 " +
             "AND s.isDisabled = 0 AND s.isDeleted = 0 AND instr(lower(r.name), lower(:query)) > 0 " +
+            "AND NOT EXISTS (SELECT 1 FROM vault_exclusions v WHERE v.accountId = r.accountId " +
+            "AND v.spaceId = r.spaceId AND (v.path = '' OR v.path = rtrim(r.path, '/') " +
+            "OR substr(r.path, 1, length(v.path) + 1) = v.path || '/')) " +
             "ORDER BY r.spaceId, r.remoteId LIMIT 100",
     )
     suspend fun providerSearch(
@@ -650,7 +685,11 @@ interface ResourceDao {
     ): List<ResourceEntity>
 
     @Query(
-        "SELECT COUNT(*) FROM resources WHERE accountId = :accountId AND spaceId = :spaceId AND parentId IS :parentId",
+        "SELECT COUNT(*) FROM resources r WHERE accountId = :accountId AND spaceId = :spaceId " +
+            "AND parentId IS :parentId " +
+            "AND NOT EXISTS (SELECT 1 FROM vault_exclusions v WHERE v.accountId = r.accountId " +
+            "AND v.spaceId = r.spaceId AND (v.path = '' OR v.path = rtrim(r.path, '/') " +
+            "OR substr(r.path, 1, length(v.path) + 1) = v.path || '/')) ",
     )
     suspend fun countChildren(
         accountId: String,
@@ -659,7 +698,10 @@ interface ResourceDao {
     ): Int
 
     @Query(
-        "SELECT * FROM resources WHERE accountId = :accountId AND spaceId = :spaceId AND parentId IS :parentId " +
+        "SELECT r.* FROM resources r WHERE accountId = :accountId AND spaceId = :spaceId AND parentId IS :parentId " +
+            "AND NOT EXISTS (SELECT 1 FROM vault_exclusions v WHERE v.accountId = r.accountId " +
+            "AND v.spaceId = r.spaceId AND (v.path = '' OR v.path = rtrim(r.path, '/') " +
+            "OR substr(r.path, 1, length(v.path) + 1) = v.path || '/')) " +
             "ORDER BY CASE kind WHEN 'FOLDER' THEN 0 ELSE 1 END, name COLLATE NOCASE, remoteId LIMIT 128 OFFSET :offset",
     )
     suspend fun childrenPage(
@@ -762,8 +804,6 @@ interface ResourceDao {
     suspend fun deleteForAccount(accountId: String)
 }
 
-private val PENDING_TRANSFER_STATES = setOf("QUEUED", "RUNNING", "RETRY")
-
 @Dao
 interface TransferDao {
     @Query(
@@ -818,7 +858,7 @@ interface TransferDao {
         val current = findById(expected.id)
         if (current == null ||
             current != expected ||
-            current.state !in setOf("FAILED", "CANCELLED", "CONFLICT", "RETRY")
+            !current.typedState.allowsExplicitRetry
         ) {
             return null
         }
@@ -851,12 +891,17 @@ interface TransferDao {
         val current = findById(id)
         val ownedByAnotherWorker = current?.workId != null && current.workId != workerId
         if (current == null ||
-            current.state !in PENDING_TRANSFER_STATES ||
+            !current.typedState.isRunnable ||
             ownedByAnotherWorker
         ) {
             return null
         }
-        val running = current.copy(state = TransferState.RUNNING.name, workId = workerId, updatedAtEpochMillis = now)
+        val running =
+            current.copy(
+                state = TransferState.RUNNING.persistedValue,
+                workId = workerId,
+                updatedAtEpochMillis = now,
+            )
         val blocked =
             current.direction == "UPLOAD" &&
                 uploadDestinationBusy(
@@ -869,7 +914,7 @@ interface TransferDao {
             // This worker has not started network I/O. Release its persisted RUNNING marker
             // so overlapping intents left by an older process cannot wait on each other forever.
             if (current.state == TransferState.RUNNING.name) {
-                update(current.copy(state = TransferState.RETRY.name, updatedAtEpochMillis = now))
+                update(current.copy(state = TransferState.RETRY.persistedValue, updatedAtEpochMillis = now))
             }
             null
         } else {
@@ -881,12 +926,8 @@ interface TransferDao {
     @Transaction
     suspend fun updateActive(transfer: TransferEntity): Boolean {
         val current = findById(transfer.id)
-        if (current == null ||
-            current.state !in PENDING_TRANSFER_STATES ||
-            current.workId != transfer.workId
-        ) {
-            return false
-        }
+        val owned = current?.typedState?.isRunnable == true && current.workId == transfer.workId
+        if (transfer.typedState == TransferState.UNKNOWN || !owned) return false
         update(transfer)
         return true
     }
@@ -899,7 +940,7 @@ interface TransferDao {
     ): Boolean {
         val current = findById(transfer.id)
         if (current == null ||
-            current.state !in PENDING_TRANSFER_STATES ||
+            !current.typedState.isRunnable ||
             current.workId != transfer.workId
         ) {
             return false
@@ -918,6 +959,15 @@ interface TransferDao {
 
     @Query("SELECT * FROM transfers WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): TransferEntity?
+
+    @Query(
+        "SELECT t.* FROM transfers t JOIN accounts a ON a.id = t.accountId " +
+            "WHERE t.accountId = :account AND t.id = :id AND a.isActive = 1 LIMIT 1",
+    )
+    fun observeById(
+        account: String,
+        id: String,
+    ): Flow<TransferEntity?>
 
     @Query("SELECT * FROM transfers WHERE state IN ('QUEUED', 'RUNNING', 'RETRY')")
     suspend fun findPending(): List<TransferEntity>
@@ -1081,7 +1131,7 @@ interface ShareDao {
 }
 
 class FileBrowserStore(
-    private val database: FileBrowserDatabase,
+    internal val database: FileBrowserDatabase,
 ) {
     suspend fun favoriteCursor(accountId: String): FavoriteCursorEntity? = database.favoriteCursorDao().find(accountId)
 
@@ -1134,7 +1184,7 @@ class FileBrowserStore(
         account: Account,
         capabilities: ServerCapabilities,
         oidcConfiguration: eu.opencloud.android.next.core.model.auth.OidcConfiguration? = null,
-    ) = database.accountDao().upsert(
+    ) = database.upsertOwnedAccount(
         AccountEntity(
             id = account.id,
             serverUrl = account.serverUrl,
@@ -1205,7 +1255,14 @@ class FileBrowserStore(
         query: String,
     ): Flow<List<ResourceEntity>> = resources.search(accountId, query.toLikePattern())
 
+    fun transferInventory(): TransferInventory = TransferInventory(database)
+
     fun observeTransfers(accountId: String): Flow<List<TransferEntity>> = transfers.observeForAccount(accountId)
+
+    fun observeTransfer(
+        accountId: String,
+        id: String,
+    ): Flow<TransferEntity?> = transfers.observeById(accountId, id)
 
     fun observeBackups(accountId: String): Flow<List<FolderBackupEntity>> = backups.observeForAccount(accountId)
 
@@ -1276,12 +1333,14 @@ class FileBrowserStore(
     suspend fun retryCiphertextUpload(
         expected: TransferEntity,
         replacement: TransferEntity,
-    ): TransferEntity? = database.retryPreparedCiphertextTransfer(expected, replacement)
+        scope: TransferBulkScope? = null,
+    ): TransferEntity? = database.retryPreparedCiphertextTransfer(expected, replacement, scope)
 
     suspend fun retryTransfer(
         expected: TransferEntity,
         replacement: TransferEntity,
-    ): TransferEntity? = database.retryAllowedTransfer(expected, replacement)
+        scope: TransferBulkScope? = null,
+    ): TransferEntity? = database.retryAllowedTransfer(expected, replacement, scope)
 
     fun observeAwaitingCiphertextDownloads(
         account: String,
@@ -1323,7 +1382,7 @@ class FileBrowserStore(
         now: Long,
     ) = transfers.schedule(transfer, workId, now)
 
-    suspend fun cancelTransfer(id: String) = transfers.cancel(id)
+    suspend fun cancelTransfer(id: String) = database.cancelOwnedTransfer(id)
 
     suspend fun cancelUploadConflicts(
         accountId: String,
@@ -1357,9 +1416,8 @@ class FileBrowserStore(
 
     suspend fun removeAccount(accountId: String) {
         database.withTransaction {
-            database.snapshotVersions.begin(accountId)
-            database.incomingShareVersions.begin(accountId)
-            database.sharedFolderVersions.begin(accountId)
+            database.invalidateAccountScopes(accountId)
+            database.vaultOfflineGroupDao().deleteOwner(accountId)
             database.offlineTraversalDao().deleteAccount(accountId)
             database.favoriteCursorDao().delete(accountId)
             database.pendingDiscoveryDao().deleteAccount(accountId)
@@ -1608,7 +1666,7 @@ class FileBrowserStore(
             true
         }
 
-    suspend fun clearTransferHistory(accountId: String) = transfers.deleteHistory(accountId)
+    suspend fun clearTransferHistory(accountId: String) = database.clearRemovalAwareTransferHistory(accountId)
 
     suspend fun clearTransfers(accountId: String) = transfers.deleteAllForAccount(accountId)
 

@@ -30,12 +30,12 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
@@ -44,6 +44,8 @@ import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.core.network.safeMessage
+import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.sync.SearchRepository
 import eu.opencloud.android.next.core.sync.SearchRepositoryResult
 import eu.opencloud.android.next.core.sync.TransferManager
@@ -146,8 +148,7 @@ class SearchViewModel(
                     mutableState.value =
                         mutableState.value.copy(
                             message =
-                                it.message
-                                    ?: getApplication<Application>().localizedString(R.string.search_action_failed),
+                                it.toOpenCloudError().safeMessage(getApplication<Application>()),
                         )
                 }
         }
@@ -173,7 +174,7 @@ fun SearchRoute(
     modifier: Modifier = Modifier,
     viewModel: SearchViewModel = viewModel(),
 ) {
-    val state by viewModel.state.collectAsState()
+    val state by viewModel.state.collectAsStateWithLifecycle()
     LaunchedEffect(accountId) { viewModel.load(accountId) }
     SearchScreen(
         state = state,

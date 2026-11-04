@@ -59,6 +59,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -70,7 +71,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -118,7 +121,6 @@ fun VaultRoute(
     val activity = remember(context) { context.findComponentActivity() }
     val state by vaultViewModel.state.collectAsStateWithLifecycle()
     val revision = state.lockRevision
-    val uploadSnackbar = rememberVaultUploadSnackbar(state.queuedUploadCount)
     var boundaryRequest by remember(accountId, revision) { mutableStateOf<BoundaryTransferRequest?>(null) }
     val prompts = remember(activity, vaultViewModel) { VaultPromptController(activity, vaultViewModel) }
     VaultRouteLifecycle(
@@ -143,6 +145,7 @@ fun VaultRoute(
     val safLaunchers = rememberVaultSafLaunchers(vaultViewModel)
     val openWith = rememberVaultOpenWith(vaultViewModel, state)
     var scannerLease by remember(accountId, revision) { mutableStateOf<VaultScanLease?>(null) }
+    val uploadSnackbar = rememberVaultUploadSnackbar(state.queuedUploadCount, scannerLease == null)
     var managementLocation by remember(accountId, revision) { mutableStateOf<VaultLocation?>(null) }
 
     fun lockVault() {
@@ -180,10 +183,13 @@ fun VaultRoute(
             onUp = vaultViewModel::up,
             onLock = ::lockVault,
             onRetry = vaultViewModel::retry,
+            onDirectoryPage = vaultViewModel::directoryPage,
+            onShowHidden = vaultViewModel::setShowHidden,
             onAcceptBiometricOffer = {
                 vaultViewModel.acceptBiometricOffer()
                 prompts.showEnrollment(state.selectedTitle.orEmpty())
             },
+            onRememberOnPhone = vaultViewModel::rememberOnPhone,
             onDeclineBiometricOffer = vaultViewModel::declineBiometricOffer,
             onShowRootActions = { managementLocation = vaultViewModel.editTarget(revision) },
             onManageLocation = {
@@ -198,7 +204,9 @@ fun VaultRoute(
             onRemoveOffline = vaultViewModel::removeOfflineCopy,
             onCreateFolder = vaultViewModel::createFolder,
             onLoadDestinationFolders = vaultViewModel::loadDestinationFolders,
-            onOtherLocation = { id, move -> boundaryRequest = vaultViewModel.prepareBoundaryTransfer(id, move) },
+            onBeginDestinationPicker = vaultViewModel::beginDestinationPicker,
+            onDestinationPage = vaultViewModel::destinationPage,
+            onOtherLocation = { id, move -> vaultViewModel.prepareBoundaryTransfer(id, move) { boundaryRequest = it } },
             onResolveTransferConflict = vaultViewModel::resolveTransferConflict,
             onDismissDestinationPicker = vaultViewModel::dismissDestinationPicker,
             onUpload = safLaunchers.upload,
@@ -221,7 +229,7 @@ fun VaultRoute(
             if (state.mode == VaultRouteMode.CONTENTS) vaultViewModel.retry()
         }
     } else {
-        VaultScreen(state, callbacks, uploadSnackbar = uploadSnackbar)
+        VaultScreen(state, callbacks, uploadSnackbar = uploadSnackbar, accountId = accountId)
     }
     boundaryRequest?.let { request ->
         BoundaryDestinationDialog(request, onDismiss = { boundaryRequest = null })
@@ -284,10 +292,11 @@ private fun VaultRouteLifecycle(
 
         fun lock() {
             prompts.cancel()
-            viewModel.lock()
+            viewModel.onDeviceLocked()
         }
         val observer =
             LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_START) viewModel.onRouteStarted()
                 if (event == Lifecycle.Event.ON_STOP) {
                     prompts.cancel()
                     viewModel.onRouteStopped()
@@ -446,11 +455,18 @@ private class VaultPromptController(
 
 /** The route retains notification state while scanner content temporarily replaces the browser. */
 @Composable
-internal fun rememberVaultUploadSnackbar(queuedUploadCount: Long): SnackbarHostState {
+internal fun rememberVaultUploadSnackbar(
+    queuedUploadCount: Long,
+    visible: Boolean = true,
+): SnackbarHostState {
     val snackbar = remember { SnackbarHostState() }
+    var announced by remember { mutableLongStateOf(0L) }
     val message = stringResource(R.string.vault_background_upload_queued)
-    LaunchedEffect(queuedUploadCount) {
-        if (queuedUploadCount > 0) snackbar.showSnackbar(message)
+    LaunchedEffect(queuedUploadCount, visible) {
+        if (visible && queuedUploadCount > announced) {
+            announced = queuedUploadCount
+            snackbar.showSnackbar(message)
+        }
     }
     return snackbar
 }
@@ -464,6 +480,7 @@ fun VaultScreen(
     callbacks: VaultRouteCallbacks,
     modifier: Modifier = Modifier,
     uploadSnackbar: SnackbarHostState = remember { SnackbarHostState() },
+    accountId: String? = null,
 ) {
     val title = vaultTitle(state)
     var confirmForget by remember(
@@ -482,8 +499,13 @@ fun VaultScreen(
     Box(modifier = modifier) {
         Scaffold(
             modifier = Modifier.fillMaxSize(),
-            topBar = { VaultTopBar(title, state, safeCallbacks) },
+            topBar = {
+                VaultTopBar(title, state, safeCallbacks, accountId)
+            },
             snackbarHost = { SnackbarHost(uploadSnackbar) },
+            bottomBar = {
+                if (state.destinationPickerPath == null) VaultPageNavigation(state, callbacks)
+            },
             floatingActionButton = {
                 if (state.destinationPickerPath == null) {
                     VaultFloatingActions(state, callbacks, onCreateFolder = { createFolderDialogVisible = true })
@@ -533,16 +555,59 @@ fun VaultScreen(
         if (state.biometricOfferPending && !state.loading) {
             AlertDialog(
                 onDismissRequest = callbacks.onDeclineBiometricOffer,
-                title = { Text(stringResource(R.string.vault_biometric_offer_title)) },
-                text = { Text(stringResource(R.string.vault_biometric_offer_message)) },
+                title = {
+                    Text(
+                        stringResource(
+                            if (state.phoneRememberOffer) {
+                                R.string.vault_phone_remember_offer_title
+                            } else {
+                                R.string.vault_biometric_offer_title
+                            },
+                        ),
+                    )
+                },
+                text = {
+                    Text(
+                        stringResource(
+                            if (state.phoneRememberOffer) {
+                                R.string.vault_phone_remember_offer_message
+                            } else {
+                                R.string.vault_biometric_offer_message
+                            },
+                        ),
+                    )
+                },
                 confirmButton = {
-                    TextButton(onClick = callbacks.onAcceptBiometricOffer) {
-                        Text(stringResource(R.string.vault_biometric_offer_accept))
+                    TextButton(
+                        onClick =
+                            if (state.phoneRememberOffer) {
+                                callbacks.onRememberOnPhone
+                            } else {
+                                callbacks.onAcceptBiometricOffer
+                            },
+                    ) {
+                        Text(
+                            stringResource(
+                                if (state.phoneRememberOffer) {
+                                    R.string.vault_phone_remember_offer_accept
+                                } else {
+                                    R.string.vault_biometric_offer_accept
+                                },
+                            ),
+                        )
                     }
                 },
                 dismissButton = {
                     TextButton(onClick = callbacks.onDeclineBiometricOffer) {
-                        Text(stringResource(R.string.vault_biometric_offer_decline))
+                        Text(
+                            stringResource(
+                                if (state.phoneRememberOffer) {
+                                    R.string.vault_phone_remember_offer_decline
+                                } else {
+                                    R.string.vault_biometric_offer_decline
+                                },
+                            ),
+                        )
                     }
                 },
                 properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
@@ -605,8 +670,15 @@ private fun VaultTopBar(
     title: String,
     state: VaultRouteState,
     callbacks: VaultRouteCallbacks,
+    accountId: String?,
 ) {
+    val accountDescription =
+        accountId?.let {
+            eu.opencloud.android.next.core.ui
+                .accountIdentityDescription(it)
+        }
     TopAppBar(
+        modifier = Modifier.semantics { accountDescription?.let { contentDescription = it } },
         title = { Text(title) },
         navigationIcon = {
             IconButton(onClick = callbacks.onNavigateBack) {
@@ -652,23 +724,50 @@ private fun VaultStatus(
             }
             if (error.retryable) TextButton(onClick = callbacks.onRetry) { Text(stringResource(R.string.vault_retry)) }
         }
-        if (state.loading) {
-            CircularProgressIndicator()
-            val message =
-                when (state.mode) {
-                    VaultRouteMode.CATALOG -> R.string.vault_catalog_loading
-                    VaultRouteMode.DISCOVERY -> R.string.vault_discovery_loading
-                    VaultRouteMode.UNLOCK -> R.string.vault_unlocking
-                    VaultRouteMode.CONTENTS ->
-                        if (state.preparingUpload) {
-                            R.string.vault_background_upload_preparing
-                        } else {
-                            R.string.vault_contents_loading
-                        }
+        VaultLoadingStatus(state)
+        PhoneSessionNotice(state)
+    }
+}
+
+@Composable
+private fun VaultLoadingStatus(state: VaultRouteState) {
+    val message = state.statusLoadingMessage() ?: return
+    Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm)) {
+        CircularProgressIndicator()
+        Text(stringResource(message))
+    }
+}
+
+private fun VaultRouteState.statusLoadingMessage(): Int? =
+    if (!loading || mode == VaultRouteMode.UNLOCK) {
+        null
+    } else {
+        when (mode) {
+            VaultRouteMode.CATALOG -> R.string.vault_catalog_loading
+            VaultRouteMode.DISCOVERY -> R.string.vault_discovery_loading
+            VaultRouteMode.UNLOCK -> null
+            VaultRouteMode.CONTENTS ->
+                if (preparingUpload) {
+                    R.string.vault_background_upload_preparing
+                } else {
+                    R.string.vault_contents_loading
                 }
-            Text(stringResource(message))
         }
     }
+
+@Composable
+private fun PhoneSessionNotice(state: VaultRouteState) {
+    if (state.loading || (state.mode != VaultRouteMode.UNLOCK && state.mode != VaultRouteMode.CONTENTS)) return
+    val code =
+        when (state.phoneSessionIssueCode) {
+            "US1", "US2", "US3", "US4", "US5", "US6", "US7" -> state.phoneSessionIssueCode
+            else -> null
+        } ?: return
+    Text(
+        stringResource(R.string.vault_phone_session_issue, code),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -706,48 +805,72 @@ private fun UnlockContent(
         state.mode,
         state.lockRevision,
     ) { mutableStateOf(false) }
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm)) {
-        OutlinedTextField(
-            value = password,
-            onValueChange = { password = it },
-            label = { Text(stringResource(R.string.vault_password_label)) },
-            singleLine = true,
-            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
-            trailingIcon = {
-                IconButton(onClick = { passwordVisible = !passwordVisible }, enabled = !state.loading) {
-                    Icon(
-                        if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                        stringResource(
-                            if (passwordVisible) R.string.vault_hide_password else R.string.vault_show_password,
-                        ),
-                    )
-                }
-            },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            enabled = !state.loading,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm),
-            verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+    if (state.loading) {
+        Column(
+            modifier = modifier.fillMaxSize().semantics { liveRegion = LiveRegionMode.Polite },
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm, Alignment.CenterVertically),
         ) {
-            Button(
-                enabled = !state.loading && password.isNotEmpty(),
-                onClick = {
-                    val suppliedPassword = password.toCharArray()
-                    password = ""
-                    passwordVisible = false
-                    callbacks.onUnlock(suppliedPassword)
+            CircularProgressIndicator()
+            Text(
+                stringResource(
+                    if (state.lockingRememberedAccess) {
+                        R.string.vault_locking_remembered_access
+                    } else {
+                        R.string.vault_verifying_key
+                    },
+                ),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+        }
+    } else {
+        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm)) {
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text(stringResource(R.string.vault_password_label)) },
+                singleLine = true,
+                visualTransformation =
+                    if (passwordVisible) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                trailingIcon = {
+                    IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                        Icon(
+                            if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            stringResource(
+                                if (passwordVisible) R.string.vault_hide_password else R.string.vault_show_password,
+                            ),
+                        )
+                    }
                 },
-            ) { Text(stringResource(R.string.vault_unlock_action)) }
-            if (state.biometricEnrolled) {
-                TextButton(onClick = callbacks.onBiometricUnlock, enabled = !state.loading) {
-                    Text(stringResource(R.string.vault_biometric_unlock))
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm),
+                verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+            ) {
+                Button(
+                    enabled = password.isNotEmpty(),
+                    onClick = {
+                        val suppliedPassword = password.toCharArray()
+                        password = ""
+                        passwordVisible = false
+                        callbacks.onUnlock(suppliedPassword)
+                    },
+                ) { Text(stringResource(R.string.vault_unlock_action)) }
+                if (state.biometricEnrolled) {
+                    TextButton(onClick = callbacks.onBiometricUnlock) {
+                        Text(stringResource(R.string.vault_biometric_unlock))
+                    }
                 }
-            }
-            if (state.biometricEnrolled || state.biometricNeedsForget) {
-                TextButton(onClick = callbacks.onForgetBiometric, enabled = !state.loading) {
-                    Text(stringResource(R.string.vault_biometric_forget))
+                if (state.biometricEnrolled || state.biometricNeedsForget) {
+                    TextButton(onClick = callbacks.onForgetBiometric) {
+                        Text(stringResource(R.string.vault_biometric_forget))
+                    }
                 }
             }
         }
@@ -1096,19 +1219,26 @@ enum class VaultRouteError(
     BIOMETRIC(R.string.vault_biometric_unavailable, false),
     BIOMETRIC_SETUP(R.string.vault_biometric_setup_error, false),
     OPERATION(R.string.vault_operation_failed, false),
+    OFFLINE_PREPARATION(R.string.vault_offline_preparation_failed, false),
     LOCAL_STORAGE(eu.opencloud.android.next.core.network.R.string.error_local_storage, false),
     LOCAL_SAVE(eu.opencloud.android.next.core.network.R.string.error_local_storage_write_failed, false),
     SOURCE_UNAVAILABLE(eu.opencloud.android.next.core.network.R.string.error_source_unavailable, false),
     SOURCE_CHANGED(eu.opencloud.android.next.core.network.R.string.error_source_changed, false),
     SOURCE_PERMISSION(eu.opencloud.android.next.core.network.R.string.error_source_permission_denied, false),
     INTEGRITY(eu.opencloud.android.next.core.network.R.string.error_download_integrity, false),
+    SAVED_UNLOCK(eu.opencloud.android.next.core.network.R.string.error_encrypted_unlock_failed, false),
+    OFFLINE_CHANGED(eu.opencloud.android.next.core.network.R.string.error_offline_snapshot_changed, false),
+    OFFLINE_BUSY(eu.opencloud.android.next.core.network.R.string.error_offline_group_busy, false),
     LISTING_TOO_LARGE(eu.opencloud.android.next.core.network.R.string.error_directory_listing_too_large, false),
+    OFFLINE_INDEX_FULL(eu.opencloud.android.next.core.network.R.string.error_encrypted_offline_index_full, false),
     REMOTE_QUOTA(eu.opencloud.android.next.core.network.R.string.error_quota_exceeded, false),
     NAME_CONFLICT(eu.opencloud.android.next.core.network.R.string.error_conflict, false),
     SERVER_BUSY(eu.opencloud.android.next.core.network.R.string.error_rate_limited, false),
     TRANSFER_UNLOCK_REQUIRED(R.string.vault_unlock_to_finish, false),
     EXPORT_FAILED(R.string.vault_export_failed, false),
     BIOMETRIC_CLEANUP(R.string.vault_biometric_cleanup_error, true),
+    PHONE_LOCK_FAILED(R.string.vault_phone_lock_failed, false),
+    PHONE_REMEMBER_FAILED(R.string.vault_phone_remember_failed, false),
 }
 
 data class VaultRouteLocation(
@@ -1148,10 +1278,20 @@ data class VaultRoutePreview(
     val backing: EncryptedPreviewBacking? = null,
 )
 
+data class VaultDirectoryPageState(
+    val offset: Long,
+    val total: Long,
+    val count: Int,
+    val hasPrevious: Boolean,
+) {
+    val hasNext: Boolean get() = offset + count < total
+}
+
 data class VaultRouteState(
     val mode: VaultRouteMode = VaultRouteMode.CATALOG,
     val locations: List<VaultRouteLocation> = emptyList(),
     val entries: List<VaultRouteEntry> = emptyList(),
+    val directoryPage: VaultDirectoryPageState? = null,
     val selectedLocation: VaultRouteLocation? = null,
     val selectedTitle: String? = null,
     val browseTitle: String? = null,
@@ -1159,10 +1299,14 @@ data class VaultRouteState(
     val loading: Boolean = false,
     val error: VaultRouteError? = null,
     val biometricDiagnostic: String? = null,
+    val phoneSessionIssueCode: String? = null,
     val biometricEnrolled: Boolean = false,
     val biometricNeedsForget: Boolean = false,
     val canEnrollBiometric: Boolean = false,
     val biometricOfferPending: Boolean = false,
+    val phoneRememberOffer: Boolean = false,
+    val lockingRememberedAccess: Boolean = false,
+    val allowAutomaticBiometric: Boolean = true,
     val rootActionsVisible: Boolean = false,
     val offline: Boolean = false,
     val offlineCatalog: Boolean = false,
@@ -1173,6 +1317,7 @@ data class VaultRouteState(
     val transferConflict: VaultTransferConflict? = null,
     val destinationPickerPath: String? = null,
     val destinationPickerEntries: List<VaultRouteEntry> = emptyList(),
+    val destinationPickerPage: VaultDirectoryPageState? = null,
     val destinationPickerLoading: Boolean = false,
     val destinationPickerError: VaultRouteError? = null,
     val preparingUpload: Boolean = false,
@@ -1203,8 +1348,12 @@ data class VaultRouteCallbacks(
     val onUp: () -> Unit,
     val onLock: () -> Unit,
     val onRetry: () -> Unit,
+    val onDirectoryPage: (Boolean) -> Unit = {},
+    val onShowHidden: (Boolean) -> Unit = {},
     val onResolveTransferConflict: (Boolean) -> Unit = {},
     val onLoadDestinationFolders: (String) -> Unit = {},
+    val onBeginDestinationPicker: (String, String) -> Unit = { _, path -> onLoadDestinationFolders(path) },
+    val onDestinationPage: (Boolean) -> Unit = {},
     val onOtherLocation: (String, Boolean) -> Unit = { _, _ -> },
     val onDismissDestinationPicker: () -> Unit = {},
     val onShowOffline: () -> Unit = {},
@@ -1216,6 +1365,7 @@ data class VaultRouteCallbacks(
     val onScan: () -> Unit = {},
     val onEntryAction: (String, VaultEntryAction, String?) -> Unit = { _, _, _ -> },
     val onAcceptBiometricOffer: () -> Unit = {},
+    val onRememberOnPhone: () -> Unit = {},
     val onDeclineBiometricOffer: () -> Unit = {},
     val onShowRootActions: () -> Unit = {},
     val onManageLocation: () -> Unit = {},
@@ -1225,13 +1375,36 @@ data class VaultRouteCallbacks(
 )
 
 @Composable
+internal fun VaultPageNavigation(
+    state: VaultRouteState,
+    callbacks: VaultRouteCallbacks,
+) {
+    if (state.mode != VaultRouteMode.CONTENTS) return
+    val picking = state.destinationPickerPath != null
+    val page = if (picking) state.destinationPickerPage else state.directoryPage
+    page?.takeIf { it.hasPrevious || it.hasNext }?.let {
+        val loading = state.loading || picking && state.destinationPickerLoading
+        eu.opencloud.android.next.core.ui.BrowserPageNavigation(
+            eu.opencloud.android.next.core.ui.BrowserPageNavigationState(
+                if (it.total == 0L) 0 else it.offset + 1,
+                it.offset + it.count,
+                it.total,
+                !loading && it.hasPrevious,
+                !loading && it.hasNext,
+            ),
+            if (picking) callbacks.onDestinationPage else callbacks.onDirectoryPage,
+        )
+    }
+}
+
+@Composable
 private fun VaultFloatingActions(
     state: VaultRouteState,
     callbacks: VaultRouteCallbacks,
     onCreateFolder: () -> Unit,
 ) {
-    var addActionsExpanded by remember(state.lockRevision) { mutableStateOf(false) }
-    if (state.mode == VaultRouteMode.CONTENTS && !state.offline) {
+    var addActionsExpanded by remember(state.lockRevision, state.destinationPickerPath) { mutableStateOf(false) }
+    if (state.mode == VaultRouteMode.CONTENTS && !state.offline && state.destinationPickerPath == null) {
         Column(
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm),

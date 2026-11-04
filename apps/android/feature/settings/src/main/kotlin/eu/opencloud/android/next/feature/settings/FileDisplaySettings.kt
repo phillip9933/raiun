@@ -105,7 +105,12 @@ internal fun TemporaryCleanupButton(onClear: () -> Unit) {
                 TextButton(onClick = {
                     confirm = false
                     onClear()
-                }) { Text(stringResource(R.string.settings_clear_temporary_copies)) }
+                }) {
+                    Text(
+                        stringResource(R.string.settings_clear_temporary_copies),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             },
             dismissButton = {
                 TextButton(onClick = { confirm = false }) { Text(stringResource(R.string.settings_cancel)) }

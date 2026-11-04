@@ -10,7 +10,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -26,6 +25,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.datastore.FileDisplayOptions
+import eu.opencloud.android.next.core.designsystem.component.HorizontalDivider
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.model.resourceCacheDirectory

@@ -24,7 +24,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +43,7 @@ import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.R
 import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
 import eu.opencloud.android.next.core.datastore.SettingsRepository
@@ -52,6 +52,8 @@ import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.ui.BrowserContent
 import eu.opencloud.android.next.core.ui.BrowserEntry
+import eu.opencloud.android.next.core.ui.BrowserPageNavigation
+import eu.opencloud.android.next.core.ui.BrowserPageNavigationState
 import eu.opencloud.android.next.core.ui.BrowserPlacementBar
 import eu.opencloud.android.next.core.ui.BrowserPlacementBarState
 import eu.opencloud.android.next.core.ui.FileNameConflictDialog
@@ -64,11 +66,16 @@ import eu.opencloud.android.next.core.ui.FileNameConflictDialog
 internal fun BoundaryDestinationDialog(
     request: BoundaryTransferRequest,
     onDismiss: () -> Unit,
+    suppliedController: BoundaryDestinationController? = null,
 ) {
     val context = LocalContext.current
-    val controller = remember(request) { BoundaryDestinationController(context.applicationContext, request) }
-    val state by controller.state.collectAsState()
-    val settings by remember(context) { SettingsRepository.create(context).settings }.collectAsState(UserSettings())
+    val controller =
+        suppliedController
+            ?: remember(request) { BoundaryDestinationController(context.applicationContext, request) }
+    val state by controller.state.collectAsStateWithLifecycle()
+    val settings by remember(context) {
+        SettingsRepository.create(context).settings
+    }.collectAsStateWithLifecycle(UserSettings())
     val currentDismiss by rememberUpdatedState(onDismiss)
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var disclosePlaintext by remember { mutableStateOf(false) }
@@ -113,6 +120,7 @@ internal fun BoundaryDestinationDialog(
                     TextButton(onClick = onDismiss) { Text(stringResource(R.string.boundary_close)) }
                 } else {
                     BoundaryDestinationItems(state, settings.browserLayout, controller, Modifier.weight(1f))
+                    BoundaryDestinationPageBar(state, controller::page)
                     if (state.location != null && state.unlock == null) {
                         BoundaryPlacementFooter(state, request, onCancel = dismiss) {
                             if (state.plaintextWarning) disclosePlaintext = true else controller.transfer()
@@ -231,14 +239,15 @@ private fun BoundaryDestinationItems(
     } else {
         BrowserContent(state.folders, key = { it.id }, layout = layout, modifier = modifier, notice = {
             if (!state.loading &&
-                state.folders.isEmpty()
+                state.folders.isEmpty() &&
+                state.targetValidated
             ) {
                 Text(stringResource(R.string.boundary_empty), Modifier.padding(OpenCloudDimensions.SpacingMd))
             }
         }) { folder ->
             BoundaryDestinationRow(
                 folder.name,
-                folder.vault != null,
+                folder.isVaultRoot,
                 layout,
                 enabled =
                     !state.loading && !state.transferring,
@@ -274,6 +283,25 @@ private fun BoundaryDestinationRow(
 }
 
 @Composable
+private fun BoundaryDestinationPageBar(
+    state: BoundaryDestinationState,
+    onPage: (Boolean) -> Unit,
+) {
+    state.page?.takeIf { it.hasPrevious || it.hasNext }?.let { page ->
+        BrowserPageNavigation(
+            BrowserPageNavigationState(
+                if (page.total == 0L) 0 else page.offset + 1,
+                page.offset + page.count,
+                page.total,
+                !state.loading && !state.transferring && page.hasPrevious,
+                !state.loading && !state.transferring && page.hasNext,
+            ),
+            onPage,
+        )
+    }
+}
+
+@Composable
 private fun BoundaryPlacementFooter(
     state: BoundaryDestinationState,
     request: BoundaryTransferRequest,
@@ -298,7 +326,7 @@ private fun BoundaryPlacementFooter(
                 actionLabel = if (request.move) R.string.boundary_move_here else R.string.boundary_copy_here,
                 cancelLabel = R.string.boundary_cancel,
                 busy = state.loading || state.transferring,
-                enabled = state.error == null && !state.transferring,
+                enabled = state.targetValidated && state.error == null && !state.transferring,
             ),
         onPlace = onPlace,
         onCancel = onCancel,

@@ -5,13 +5,15 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import eu.opencloud.android.next.core.database.AccountEntity
+import eu.opencloud.android.next.core.database.AccountRemovalAdmission
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
+import eu.opencloud.android.next.core.database.isAccountRemovalPending
+import eu.opencloud.android.next.core.database.storedAccountForAdmission
 import eu.opencloud.android.next.core.datastore.SettingsRepository
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.model.auth.AuthTokens
 import eu.opencloud.android.next.core.model.auth.AuthenticationType
-import eu.opencloud.android.next.core.model.auth.NEXT_OIDC_REDIRECT_URI
 import eu.opencloud.android.next.core.model.auth.OidcConfiguration
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.safeMessage
@@ -26,6 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.security.cert.CertificateException
@@ -147,44 +150,39 @@ class AuthViewModel(
 
     fun completeOidcCallback(callback: String) =
         launchAuth {
-            val callbackUri = android.net.Uri.parse(callback)
-            require(
-                callbackUri.scheme == NEXT_OIDC_REDIRECT_URI.substringBefore("://") &&
-                    callbackUri.authority == "oauth",
-            )
-            require(callbackUri.path.isNullOrEmpty() && callbackUri.fragment == null)
-            val states = callbackUri.getQueryParameters("state")
-            require(states.size == 1 && states.single().isNotBlank())
-            val pending = credentialStore.consumePendingLogin(states.single(), System.currentTimeMillis())
-            if (pending == null) {
-                mutableState.value =
-                    mutableState.value.copy(
-                        isLoading = false,
-                        error =
-                            getApplication<Application>().localizedString(R.string.auth_oidc_session_expired),
-                    )
-                return@launchAuth
+            val result =
+                processOidcCallback(
+                    callback,
+                    consumePending = { state ->
+                        credentialStore.consumePendingLogin(state, System.currentTimeMillis())
+                    },
+                    exchange = { pending, code ->
+                        repository = repositoryFor(pending.serverUrl)
+                        mutableState.value =
+                            mutableState.value.copy(isLoading = true, error = null, serverUrl = pending.serverUrl)
+                        repository.completePkce(
+                            pending.serverUrl,
+                            pending.configuration,
+                            code,
+                            pending.request.codeVerifier,
+                        )
+                    },
+                )
+            when (result) {
+                OidcCallbackResult.Expired ->
+                    mutableState.value =
+                        mutableState.value.copy(
+                            isLoading = false,
+                            error = getApplication<Application>().localizedString(R.string.auth_oidc_session_expired),
+                        )
+                OidcCallbackResult.Rejected ->
+                    mutableState.value =
+                        mutableState.value.copy(
+                            isLoading = false,
+                            error = getApplication<Application>().localizedString(R.string.auth_sign_in_cancelled),
+                        )
+                is OidcCallbackResult.Completed -> setSession(result.value)
             }
-            val codes = callbackUri.getQueryParameters("code")
-            if (callbackUri.getQueryParameter("error") != null || codes.size != 1 || codes.single().isBlank()) {
-                mutableState.value =
-                    mutableState.value.copy(
-                        isLoading = false,
-                        error =
-                            getApplication<Application>().localizedString(R.string.auth_sign_in_cancelled),
-                    )
-                return@launchAuth
-            }
-            repository = repositoryFor(pending.serverUrl)
-            mutableState.value = mutableState.value.copy(isLoading = true, error = null, serverUrl = pending.serverUrl)
-            setSession(
-                repository.completePkce(
-                    pending.serverUrl,
-                    pending.configuration,
-                    codes.single(),
-                    pending.request.codeVerifier,
-                ),
-            )
         }
 
     fun approveCertificatePin(pin: String) {
@@ -212,6 +210,10 @@ class AuthViewModel(
             credentialStore,
             eu.opencloud.android.next.core.security.AccountSessions
                 .get(getApplication()),
+            canSaveAccount = { id -> runBlocking { !fileStore.isAccountRemovalPending(id) } },
+            savedAccountIdentity = { id ->
+                runBlocking { fileStore.storedAccountForAdmission(id)?.let { it.serverUrl to it.userId } }
+            },
         )
     }
 
@@ -245,7 +247,7 @@ class AuthViewModel(
     private fun launchAuth(block: suspend () -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                block()
+                AccountRemovalAdmission.withLock { block() }
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
@@ -282,7 +284,7 @@ enum class AuthenticationMode {
 internal fun Throwable.toAuthError(): String =
     toAuthError(
         "The secure connection failed. Check the server certificate and any required client certificate " +
-            "in Server connection settings.",
+            "in Wi-Fi & certificates settings.",
     )
 
 internal fun Throwable.toAuthError(
@@ -290,6 +292,10 @@ internal fun Throwable.toAuthError(
     certificateErrorMessage: String,
 ): String =
     when {
+        this is AccountRemovalPendingException ->
+            context.localizedString(R.string.auth_account_cleanup_pending)
+        this is OidcCallbackIssuerException ->
+            context.localizedString(R.string.auth_oidc_issuer_unverified)
         toOpenCloudError() == eu.opencloud.android.next.core.network.OpenCloudError.ClientCertificateRequired ->
             toOpenCloudError().safeMessage(context)
         this is SSLHandshakeException || cause is SSLHandshakeException || cause is CertificateException ->
@@ -300,6 +306,10 @@ internal fun Throwable.toAuthError(
 
 internal fun Throwable.toAuthError(certificateErrorMessage: String): String =
     when {
+        this is AccountRemovalPendingException ->
+            "Account cleanup is still pending on this phone. " +
+                "Open Accounts to check cleanup before signing in again."
+        this is OidcCallbackIssuerException -> "The sign-in issuer could not be verified."
         toOpenCloudError() == eu.opencloud.android.next.core.network.OpenCloudError.ClientCertificateRequired ->
             toOpenCloudError().safeMessage()
         this is SSLHandshakeException || cause is SSLHandshakeException || cause is CertificateException ->

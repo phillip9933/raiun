@@ -57,6 +57,81 @@ class BoundaryManifestTest {
         assertEquals(initial, spillFiles())
     }
 
+    @Test fun `snapshot child proof checks exact descriptors and complete frozen membership`() =
+        runBlocking {
+            val context = RuntimeEnvironment.getApplication()
+            val children =
+                (0 until 257).map { number ->
+                    BoundaryEntry(
+                        "child-$number",
+                        "SecretFolder/file-$number",
+                        "file-$number",
+                        false,
+                        3,
+                        "\"v1\"",
+                        "text/plain",
+                    )
+                }
+            BoundaryManifest(context).use { manifest ->
+                manifest.add(null, source, target)
+                children.forEach { child ->
+                    manifest.add(1, child, child.copy(id = "target-${child.id}", path = "Ordinary/${child.path}"))
+                }
+                captureBoundaryDirectory(context, source.path, guard = {}) { emit -> children.forEach(emit) }.use {
+                    manifest.requireChildren(1, it)
+                }
+                val changed =
+                    children.mapIndexed { index, child ->
+                        if (index == 200) child.copy(mimeType = "changed") else child
+                    }
+                captureBoundaryDirectory(context, source.path, guard = {}) { emit ->
+                    changed.forEach(emit)
+                }.use { snapshot ->
+                    val failure =
+                        assertThrows(OpenCloudException::class.java) {
+                            runBlocking { manifest.requireChildren(1, snapshot) }
+                        }
+                    assertEquals(OpenCloudError.PreconditionFailed, failure.error)
+                }
+                captureBoundaryDirectory(context, source.path, guard = {}) { emit ->
+                    children.forEach(emit)
+                    emit(children.first().copy(id = "extra", path = "SecretFolder/extra", name = "extra"))
+                }.use { snapshot ->
+                    val failure =
+                        assertThrows(OpenCloudException::class.java) {
+                            runBlocking { manifest.requireChildren(1, snapshot) }
+                        }
+                    assertEquals(OpenCloudError.PreconditionFailed, failure.error)
+                }
+            }
+        }
+
+    @Test fun `empty child proof refuses a revoked or closed operation snapshot`() =
+        runBlocking {
+            val context = RuntimeEnvironment.getApplication()
+            BoundaryManifest(context).use { manifest ->
+                manifest.add(null, source, target)
+                var allowed = true
+                captureBoundaryDirectory(context, source.path, guard = {
+                    if (!allowed) throw OpenCloudException(OpenCloudError.AccessDenied)
+                }) { }.use { empty ->
+                    allowed = false
+                    val failure =
+                        assertThrows(OpenCloudException::class.java) {
+                            runBlocking { manifest.requireChildren(1, empty) }
+                        }
+                    assertEquals(OpenCloudError.AccessDenied, failure.error)
+                }
+                val closed = captureBoundaryDirectory(context, source.path, guard = {}) { }
+                closed.close()
+                val failure =
+                    assertThrows(OpenCloudException::class.java) {
+                        runBlocking { manifest.requireChildren(1, closed) }
+                    }
+                assertEquals(OpenCloudError.PreconditionFailed, failure.error)
+            }
+        }
+
     private fun spillFiles(): Set<File> =
         RuntimeEnvironment
             .getApplication()

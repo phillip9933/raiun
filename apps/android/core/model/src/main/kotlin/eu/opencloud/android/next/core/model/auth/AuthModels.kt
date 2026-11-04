@@ -35,6 +35,7 @@ data class ServerCapabilities(
     val publicLinkExpirationEnforced: Boolean = false,
     val publicLinkExpirationDays: Int? = null,
     val appProviders: List<ServerAppProvider> = emptyList(),
+    val guestLinksEnabled: Boolean = false,
 )
 
 /** Advertised endpoints only; consumers must validate them before sending credentials. */
@@ -51,6 +52,7 @@ data class OidcConfiguration(
     val registrationEndpoint: String?,
     val clientId: String?,
     val scopes: List<String>,
+    val authorizationResponseIssParameterSupported: Boolean = false,
 )
 
 data class WebFingerMetadata(
@@ -65,10 +67,14 @@ data class AuthTokens(
     val expiresAtEpochSeconds: Long,
     val tokenType: String,
     val scope: String?,
-)
+) {
+    override fun toString(): String = "AuthTokens([REDACTED])"
+}
 
 data class PkceRequest(
     val authorizationUrl: String,
     val state: String,
     val codeVerifier: String,
-)
+) {
+    override fun toString(): String = "PkceRequest([REDACTED])"
+}

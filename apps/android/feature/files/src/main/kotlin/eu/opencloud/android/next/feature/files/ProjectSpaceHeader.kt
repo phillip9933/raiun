@@ -24,13 +24,13 @@ internal fun ProjectSpaceHeader(
     trail: List<FolderCrumb>,
     onShowSpaces: () -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = OpenCloudDimensions.SpacingMd),
             horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Default.Apps, contentDescription = null)
+            Icon(Icons.Default.Apps, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
             Column(Modifier.weight(1f).padding(vertical = OpenCloudDimensions.SpacingSm)) {
                 Text(stringResource(R.string.browser_project_space, name), style = MaterialTheme.typography.titleSmall)
                 if (trail.isNotEmpty()) {

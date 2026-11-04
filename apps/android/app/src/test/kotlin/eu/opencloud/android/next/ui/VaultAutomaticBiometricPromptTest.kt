@@ -30,4 +30,15 @@ class VaultAutomaticBiometricPromptTest {
         assertFalse(prompt.consumeIfReady(enrolled.copy(mode = VaultRouteMode.CONTENTS), resumed = true))
         assertFalse(prompt.consumeIfReady(enrolled, resumed = true))
     }
+
+    @Test fun explicitLockDisablesAutomaticBiometricUntilPasswordUnlock() {
+        val prompt = VaultAutomaticBiometricPrompt()
+        val explicitLockPending =
+            enrolled.copy(
+                lockingRememberedAccess = true,
+                allowAutomaticBiometric = false,
+            )
+        assertFalse(prompt.consumeIfReady(explicitLockPending, resumed = true))
+        assertFalse(prompt.consumeIfReady(explicitLockPending.copy(loading = false), resumed = true))
+    }
 }

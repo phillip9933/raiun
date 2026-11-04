@@ -10,22 +10,33 @@ import androidx.work.ForegroundInfo
 import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.model.auth.OidcConfiguration
 import eu.opencloud.android.next.core.network.OpenCloudApi
+import eu.opencloud.android.next.core.network.bearerAuthorizationHeader
+import eu.opencloud.android.next.core.security.AccountSessions
+import eu.opencloud.android.next.core.security.CredentialStore
 import eu.opencloud.android.next.core.security.KeystoreCredentialStore
 import eu.opencloud.android.next.core.security.TlsPolicy
 import okhttp3.Credentials
 import okhttp3.OkHttpClient
 
-class WorkerAuthorizationProvider(
+class WorkerAuthorizationProvider internal constructor(
     private val context: Context,
+    private val credentials: CredentialStore,
+    private val sessions: AccountSessions,
 ) {
+    constructor(context: Context) :
+        this(
+            context,
+            KeystoreCredentialStore(context),
+            AccountSessions.get(context),
+        )
+
     fun authorization(account: AccountEntity): String {
-        val credentials = KeystoreCredentialStore(context)
         if (account.authenticationType == "BASIC") {
             val username = credentials.readBasicUsername(account.id) ?: account.userId
             return Credentials.basic(username, requireNotNull(credentials.readBasicPassword(account.id)))
         }
         val usable =
-            eu.opencloud.android.next.core.security.AccountSessions.get(context).tokens(account.id) { current ->
+            sessions.tokens(account.id) { current ->
                 val binding =
                     credentials.readClientRegistration("account:${account.id}")
                         ?: throw eu.opencloud.android.next.core.network.OpenCloudException(
@@ -39,7 +50,7 @@ class WorkerAuthorizationProvider(
                         eu.opencloud.android.next.core.network.OpenCloudError.AuthenticationRequired,
                     )
                 }
-                val api = OpenCloudApi(TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl))
+                val api = OpenCloudApi(TlsPolicy(context).applyTo(refreshClient, account.serverUrl))
                 api.refresh(
                     OidcConfiguration(
                         binding.issuer,
@@ -52,7 +63,12 @@ class WorkerAuthorizationProvider(
                     requireNotNull(current.refreshToken),
                 )
             }
-        return "${usable.tokenType} ${usable.accessToken}"
+        return usable.bearerAuthorizationHeader()
+    }
+
+    private companion object {
+        // Refresh traffic shares a pool only with refresh traffic, never transfer cancellation dispatchers.
+        val refreshClient: OkHttpClient = OkHttpClient.Builder().build()
     }
 }
 

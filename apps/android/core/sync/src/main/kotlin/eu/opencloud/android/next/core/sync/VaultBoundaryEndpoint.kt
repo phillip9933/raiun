@@ -1,5 +1,6 @@
 package eu.opencloud.android.next.core.sync
 
+import android.content.Context
 import eu.opencloud.android.next.core.network.DownloadExpectation
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
@@ -10,7 +11,7 @@ import java.io.OutputStream
 /** Transformations always pass through the unlocked session's authenticated content streams. */
 class VaultBoundaryEndpoint(
     private val session: VaultSession,
-    private val location: VaultLocation,
+    location: VaultLocation,
 ) : BoundaryEndpoint {
     override val identity =
         listOf(
@@ -37,7 +38,7 @@ class VaultBoundaryEndpoint(
     override suspend fun physicalPath(path: String): String =
         withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
             listOf(
-                location.vaultPath.trim('/'),
+                session.location.vaultPath.trim('/'),
                 session.encodeDirectoryPath(path),
             ).filter(String::isNotEmpty).joinToString("/")
         }
@@ -50,8 +51,42 @@ class VaultBoundaryEndpoint(
             }
         }
 
+    override suspend fun openDirectory(
+        context: Context,
+        path: String,
+    ): BoundaryDirectorySnapshot =
+        withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
+            session.openBoundaryDirectory(context, path)
+        }
+
+    override suspend fun openNameIndex(
+        context: Context,
+        path: String,
+    ): BoundaryNameIndex =
+        withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
+            session.openBoundaryNames(context, path)
+        }
+
+    override suspend fun openDestinationFolders(
+        context: Context,
+        path: String,
+    ): BoundaryDestinationSnapshot =
+        withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
+            session.openBoundaryDestinationFolders(context, path)
+        }
+
+    override suspend fun containsName(
+        path: String,
+        name: String,
+    ): Boolean =
+        withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
+            session.hasBoundaryChild(path, name)
+        }
+
     override suspend fun requireUnchanged(entry: BoundaryEntry) {
-        withBoundaryRequestCancellation(session::cancelBoundaryRequests) { find(entry) }
+        withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
+            session.withBoundaryEntry(entry) { Unit }
+        }
     }
 
     override suspend fun read(
@@ -59,13 +94,10 @@ class VaultBoundaryEndpoint(
         sink: OutputStream,
     ) {
         withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
-            val remote = find(entry)
-            if (DownloadExpectation(entry.size, entry.version).strongETag ==
-                null
-            ) {
+            if (DownloadExpectation(entry.size, entry.version).strongETag == null) {
                 throw OpenCloudException(OpenCloudError.PreconditionFailed)
             }
-            session.download(remote, sink, Long.MAX_VALUE)
+            session.readBoundary(entry, sink)
         }
     }
 
@@ -79,7 +111,7 @@ class VaultBoundaryEndpoint(
         withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
             childPath(parent, name)
             // Conditional create protects races; a pre-upload list would invalidate a concurrently issued source token.
-            session.upload(parent, name, source, size, mimeType).asBoundaryEntry()
+            session.uploadBoundary(parent, name, source, size, mimeType).asBoundaryEntry()
         }
 
     override suspend fun createDirectory(
@@ -88,36 +120,34 @@ class VaultBoundaryEndpoint(
     ): BoundaryEntry =
         withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
             childPath(parent, name)
-            if (list(parent).any { it.name == name }) throw OpenCloudException(OpenCloudError.Conflict)
+            if (session.hasBoundaryChild(parent, name)) throw OpenCloudException(OpenCloudError.Conflict)
             session.createFolder(parent, name).asBoundaryEntry()
         }
 
     override suspend fun delete(entry: BoundaryEntry) {
         withBoundaryRequestCancellation(session::cancelBoundaryRequests) {
-            val current = find(entry)
-            if (entry.directory &&
-                list(entry.path).isNotEmpty()
-            ) {
-                throw OpenCloudException(OpenCloudError.PreconditionFailed)
+            session.withBoundaryEntry(entry) { current ->
+                if (entry.directory && session.hasBoundaryChild(entry.path)) {
+                    throw OpenCloudException(OpenCloudError.PreconditionFailed)
+                }
+                if (entry.directory) {
+                    // Reissue only the SAME version captured before the complete empty proof.
+                    session.withBoundaryEntry(current.asBoundaryEntry()) { issued ->
+                        if (issued.strongETag != current.strongETag) {
+                            throw OpenCloudException(OpenCloudError.PreconditionFailed)
+                        }
+                        session.delete(issued)
+                    }
+                } else {
+                    session.delete(current)
+                }
             }
-            // Listing clears issued tokens. Reissue only the SAME version proved before the empty listing.
-            val issued = if (entry.directory) find(entry) else current
-            if (issued.strongETag != current.strongETag) throw OpenCloudException(OpenCloudError.PreconditionFailed)
-            session.delete(issued)
-            if (session
-                    .list(
-                        entry.path.substringBeforeLast('/', ""),
-                    ).any { it.path.trim('/') == entry.path.trim('/') }
-            ) {
+            val parent = entry.path.substringBeforeLast('/', "")
+            if (session.hasBoundaryChild(parent, entry.name)) {
                 throw OpenCloudException(OpenCloudError.PreconditionFailed)
             }
         }
     }
-
-    private suspend fun find(expected: BoundaryEntry): VaultFolder =
-        session.list(expected.path.substringBeforeLast('/', "")).singleOrNull {
-            !it.isVaultRoot && sameBoundaryEntry(expected, it.asBoundaryEntry())
-        } ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
 }
 
 fun VaultFolder.asBoundaryEntry(): BoundaryEntry =

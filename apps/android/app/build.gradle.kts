@@ -24,6 +24,9 @@ plugins {
     alias(libs.plugins.roborazzi)
 }
 
+// Deliberately absent from ordinary builds: this candidate is for disposable native validation.
+val r8ValidationEnabled = providers.gradleProperty("raiun.r8Validation").map { it.toBooleanStrict() }.getOrElse(false)
+
 android {
     namespace = "eu.opencloud.android.next"
     compileSdk =
@@ -43,8 +46,8 @@ android {
                 .toInt()
         // The scanner SDK ships native processing for 64-bit Android only.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
-        versionCode = 49
-        versionName = "1.2.0"
+        versionCode = 53
+        versionName = "1.3.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEV_SERVER_URL", "\"\"")
@@ -66,6 +69,18 @@ android {
                 "proguard-rules.pro",
             )
         }
+        if (r8ValidationEnabled) {
+            create("r8Validation") {
+                initWith(getByName("release"))
+                matchingFallbacks += "release"
+                signingConfig = signingConfigs.getByName("debug")
+                isDebuggable = false
+                isMinifyEnabled = true
+                isShrinkResources = true
+                versionNameSuffix = "-r8-validation"
+                testProguardFiles("r8-validation-test-rules.pro")
+            }
+        }
     }
 
     compileOptions {
@@ -86,8 +101,14 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
+    if (r8ValidationEnabled) testBuildType = "r8Validation"
 
     sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("generated/updater-test-assets"))
+    sourceSets
+        .getByName(
+            "androidTest",
+        ).assets
+        .srcDir(layout.buildDirectory.dir("generated/share-provenance-test-assets"))
 }
 
 // Match synthetic verifier fixtures to this build's disposable default debug key.
@@ -141,8 +162,49 @@ val generateUpdaterTestApks =
             output.get().asFile.absolutePath,
         )
     }
-tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
-    dependsOn(generateUpdaterTestApks)
+// Separate external sender/provider APK; never included in the shipped application.
+val generateShareProvenanceFixtureApk =
+    tasks.register<Exec>("generateShareProvenanceFixtureApk") {
+        group = "verification"
+        description = "Generates an isolated external sender/provider fixture for URI provenance tests."
+        dependsOn("validateSigningDebug")
+        val signing = android.signingConfigs.getByName("debug")
+        val debugKey = requireNotNull(signing.storeFile) { "Default debug keystore is unavailable" }
+        doFirst {
+            check(signing.storePassword == "android" && signing.keyPassword == "android") {
+                "Share fixtures require the standard Android debug signing configuration"
+            }
+        }
+        val script = rootProject.file("scripts/generate_share_provenance_fixture.py")
+        val output = layout.buildDirectory.dir("generated/share-provenance-test-assets")
+        val javaHome = System.getProperty("java.home")
+        val defaultPython = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
+        val python = providers.gradleProperty("pythonExecutable").orElse(defaultPython).get()
+        inputs.file(script)
+        inputs.file(debugKey)
+        inputs.property("javaHome", javaHome)
+        inputs.property("compileSdk", android.compileSdk)
+        outputs.dir(output)
+        environment("FIXTURE_STORE_PASSWORD", "android")
+        commandLine(
+            python,
+            script.absolutePath,
+            "--java-home",
+            javaHome,
+            "--project",
+            rootProject.projectDir.absolutePath,
+            "--keystore",
+            debugKey.absolutePath,
+            "--key-alias",
+            requireNotNull(signing.keyAlias),
+            "--compile-sdk",
+            requireNotNull(android.compileSdk).toString(),
+            "--output",
+            output.get().asFile.absolutePath,
+        )
+    }
+tasks.matching { it.name in setOf("mergeDebugAndroidTestAssets", "mergeR8ValidationAndroidTestAssets") }.configureEach {
+    dependsOn(generateUpdaterTestApks, generateShareProvenanceFixtureApk)
 }
 
 tasks.withType<Test>().configureEach {
@@ -188,6 +250,7 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(project(":core:crypto"))
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.okhttp)
@@ -248,3 +311,49 @@ val verifyReleaseRuntimeArtifacts =
         }
     }
 tasks.named("preBuild") { dependsOn(verifyReleaseRuntimeArtifacts) }
+
+if (r8ValidationEnabled) {
+    val validationRuntimeArtifacts =
+        providers.provider {
+            configurations
+                .getByName("r8ValidationRuntimeClasspath")
+                .incoming
+                .artifactView { componentFilter { it is ModuleComponentIdentifier } }
+                .artifacts
+        }
+    val verifyR8ValidationRuntimeArtifacts =
+        tasks.register("verifyR8ValidationRuntimeArtifacts") {
+            group = "verification"
+            description = "Requires R8 candidate binaries to match the checksum-verified release."
+            dependsOn(verifyReleaseRuntimeArtifacts)
+            inputs.files(validationRuntimeArtifacts.map { it.artifactFiles })
+            inputs.files(releaseRuntimeArtifacts.map { it.artifactFiles })
+            doLast {
+                fun identities(artifacts: org.gradle.api.artifacts.ArtifactCollection): List<String> =
+                    artifacts.artifacts
+                        .map { artifact ->
+                            val component = artifact.id.componentIdentifier as ModuleComponentIdentifier
+                            val digest = MessageDigest.getInstance("SHA-256")
+                            artifact.file.inputStream().use { input ->
+                                val buffer = ByteArray(64 * 1024)
+                                while (true) {
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    digest.update(buffer, 0, count)
+                                }
+                            }
+                            val checksum = digest.digest().joinToString("") { "%02x".format(it) }
+                            "${component.group}:${component.module}:${component.version}:$checksum"
+                        }.sorted()
+                val expected = identities(releaseRuntimeArtifacts.get())
+                val actual = identities(validationRuntimeArtifacts.get())
+                check(actual.isNotEmpty() && actual == expected) {
+                    "R8 validation dependencies must exactly match the pinned release runtime coordinates and checksums"
+                }
+                logger.lifecycle("Verified ${actual.size} R8 validation runtime artifacts match the pinned release")
+            }
+        }
+    tasks.matching { it.name == "preR8ValidationBuild" }.configureEach {
+        dependsOn(verifyR8ValidationRuntimeArtifacts)
+    }
+}

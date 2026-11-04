@@ -1,0 +1,5 @@
+<resources>
+    <string name="error_encrypted_unlock_failed">Die gespeicherten verschlüsselten Daten konnten nicht entsperrt werden. Prüfen Sie das Verschlüsselungspasswort oder stellen Sie die Verbindung wieder her und versuchen Sie es erneut.</string>
+    <string name="error_offline_snapshot_changed">Die Offline-Kopie wurde geändert. Vorhandene Dateien wurden nicht ersetzt. Speichern Sie den Ordner erneut offline.</string>
+    <string name="error_offline_group_busy">Für diesen verschlüsselten Speicherort läuft bereits eine Offline-Aktualisierung. Warten Sie auf den Abschluss oder brechen Sie sie ab, bevor Sie eine weitere starten.</string>
+</resources>

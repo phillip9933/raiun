@@ -30,26 +30,27 @@ class EncryptedBrowserDialogsAndroidTest {
         val png = syntheticPng()
         val state = mutableStateOf(contents())
         val events = mutableListOf<String>()
+        val beginnings = mutableListOf<Pair<String, String>>()
+        val loadDestination: (String) -> Unit = { path ->
+            state.value =
+                state.value.copy(
+                    destinationPickerPath = path,
+                    destinationPickerEntries =
+                        if (path.isEmpty()) listOf(folder("archive", "Archive", "Archive")) else emptyList(),
+                )
+        }
         compose.setContent {
             OpenCloudTheme {
                 VaultScreen(
                     state.value,
                     callbacks().copy(
                         onLoadThumbnail = { id -> if (id == "photo") png.copyOf() else null },
-                        onLoadDestinationFolders = { path ->
-                            state.value =
-                                state.value.copy(
-                                    destinationPickerPath = path,
-                                    destinationPickerEntries =
-                                        if (path.isEmpty()) {
-                                            listOf(
-                                                folder("archive", "Archive", "Archive"),
-                                            )
-                                        } else {
-                                            emptyList()
-                                        },
-                                )
+                        onBeginDestinationPicker = { sourceId, path ->
+                            assertEquals("photo", sourceId)
+                            beginnings += sourceId to path
+                            loadDestination(path)
                         },
+                        onLoadDestinationFolders = loadDestination,
                         onDismissDestinationPicker = {
                             state.value = state.value.copy(destinationPickerPath = null)
                             events += "dismiss"
@@ -105,6 +106,7 @@ class EncryptedBrowserDialogsAndroidTest {
             ),
             events,
         )
+        assertEquals(listOf("photo" to "", "photo" to ""), beginnings)
         png.fill(0)
     }
 

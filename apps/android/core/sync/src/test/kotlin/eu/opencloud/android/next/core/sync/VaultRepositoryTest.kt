@@ -534,6 +534,462 @@ class VaultRepositoryTest {
         }
     }
 
+    @Test
+    fun `chunked large vault directory pages without publishing its complete plaintext listing`() =
+        runTest {
+            val root = "/dav/files/parent/Secret.vault"
+            val children =
+                (0 until 6000).map { number ->
+                    entry("$root/opaque-$number", "id-$number", "opaque-$number", number % 3 == 0, 48)
+                }
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            val rootEntry = davEntry(root, "vault-id", "Secret.vault", true, 0)
+            val xml =
+                "<d:multistatus xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\">" +
+                    rootEntry + children.joinToString("") + "</d:multistatus>"
+            server.enqueue(MockResponse().setResponseCode(207).setChunkedBody(xml, 113))
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            val session = session(VaultDavClient(OkHttpClient(), endpoints = EndpointPolicy(true)), FakeCipher())
+            try {
+                session.openDirectory().use { snapshot ->
+                    assertEquals(6000L, snapshot.totalCount)
+                    assertEquals(0, session.issuedEntryCountForTesting())
+                    val first = snapshot.page(0, 17)
+                    assertEquals(17, first.size)
+                    assertTrue(first.all { it.isFolder })
+                    assertEquals(17, session.issuedEntryCountForTesting())
+                    val next = snapshot.page(17, 17)
+                    assertTrue(first.map(VaultFolder::id).intersect(next.map(VaultFolder::id).toSet()).isEmpty())
+                    assertEquals(17, session.issuedEntryCountForTesting())
+                    assertThrows(OpenCloudException::class.java) {
+                        runBlocking { session.download(first.first(), ByteArrayOutputStream()) }
+                    }
+                    assertEquals(3, server.requestCount)
+                    assertEquals(listOf("0", "1", "0"), List(3) { server.takeRequest().getHeader("Depth") })
+                }
+                assertEquals(0, session.issuedEntryCountForTesting())
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun `late duplicate identity never publishes a partial decrypted directory`() =
+        runTest {
+            val root = "/dav/files/parent/Secret.vault"
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            val children =
+                (0 until 257).map { number ->
+                    entry("$root/opaque-$number", "id-$number", "opaque-$number", false, 48)
+                } +
+                    entry("$root/last", "id-0", "last", false, 48)
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true, children))
+            val session = session(VaultDavClient(OkHttpClient(), endpoints = EndpointPolicy(true)), FakeCipher())
+            try {
+                assertThrows(OpenCloudException::class.java) { runBlocking { session.openDirectory() } }
+                assertEquals(0, session.issuedEntryCountForTesting())
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun `root replacement after streamed decryption prevents snapshot publication`() =
+        runTest {
+            val root = "/dav/files/parent/Secret.vault"
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            server.enqueue(
+                davListing(
+                    root,
+                    "vault-id",
+                    "Secret.vault",
+                    true,
+                    listOf(entry("$root/cipher", "child", "cipher", false, 48)),
+                ),
+            )
+            server.enqueue(davListing(root, "replacement-id", "Secret.vault", true))
+            val session = session(VaultDavClient(OkHttpClient(), endpoints = EndpointPolicy(true)), FakeCipher())
+            try {
+                assertThrows(OpenCloudException::class.java) { runBlocking { session.openDirectory() } }
+                assertEquals(0, session.issuedEntryCountForTesting())
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun `refresh and generation revocation invalidate existing directory snapshots`() =
+        runTest {
+            val root = "/dav/files/parent/Secret.vault"
+            repeat(6) { server.enqueue(davListing(root, "vault-id", "Secret.vault", true)) }
+            val current = AtomicBoolean(true)
+            val session =
+                session(
+                    VaultDavClient(OkHttpClient(), endpoints = EndpointPolicy(true)),
+                    FakeCipher(),
+                    generationIsCurrent = current::get,
+                )
+            try {
+                val old = session.openDirectory()
+                val fresh = session.openDirectory()
+                assertThrows(OpenCloudException::class.java) { runBlocking { old.page() } }
+                current.set(false)
+                assertThrows(OpenCloudException::class.java) { runBlocking { fresh.page() } }
+                assertEquals(0, session.issuedEntryCountForTesting())
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun `decryption failure after completed sort runs removes the private directory stage`() =
+        runTest {
+            val root = "/dav/files/parent/Secret.vault"
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            server.enqueue(
+                davListing(
+                    root,
+                    "vault-id",
+                    "Secret.vault",
+                    true,
+                    (0 until 300).map { entry("$root/name-$it", "id-$it", "name-$it", false, 48) },
+                ),
+            )
+            var decrypted = 0
+            val engine =
+                FakeCipher(onName = {
+                    if (++decrypted ==
+                        258
+                    ) {
+                        throw OpenCloudException(eu.opencloud.android.next.core.network.OpenCloudError.InvalidResponse)
+                    }
+                })
+            val stage =
+                java.nio.file.Files
+                    .createTempDirectory("vault-failed-directory")
+                    .toFile()
+            val session =
+                session(
+                    VaultDavClient(OkHttpClient(), endpoints = EndpointPolicy(true)),
+                    engine,
+                    spoolDirectory = stage,
+                )
+            try {
+                assertThrows(OpenCloudException::class.java) { runBlocking { session.openDirectory() } }
+                assertEquals(258, decrypted)
+                assertEquals(0, session.issuedEntryCountForTesting())
+                assertTrue(stage.walkTopDown().none { it.isFile })
+            } finally {
+                session.close()
+                stage.deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `cancellation during streamed name decryption removes all staged ciphertext runs`() {
+        val root = "/dav/files/parent/Secret.vault"
+        server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+        server.enqueue(
+            davListing(
+                root,
+                "vault-id",
+                "Secret.vault",
+                true,
+                (0 until 300).map { entry("$root/name-$it", "id-$it", "name-$it", false, 48) },
+            ),
+        )
+        val job = SupervisorJob()
+        var decrypted = 0
+        val engine = FakeCipher(onName = { if (++decrypted == 258) job.cancel() })
+        val stage =
+            java.nio.file.Files
+                .createTempDirectory("vault-cancelled-directory")
+                .toFile()
+        val session =
+            session(VaultDavClient(OkHttpClient(), endpoints = EndpointPolicy(true)), engine, spoolDirectory = stage)
+        val scope = kotlinx.coroutines.CoroutineScope(job + Dispatchers.Unconfined)
+        try {
+            val pending = scope.async { session.openDirectory() }
+            assertThrows(CancellationException::class.java) { runBlocking { pending.await() } }
+            assertEquals(0, session.issuedEntryCountForTesting())
+            assertTrue(stage.walkTopDown().none { it.isFile })
+        } finally {
+            scope.cancel()
+            session.close()
+            stage.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `hidden visibility is applied before snapshot count and page boundaries after validating every name`() =
+        runTest {
+            val root = "/dav/files/parent/Secret.vault"
+            val children =
+                (0 until 301).map { number ->
+                    val name = if (number % 2 == 0) ".hidden-$number" else "visible-$number"
+                    entry("$root/$name", "id-$number", name, false, 48)
+                }
+            repeat(2) {
+                server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+                server.enqueue(davListing(root, "vault-id", "Secret.vault", true, children))
+                server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            }
+            var decrypted = 0
+            val session =
+                session(
+                    VaultDavClient(OkHttpClient(), endpoints = EndpointPolicy(true)),
+                    FakeCipher(onName = { decrypted++ }),
+                )
+            try {
+                session.openDirectory().use { visible ->
+                    assertEquals(150L, visible.totalCount)
+                    val first = visible.page(0, 128)
+                    val second = visible.page(first.size.toLong(), 128)
+                    assertEquals(128, first.size)
+                    assertEquals(22, second.size)
+                    assertTrue((first + second).none { it.name.startsWith('.') })
+                }
+                assertEquals(301, decrypted)
+                session.openDirectory(showHidden = true).use { all ->
+                    assertEquals(301L, all.totalCount)
+                    assertTrue(all.page().any { it.name.startsWith('.') })
+                }
+                assertEquals(602, decrypted)
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun `a decryption failure in a hidden child still prevents publication`() =
+        runTest {
+            val root = "/dav/files/parent/Secret.vault"
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            server.enqueue(
+                davListing(
+                    root,
+                    "vault-id",
+                    "Secret.vault",
+                    true,
+                    listOf(
+                        entry("$root/visible", "visible-id", "visible", false, 48),
+                        entry("$root/.hidden", "hidden-id", ".hidden", false, 48),
+                    ),
+                ),
+            )
+            val session =
+                session(
+                    VaultDavClient(OkHttpClient(), endpoints = EndpointPolicy(true)),
+                    FakeCipher(onName = {
+                        if (it ==
+                            ".hidden"
+                        ) {
+                            throw OpenCloudException(
+                                eu.opencloud.android.next.core.network.OpenCloudError.InvalidResponse,
+                            )
+                        }
+                    }),
+                )
+            try {
+                assertThrows(OpenCloudException::class.java) { runBlocking { session.openDirectory() } }
+                assertEquals(0, session.issuedEntryCountForTesting())
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun `large unlock validates the entire stream before trying the first proof file`() =
+        runTest {
+            val path = "parent/Secret.vault"
+            val root = "/dav/files/$path"
+            val children = (0 until 6000).map { entry("$root/proof-$it", "file-$it", "proof-$it", false, 49) }
+            server.enqueue(graphPage())
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true, children))
+            server.enqueue(MockResponse().setBody(Buffer().write(ByteArray(49))))
+            repository().unlock(account.id, personalLocation(), path, charArrayOf('p')).use { session ->
+                assertEquals("vault-id", session.identity.remoteVaultId)
+            }
+            assertEquals(3, server.requestCount)
+            server.takeRequest()
+            assertEquals("1", server.takeRequest().getHeader("Depth"))
+            assertEquals("$root/proof-0", server.takeRequest().path)
+        }
+
+    @Test
+    fun `large unlock preserves eight file proof attempts and rejects a wrong password`() =
+        runTest {
+            val path = "parent/Secret.vault"
+            val root = "/dav/files/$path"
+            val children =
+                listOf(entry("$root/empty", "empty-id", "empty", false, 32)) +
+                    (0 until 6000).map { entry("$root/proof-$it", "file-$it", "proof-$it", false, 49) }
+            server.enqueue(graphPage())
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true, children))
+            repeat(8) { server.enqueue(MockResponse().setBody(Buffer().write(ByteArray(49)))) }
+            var proofs = 0
+            val engine =
+                FakeCipher(onDecrypt = {
+                    proofs++
+                    throw SecurityException("synthetic wrong key")
+                })
+            val failure =
+                assertThrows(VaultUnlockException::class.java) {
+                    runBlocking {
+                        repository(
+                            cipher = engine,
+                        ).unlock(account.id, personalLocation(), path, charArrayOf('x'))
+                    }
+                }
+            assertEquals(VaultUnlockFailure.PASSWORD_NOT_PROVEN, failure.failure)
+            assertEquals(8, proofs)
+            assertEquals(10, server.requestCount)
+            server.takeRequest()
+            server.takeRequest()
+            repeat(8) { assertEquals("$root/proof-$it", server.takeRequest().path) }
+            assertTrue(engine.closed.get())
+        }
+
+    @Test
+    fun `late duplicate after enough proof candidates rejects unlock before any ciphertext request`() =
+        runTest {
+            val path = "parent/Secret.vault"
+            val root = "/dav/files/$path"
+            val children =
+                (0 until 6000).map { entry("$root/proof-$it", "file-$it", "proof-$it", false, 49) } +
+                    entry("$root/duplicate", "file-0", "duplicate", false, 49)
+            server.enqueue(graphPage())
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true, children))
+            assertThrows(OpenCloudException::class.java) {
+                runBlocking { repository().unlock(account.id, personalLocation(), path, charArrayOf('p')) }
+            }
+            assertEquals(2, server.requestCount)
+        }
+
+    @Test
+    fun `destination exclusion counts exact and descendant paths while preserving similar prefixes`() =
+        runTest {
+            val root = "/dav/files/parent/Secret.vault"
+            val names = listOf("source", "source-extra") + (0 until 130).map { "other-$it" }
+            val children = names.mapIndexed { number, name -> entry("$root/$name", "id-$number", name, true) }
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true, children))
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            server.enqueue(
+                davListing(
+                    "$root/source",
+                    "source-id",
+                    "source",
+                    true,
+                    listOf(entry("$root/source/child", "nested-id", "child", true)),
+                ),
+            )
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            val session = session(VaultDavClient(OkHttpClient(), endpoints = EndpointPolicy(true)), FakeCipher())
+            try {
+                session.openDirectory(excludedPath = "source").use { snapshot ->
+                    assertEquals(131L, snapshot.totalCount)
+                    val first = snapshot.page(0, 128)
+                    val second = snapshot.page(first.size.toLong(), 128)
+                    assertEquals(3, second.size)
+                    assertTrue((first + second).any { it.path == "source-extra" })
+                    assertTrue((first + second).none { it.path == "source" })
+                }
+                session.openDirectory("source", excludedPath = "source").use { snapshot ->
+                    assertEquals(0L, snapshot.totalCount)
+                }
+                listOf("", "../source", "/source").forEach { excluded ->
+                    assertThrows(OpenCloudException::class.java) {
+                        runBlocking { session.openDirectory(excludedPath = excluded) }
+                    }
+                }
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun `current page offline status preserves issued identity without decrypting an offline listing`() =
+        runTest {
+            val path = "parent/Secret.vault"
+            val root = "/dav/files/$path"
+            val child = entry("$root/cipher", "file-id", "cipher", false, 49)
+            server.enqueue(graphPage())
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true, listOf(child)))
+            server.enqueue(MockResponse().setBody(Buffer().write(ByteArray(49))))
+            val session = repository().unlock(account.id, personalLocation(), path, charArrayOf('p'))
+            val directory =
+                java.nio.file.Files
+                    .createTempDirectory("vault-bounded-status")
+                    .toFile()
+            val material = session.exportVerifiedKeyMaterial()
+            var nameDecryptions = 0
+            val offline =
+                VaultOfflineStore(directory, { store.account(it) }, { { true } }, EndpointPolicy(true), {
+                    FakeCipher(onName = {
+                        nameDecryptions++
+                        error("Offline status must not decrypt names")
+                    })
+                }, durability = jvmOfflineDurability(directory))
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true, listOf(child)))
+            server.enqueue(davListing(root, "vault-id", "Secret.vault", true))
+            try {
+                session.openDirectory().use { snapshot ->
+                    val page = snapshot.page()
+                    offline.pinFile(
+                        session.identity,
+                        session.location,
+                        page.single(),
+                        material,
+                    ) { it.write(ByteArray(49)) }
+                    assertEquals(page, session.offlineFiles(offline, page))
+                    assertEquals(0, nameDecryptions)
+                    val newerPage = snapshot.page()
+                    assertThrows(OpenCloudException::class.java) { runBlocking { session.offlineFiles(offline, page) } }
+                    assertEquals(newerPage, session.offlineFiles(offline, newerPage))
+                    assertEquals(0, nameDecryptions)
+                }
+            } finally {
+                session.close()
+                material.fill(0)
+                directory.deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `a selected vault root identity cannot change during streamed unlock admission`() =
+        runTest {
+            val path = "parent/Secret.vault"
+            val root = "/dav/files/$path"
+            val selected =
+                personalLocation().copy(
+                    kind = VaultLocationKind.FOLDER_VAULT,
+                    isVaultRoot = true,
+                    remoteVaultId = "vault-id",
+                    vaultPath = path,
+                )
+            server.enqueue(graphPage())
+            server.enqueue(
+                davListing(
+                    root,
+                    "different-id",
+                    "Secret.vault",
+                    true,
+                    (0 until 6000).map { entry("$root/proof-$it", "file-$it", "proof-$it", false, 49) },
+                ),
+            )
+            val failure =
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking { repository().unlock(account.id, selected, password = charArrayOf('p')) }
+                }
+            assertEquals(eu.opencloud.android.next.core.network.OpenCloudError.PreconditionFailed, failure.error)
+            assertEquals(2, server.requestCount)
+            server.takeRequest()
+            assertEquals("0", server.takeRequest().getHeader("Depth"))
+        }
+
     private fun repository(
         events: MutableList<String> = mutableListOf(),
         cipher: FakeCipher = FakeCipher(),
@@ -575,6 +1031,7 @@ class VaultRepositoryTest {
         engine: FakeCipher,
         vaultPath: String = "parent/Secret.vault",
         generationIsCurrent: () -> Boolean = { true },
+        spoolDirectory: java.io.File? = null,
     ): VaultSession {
         val vaultLocation =
             VaultLocation(
@@ -605,6 +1062,7 @@ class VaultRepositoryTest {
             dav,
             access,
             generationIsCurrent,
+            spoolDirectory,
         )
     }
 
@@ -699,6 +1157,7 @@ class VaultRepositoryTest {
     private class FakeCipher(
         private val onDecrypt: (() -> Unit)? = null,
         private val onExport: (() -> Unit)? = null,
+        private val onName: ((String) -> Unit)? = null,
     ) : VaultCipherEngine {
         val closed = AtomicBoolean(false)
         var lastOutput: OutputStream? = null
@@ -708,7 +1167,10 @@ class VaultRepositoryTest {
 
         override fun verifyIntegrityToken(base64Token: String): Boolean = false
 
-        override fun decryptName(encrypted: String): String = if (encrypted == "cipher") "secret.txt" else encrypted
+        override fun decryptName(encrypted: String): String {
+            onName?.invoke(encrypted)
+            return if (encrypted == "cipher") "secret.txt" else encrypted
+        }
 
         override fun decryptPath(encrypted: String): String = encrypted
 

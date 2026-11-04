@@ -1,6 +1,6 @@
 # Server connections
 
-Android 1.2.0 adds these optional connection settings. Real Wi-Fi/server and browser/identity-provider/KeyChain acceptance remains pending; see the verification scope below. Open **Server connection** from sign-in before Continue, or from Settings for the current account.
+Android 1.2.0 adds these optional connection settings. Real Wi-Fi/server and browser/identity-provider/KeyChain acceptance remains pending; see the verification scope below. Open **Wi-Fi & certificates** from sign-in before Continue, or from Settings for the current account. This clearer name and grouped setup are in the current development UI; published Android 1.2.0 calls the page **Server connection**.
 
 Connection preferences apply to the canonical server address and are shared by accounts using that address. They do not change account IDs, authentication issuers, file URLs, encrypted-location identities or existing backup destinations. Removing the final account for a server removes its local connection preferences; it does not delete a system certificate.
 

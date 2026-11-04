@@ -25,4 +25,5 @@
     <string name="auth_oidc_session_expired">ログインセッションの期限が切れたか、検証できませんでした。再度ログインしてください。</string>
     <string name="auth_sign_in_cancelled">ログインがキャンセルまたは拒否されました。</string>
     <string name="auth_certificate_untrusted">安全な接続に失敗しました。サーバー接続設定で、サーバー証明書と必要なクライアント証明書を確認してください。</string>
+    <string name="auth_oidc_issuer_unverified">ブラウザーでのサインイン応答で、想定されたプロバイダーを確認できませんでした。管理者に issuer (iss) のサポートを確認してもらってから、もう一度お試しください。</string>
 </resources>

@@ -11,12 +11,12 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.core.datastore.Appearance
 import eu.opencloud.android.next.core.datastore.SettingsRepository
 import eu.opencloud.android.next.core.datastore.UserSettings
@@ -49,7 +49,7 @@ class MainActivity : AppCompatActivity() {
 
         setContent {
             val repository = SettingsRepository.create(this)
-            val settings by repository.settings.collectAsState(UserSettings())
+            val settings by repository.settings.collectAsStateWithLifecycle(UserSettings())
             LaunchedEffect(repository) {
                 repository.settings.collect { value ->
                     getSharedPreferences("window-appearance", MODE_PRIVATE)

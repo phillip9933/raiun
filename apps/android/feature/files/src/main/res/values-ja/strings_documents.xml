@@ -36,4 +36,5 @@
     <plurals name="document_incoming_files">
         <item quantity="other">%1$d件のファイル</item>
     </plurals>
+    <string name="document_open_in_browser">ブラウザで開く</string>
 </resources>

@@ -39,4 +39,5 @@
     <string name="error_directory_listing_too_large">O servidor devolveu uma lista de pasta maior do que o Raiun consegue processar em segurança. Tente abrir uma subpasta mais pequena.</string>
     <string name="error_local_storage_write_failed">Não foi possível guardar o ficheiro neste dispositivo. Verifique o armazenamento do dispositivo e tente novamente.</string>
     <string name="error_source_changed">O ficheiro selecionado mudou durante a preparação do envio. Selecione-o novamente antes de o enviar.</string>
+    <string name="error_encrypted_offline_index_full">Esta localização encriptada atingiu o limite de metadados offline. Remova alguns itens offline desta localização antes de tentar novamente.</string>
 </resources>

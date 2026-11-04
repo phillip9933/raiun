@@ -1,0 +1,3 @@
+<resources>
+    <string name="vault_offline_preparation_failed">Der Offline-Zugriff konnte nicht vorbereitet werden. Prüfe unter „Übertragungen“, ob ein Download aussteht, und versuche es dann erneut.</string>
+</resources>

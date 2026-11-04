@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_replace_confirmation_title">Vorhandene Datei ersetzen?</string>
+    <string name="transfers_replace_confirmation_body">„%1$s“ unter %2$s ersetzen? Vorhandene Inhalte können überschrieben werden. Raiun kann dies nicht rückgängig machen.</string>
+    <string name="transfers_replace_current_destination">dem aktuellen Ziel</string>
+</resources>

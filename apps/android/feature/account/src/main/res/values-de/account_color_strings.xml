@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_color">Kontofarbe</string>
+    <string name="account_color_edit">Bearbeiten</string>
+    <string name="account_color_automatic">Automatisch</string>
+    <string name="account_color_device_only">Ändert nur, wie dieses Konto auf diesem Smartphone aussieht.</string>
+    <string name="account_color_light_preview">Hell</string>
+    <string name="account_color_dark_preview">Dunkel</string>
+    <string name="account_color_save_failed">Kontofarbe konnte nicht gespeichert werden. Bitte erneut versuchen.</string>
+    <string name="account_color_teal">Türkis</string>
+    <string name="account_color_jade">Jade</string>
+    <string name="account_color_purple">Lila</string>
+    <string name="account_color_rose">Rosa</string>
+    <string name="account_color_amber">Bernstein</string>
+    <string name="account_color_blue">Blau</string>
+    <string name="account_color_forest">Waldgrün</string>
+    <string name="account_color_plum">Pflaume</string>
+    <string name="account_color_save">Speichern</string>
+</resources>

@@ -1,6 +1,7 @@
 package eu.opencloud.android.next.core.sync
 
 import eu.opencloud.android.next.core.network.OpenCloudError
+import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.toOpenCloudError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -54,7 +55,10 @@ class EmbeddedHostController<T : Any>(
             val active = withContext(io) { open().also { lease.set(it) } }
             val payload = withContext(io) { active.current() }
             currentCoroutineContext().ensureActive()
-            if (!closed) surface.show(payload)
+            if (!closed) {
+                if (!active.isPermitted()) throw OpenCloudException(OpenCloudError.AccessDenied)
+                surface.show(payload)
+            }
             while (!closed) {
                 delay(1000)
                 withContext(io) { active.current() }

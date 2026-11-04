@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_color">Account color</string>
+    <string name="account_color_edit">Edit</string>
+    <string name="account_color_automatic">Automatic</string>
+    <string name="account_color_device_only">Only changes how this account looks on this phone.</string>
+    <string name="account_color_light_preview">Light</string>
+    <string name="account_color_dark_preview">Dark</string>
+    <string name="account_color_save_failed">Could not save the account color. Try again.</string>
+    <string name="account_color_teal">Teal</string>
+    <string name="account_color_jade">Jade</string>
+    <string name="account_color_purple">Purple</string>
+    <string name="account_color_rose">Rose</string>
+    <string name="account_color_amber">Amber</string>
+    <string name="account_color_blue">Blue</string>
+    <string name="account_color_forest">Forest green</string>
+    <string name="account_color_plum">Plum</string>
+    <string name="account_color_save">Save</string>
+</resources>

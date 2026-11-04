@@ -62,7 +62,10 @@ class AppLock(
 
     fun authenticated() = session.authenticate(SystemClock.elapsedRealtime())
 
-    fun lock() = session.clear()
+    fun lock() {
+        session.clear()
+        VaultUnlockSession.clearProcess()
+    }
 
     /** An explicit Open/Open with action in the unlocked app authorizes the receiving viewer. */
     fun allowDocumentOpenFromApp() {

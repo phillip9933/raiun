@@ -41,6 +41,12 @@ sealed interface OpenCloudError {
 
     data object DownloadIntegrity : OpenCloudError
 
+    data object EncryptedUnlockFailed : OpenCloudError
+
+    data object OfflineSnapshotChanged : OpenCloudError
+
+    data object OfflineGroupBusy : OpenCloudError
+
     data object InvalidResponse : OpenCloudError
 
     data object DirectoryListingTooLarge : OpenCloudError
@@ -50,6 +56,12 @@ sealed interface OpenCloudError {
     data object LocalStorage : OpenCloudError
 
     data object LocalStorageWriteFailed : OpenCloudError
+
+    data object LocalCopiesRetained : OpenCloudError
+
+    data object LocalCopyRemovalFailed : OpenCloudError
+
+    data object EncryptedOfflineIndexFull : OpenCloudError
 
     data object SourceUnavailable : OpenCloudError
 
@@ -209,6 +221,12 @@ fun OpenCloudError.safeMessage(): String =
         OpenCloudError.Conflict -> "An item with this name already exists."
         OpenCloudError.PreconditionFailed -> "The remote item changed. Refresh before trying again."
         OpenCloudError.DownloadIntegrity -> "The downloaded file could not be verified. Try downloading it again."
+        OpenCloudError.EncryptedUnlockFailed ->
+            "This saved encrypted data could not be unlocked. Check the encryption password or reconnect and try again."
+        OpenCloudError.OfflineSnapshotChanged ->
+            "The offline copy changed. No existing files were replaced. Save the folder offline again."
+        OpenCloudError.OfflineGroupBusy ->
+            "An offline folder update is already active for this encrypted location. Finish or cancel it before starting another."
         OpenCloudError.InvalidResponse -> "The server returned incomplete or unexpected metadata."
         OpenCloudError.DirectoryListingTooLarge ->
             "The server returned a folder listing larger than Raiun can safely process. " +
@@ -217,6 +235,13 @@ fun OpenCloudError.safeMessage(): String =
         OpenCloudError.LocalStorage -> "The device has insufficient storage."
         OpenCloudError.LocalStorageWriteFailed ->
             "The file could not be saved on this device. Check device storage and try again."
+        OpenCloudError.LocalCopiesRetained ->
+            "Some local copies changed or are in use and were kept. Close open files or finish downloads, then try again."
+        OpenCloudError.LocalCopyRemovalFailed ->
+            "Raiun could not finish removing local copies. Check device storage and try again."
+        OpenCloudError.EncryptedOfflineIndexFull ->
+            "This encrypted location has reached its offline metadata limit. " +
+                "Remove some offline items from this location before trying again."
         OpenCloudError.SourceUnavailable -> "The selected file is no longer available."
         OpenCloudError.SourceChanged ->
             "The selected file changed while preparing the upload. Select it again before uploading."
@@ -258,11 +283,17 @@ fun OpenCloudError.safeMessage(context: Context): String =
         OpenCloudError.Conflict -> context.getString(R.string.error_conflict)
         OpenCloudError.PreconditionFailed -> context.getString(R.string.error_precondition_failed)
         OpenCloudError.DownloadIntegrity -> context.getString(R.string.error_download_integrity)
+        OpenCloudError.EncryptedUnlockFailed -> context.getString(R.string.error_encrypted_unlock_failed)
+        OpenCloudError.OfflineSnapshotChanged -> context.getString(R.string.error_offline_snapshot_changed)
+        OpenCloudError.OfflineGroupBusy -> context.getString(R.string.error_offline_group_busy)
         OpenCloudError.InvalidResponse -> context.getString(R.string.error_invalid_response)
         OpenCloudError.DirectoryListingTooLarge -> context.getString(R.string.error_directory_listing_too_large)
         OpenCloudError.QuotaExceeded -> context.getString(R.string.error_quota_exceeded)
         OpenCloudError.LocalStorage -> context.getString(R.string.error_local_storage)
         OpenCloudError.LocalStorageWriteFailed -> context.getString(R.string.error_local_storage_write_failed)
+        OpenCloudError.LocalCopiesRetained -> context.getString(R.string.error_local_copies_retained)
+        OpenCloudError.LocalCopyRemovalFailed -> context.getString(R.string.error_local_copy_removal_failed)
+        OpenCloudError.EncryptedOfflineIndexFull -> context.getString(R.string.error_encrypted_offline_index_full)
         OpenCloudError.SourceUnavailable -> context.getString(R.string.error_source_unavailable)
         OpenCloudError.SourceChanged -> context.getString(R.string.error_source_changed)
         OpenCloudError.SourcePermissionDenied -> context.getString(R.string.error_source_permission_denied)

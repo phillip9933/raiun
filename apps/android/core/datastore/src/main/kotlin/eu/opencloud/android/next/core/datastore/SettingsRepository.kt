@@ -57,6 +57,23 @@ class SettingsRepository private constructor(
             it.toBuilder().setActiveAccountId(accountId?.trim().orEmpty()).build()
         }
 
+    /** Compare and replace inside DataStore's serialized update, preserving any newer user selection. */
+    suspend fun replaceActiveAccountIfCurrent(
+        expectedAccountId: String,
+        replacementAccountId: String?,
+    ): String? {
+        val saved =
+            dataStore.updateData { value ->
+                val current = value.repaired()
+                if (current.activeAccountId == expectedAccountId) {
+                    current.toBuilder().setActiveAccountId(replacementAccountId?.trim().orEmpty()).build()
+                } else {
+                    current
+                }
+            }
+        return saved.activeAccountId.takeIf(String::isNotBlank)
+    }
+
     suspend fun setCacheRetentionDays(days: Int) =
         update {
             it.toBuilder().setCacheRetentionDays(days.coerceIn(MIN_CACHE_DAYS, MAX_CACHE_DAYS)).build()

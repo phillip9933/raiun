@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="vault_scan_document">文書をスキャン</string>
-    <string name="vault_scanner_failed">スキャンを完了できませんでした。すでにアップロードされたファイルがある可能性があります。この画面を閉じて更新してから、もう一度スキャンしてください。</string>
-    <string name="vault_scanner_uploading">スキャンを暗号化してアップロード中…</string>
+    <string name="vault_scanner_failed">スキャン全体をキューに追加できませんでした。追加済みのファイルは引き続きアップロードされます。再スキャンする前に転送を確認してください。</string>
+    <string name="vault_scanner_uploading">アップロードのキューに追加するためスキャンを暗号化中…</string>
     <string name="vault_scanner_fixed_destination">このスキャンの保存先は次の場所のみです</string>
     <string name="vault_scanner_discard">スキャンを破棄</string>
     <string name="vault_scanner_discard_title">この暗号化スキャンを破棄しますか？</string>
-    <string name="vault_scanner_discard_body">一時的なスキャンファイルをこの端末から削除します。</string>
+    <string name="vault_scanner_discard_body">一時的なスキャンファイルをこの端末から削除します。キューに追加済みのアップロードは続行します。</string>
     <string name="vault_scanner_keep">スキャンを保持</string>
     <string name="vault_scanner_close">閉じる</string>
 </resources>

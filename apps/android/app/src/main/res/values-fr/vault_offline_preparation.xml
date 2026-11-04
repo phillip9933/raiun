@@ -1,0 +1,3 @@
+<resources>
+    <string name="vault_offline_preparation_failed">Impossible de préparer l’accès hors ligne. Vérifiez dans Transferts si un téléchargement est en attente, puis réessayez.</string>
+</resources>

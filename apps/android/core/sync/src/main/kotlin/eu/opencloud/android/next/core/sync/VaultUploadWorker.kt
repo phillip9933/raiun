@@ -6,6 +6,8 @@ import androidx.work.WorkerParameters
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.TransferEntity
+import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.safeMessage
@@ -32,39 +34,67 @@ suspend fun VaultSession.enqueueBackgroundUpload(
         val payloads = VaultUploadStore(context)
         val lease = AccountSessions.get(context).beginLease(identity.accountId)
         val job = prepareBackgroundUpload(payloads, parentPath, name, source, size, lease)
-        val now = System.currentTimeMillis()
-        val store = FileBrowserStore(FileBrowserDatabase.create(context))
-        try {
-            currentCoroutineContext().ensureActive()
-            if (!lease()) throw OpenCloudException(OpenCloudError.AccessDenied)
-            val accepted =
-                store.enqueueCiphertextUpload(
-                    TransferEntity(
-                        id = job.id,
-                        accountId = job.location.accountId,
-                        spaceId = job.location.driveId,
-                        resourceId = null,
-                        direction = "UPLOAD",
-                        sourceUri = null,
-                        destinationPath = job.destination,
-                        displayName = context.getString(R.string.encrypted_upload),
-                        mimeType = "application/octet-stream",
-                        bytesTotal = job.size,
-                        locationKind = "VAULT",
-                        createdAtEpochMillis = now,
-                        updatedAtEpochMillis = now,
-                    ),
-                )
-            TransferManager(context, store).scheduleVaultUpload(accepted)
-            job.id
-        } finally {
-            // After the Room commit, startup reconciliation owns scheduling even if this coroutine dies.
-            withContext(NonCancellable) {
-                val retained = payloads.finishPrepared(job.id) { runBlocking { store.transfer(job.id) != null } }
-                if (!retained) store.cancelTransfer(job.id)
-            }
+        enqueuePreparedVaultUpload(context, payloads, job, lease)
+    }
+
+/** Replaces only the exact issued version; the worker needs ciphertext and its captured ETag, never a key. */
+suspend fun VaultSession.enqueueBackgroundReplacement(
+    context: Context,
+    entry: VaultFolder,
+    source: InputStream,
+    size: Long,
+): String =
+    withContext(Dispatchers.IO) {
+        val payloads = VaultUploadStore(context)
+        val lease = AccountSessions.get(context).beginLease(identity.accountId)
+        val job = prepareBackgroundReplacement(payloads, entry, source, size, lease)
+        enqueuePreparedVaultUpload(context, payloads, job, lease) { acknowledgeBackgroundReplacement(entry) }
+    }
+
+@Suppress("LongParameterList") // Injectable store/scheduler keep durable admission and interruption tests isolated.
+internal suspend fun enqueuePreparedVaultUpload(
+    context: Context,
+    payloads: VaultUploadStore,
+    job: VaultUploadJob,
+    lease: () -> Boolean,
+    store: FileBrowserStore = FileBrowserStore(FileBrowserDatabase.create(context)),
+    schedule: suspend (TransferEntity) -> Unit = { TransferManager(context, store).scheduleVaultUpload(it) },
+    onCommitted: () -> Unit = {},
+): String {
+    val now = System.currentTimeMillis()
+    try {
+        currentCoroutineContext().ensureActive()
+        if (!lease()) throw OpenCloudException(OpenCloudError.AccessDenied)
+        val accepted =
+            store.enqueueCiphertextUpload(
+                TransferEntity(
+                    id = job.id,
+                    accountId = job.location.accountId,
+                    spaceId = job.location.driveId,
+                    resourceId = null,
+                    direction = "UPLOAD",
+                    sourceUri = null,
+                    destinationPath = job.destination,
+                    displayName = context.getString(R.string.encrypted_upload),
+                    mimeType = "application/octet-stream",
+                    bytesTotal = job.size,
+                    expectedETag = job.expectedETag,
+                    locationKind = "VAULT",
+                    createdAtEpochMillis = now,
+                    updatedAtEpochMillis = now,
+                ),
+            )
+        schedule(accepted)
+        return job.id
+    } finally {
+        // After the Room commit, startup reconciliation owns scheduling even if this coroutine dies.
+        withContext(NonCancellable) {
+            val retained = payloads.finishPrepared(job.id) { runBlocking { store.transfer(job.id) != null } }
+            if (retained) onCommitted()
+            if (!retained) store.cancelTransfer(job.id)
         }
     }
+}
 
 fun forgetVaultUploads(
     context: Context,
@@ -87,6 +117,8 @@ class VaultUploadWorker internal constructor(
         withContext(Dispatchers.IO) {
             val transferId = inputData.getString(TransferWorker.TRANSFER_ID) ?: return@withContext Result.failure()
             val pending = store.transfer(transferId) ?: return@withContext Result.success()
+            if (pending.typedState == TransferState.UNKNOWN) return@withContext Result.failure()
+            if (!pending.typedState.isRunnable) return@withContext Result.success()
             if (pending.notBeforeEpochMillis > System.currentTimeMillis()) return@withContext Result.retry()
             val transfer =
                 store.claimTransfer(transferId, id.toString(), System.currentTimeMillis())
@@ -220,7 +252,9 @@ class VaultUploadWorker internal constructor(
     private suspend fun unclaimedResult(transferId: String): Result {
         val current = store.transfer(transferId)
         val sameWorker = current?.workId == null || current.workId == id.toString()
-        return if (sameWorker && current?.state in setOf("QUEUED", "RUNNING", "RETRY")) {
+        val unavailable = current != null && store.account(current.accountId) == null
+        if (current?.typedState == TransferState.UNKNOWN || unavailable) return Result.failure()
+        return if (sameWorker && current?.typedState?.isRunnable == true) {
             Result.retry()
         } else {
             Result.success()

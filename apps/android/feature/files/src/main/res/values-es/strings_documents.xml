@@ -38,4 +38,5 @@
         <item quantity="many">%1$d archivos</item>
         <item quantity="other">%1$d archivos</item>
     </plurals>
+    <string name="document_open_in_browser">Abrir en el navegador</string>
 </resources>

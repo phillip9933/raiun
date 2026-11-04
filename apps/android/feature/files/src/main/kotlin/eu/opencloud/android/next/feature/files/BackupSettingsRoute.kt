@@ -25,7 +25,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.listSaver
@@ -36,6 +35,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.SpaceEntity
@@ -52,7 +52,7 @@ fun BackupSettingsRoute(
     viewModel: FileBrowserViewModel = viewModel(key = "backup-settings-$accountId"),
 ) {
     val context = LocalContext.current
-    val state by viewModel.state.collectAsState()
+    val state by viewModel.state.collectAsStateWithLifecycle()
     var pendingBackup by rememberSaveable(
         accountId,
         stateSaver = backupDraftSaver,
@@ -128,6 +128,7 @@ fun BackupSettingsRoute(
             sharedRoots = state.backupPickerSharedRoots,
             sharedNames = state.backupPickerSharedNames,
             transfers = state.transfers,
+            transferStats = state.transferOverview?.backupStats,
             onManage = { backup ->
                 editingId = backup.id
                 selectedSourceUri = null
@@ -203,6 +204,7 @@ fun BackupOverview(
     onManage: (FolderBackupEntity) -> Unit,
     modifier: Modifier = Modifier,
     transfers: List<eu.opencloud.android.next.core.database.TransferEntity> = emptyList(),
+    transferStats: Map<String, eu.opencloud.android.next.core.database.BackupTransferStats>? = null,
     spaces: List<SpaceEntity> = emptyList(),
     sharedRoots: List<BackupSharedRoot> = emptyList(),
     sharedNames: Map<String, String> = emptyMap(),
@@ -232,7 +234,7 @@ fun BackupOverview(
                     Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXxs)) {
                         Text(backupDestinationLabel(backup, spaces, sharedRoots, sharedNames))
                         Text(backupDetails(backup, LocalContext.current))
-                        BackupSyncInfo(backup, transfers)
+                        BackupSyncInfo(backup, transfers, transferStats?.get(backup.id))
                     }
                 },
                 trailingContent = {
