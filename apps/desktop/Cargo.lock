@@ -1285,7 +1285,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "raiun-agent"
 version = "0.7.5"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "ctrlc",
  "fs2",
@@ -1447,7 +1447,7 @@ dependencies = [
 name = "raiun-opencloud"
 version = "0.7.5"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "futures-util",
  "percent-encoding",
@@ -1480,7 +1480,7 @@ name = "raiun-vault"
 version = "0.7.5"
 dependencies = [
  "aes",
- "base64 0.22.1",
+ "base64 0.23.1",
  "caseless",
  "crypto_secretbox",
  "getrandom 0.4.3",

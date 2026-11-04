@@ -10,7 +10,7 @@ publish.workspace = true
 synthetic-test-ca = []
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 quick-xml = "0.38"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
