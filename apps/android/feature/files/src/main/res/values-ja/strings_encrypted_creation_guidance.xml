@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypt_password_guidance">12文字以上を使用し、できれば無関係な単語をいくつか組み合わせてください。固有のパスワードを選んでください。</string>
+    <string name="browser_encrypt_password_too_short">新しい暗号化場所には%1$d文字以上を使用してください。</string>
+</resources>

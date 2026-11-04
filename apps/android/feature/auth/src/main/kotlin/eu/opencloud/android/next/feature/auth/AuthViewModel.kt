@@ -15,6 +15,7 @@ import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.model.auth.AuthTokens
 import eu.opencloud.android.next.core.model.auth.AuthenticationType
 import eu.opencloud.android.next.core.model.auth.OidcConfiguration
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.network.toOpenCloudError
@@ -30,7 +31,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import java.security.cert.CertificateException
 import javax.net.ssl.SSLHandshakeException
 import kotlin.coroutines.cancellation.CancellationException
@@ -70,7 +70,9 @@ class AuthViewModel(
         staticClientId: String? = null,
     ) = launchAuth {
         mutableState.value = mutableState.value.copy(isLoading = true, error = null)
-        val result = repositoryFor(serverInput).discover(serverInput, staticClientId)
+        // Match discovery's HTTPS default before constructing its scoped transport.
+        val serverUrl = if ("://" in serverInput) serverInput else "https://$serverInput"
+        val result = repositoryFor(serverUrl).discover(serverInput, staticClientId)
         discovery = result
         repository = repositoryFor(result.serverUrl)
         mutableState.value =
@@ -185,13 +187,6 @@ class AuthViewModel(
             }
         }
 
-    fun approveCertificatePin(pin: String) {
-        val serverUrl = mutableState.value.serverUrl ?: return
-        val host = java.net.URI(serverUrl).host ?: return
-        tlsPolicy.approvePin(host, pin)
-        mutableState.value = mutableState.value.copy(error = null)
-    }
-
     fun switchAccount(accountId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             settings.setActiveAccountId(accountId)
@@ -204,7 +199,7 @@ class AuthViewModel(
     }
 
     private fun repositoryFor(serverUrl: String): AuthRepository {
-        val baseClient = OkHttpClient.Builder().followRedirects(false).build()
+        val baseClient = HttpClients.newBuilder().followRedirects(false).build()
         return AuthRepository(
             OpenCloudApi(tlsPolicy.applyTo(baseClient, serverUrl)),
             credentialStore,

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_review_title">Review shared sources</string>
+    <string name="incoming_review_warning">Original sender unknown. File names are untrusted. A content provider is where Android reads a file, not proof of who shared it.</string>
+    <string name="incoming_review_unknown_name">Unknown file name (%1$d)</string>
+    <string name="incoming_review_provider">Content provider package: %1$s</string>
+    <string name="incoming_review_unknown_provider">Content provider unknown</string>
+</resources>

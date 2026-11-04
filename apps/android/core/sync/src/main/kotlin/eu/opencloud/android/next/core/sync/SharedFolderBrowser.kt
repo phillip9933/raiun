@@ -3,6 +3,7 @@ package eu.opencloud.android.next.core.sync
 import android.content.Context
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.SharedFolderCacheStore
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
@@ -16,7 +17,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 
 /** Read-only listing with isolated metadata caching; transfer/provider registration remains separate. */
 class SharedFolderBrowser(
@@ -426,14 +426,14 @@ class SharedFolderBrowser(
                     val account = checked.lease.account
                     val authorization = WorkerAuthorizationProvider(app).authorization(account)
                     if (!access.isCurrent(checked)) throw OpenCloudException(OpenCloudError.PreconditionFailed)
-                    val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+                    val http = TlsPolicy(app).applyTo(HttpClients.newClient(), account.serverUrl)
                     RemoteDiscoveryClient(http).streamSharedFolder(location.rootWebDavUrl, path, authorization, sink)
                 },
                 fetch = { checked, location, path ->
                     val account = checked.lease.account
                     val authorization = WorkerAuthorizationProvider(app).authorization(account)
                     if (!access.isCurrent(checked)) throw OpenCloudException(OpenCloudError.PreconditionFailed)
-                    val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+                    val http = TlsPolicy(app).applyTo(HttpClients.newClient(), account.serverUrl)
                     withContext(Dispatchers.IO) {
                         RemoteDiscoveryClient(http).folder(location.rootWebDavUrl, path, authorization)
                     }
@@ -442,7 +442,7 @@ class SharedFolderBrowser(
                     val account = checked.lease.account
                     val authorization = WorkerAuthorizationProvider(app).authorization(account)
                     if (!access.isCurrent(checked)) throw OpenCloudException(OpenCloudError.PreconditionFailed)
-                    val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+                    val http = TlsPolicy(app).applyTo(HttpClients.newClient(), account.serverUrl)
                     withContext(Dispatchers.IO) {
                         RemoteDiscoveryClient(http).sharedFolderSnapshot(location.rootWebDavUrl, path, authorization)
                     }

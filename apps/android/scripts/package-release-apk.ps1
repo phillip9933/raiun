@@ -1,6 +1,7 @@
 param(
     [string]$SigningDirectory = "$env:USERPROFILE/.android/opencloud-next-release",
-    [string]$SdkPath = "$env:LOCALAPPDATA/Android/Sdk"
+    [string]$SdkPath = "$env:LOCALAPPDATA/Android/Sdk",
+    [string]$PythonPath = 'python'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -10,6 +11,11 @@ if ([regex]::Matches($config, 'DEV_SERVER_(URL|USERNAME|PASSWORD)\s*=\s*"";').Co
 if ($config -notmatch 'VERSION_NAME = "([0-9A-Za-z.-]+)"') { throw 'Missing version name.' }
 $version = $Matches[1]
 if ($config -notmatch 'DEBUG = false') { throw 'Release must not be debuggable.' }
+$archiveTool = Join-Path $PSScriptRoot 'archive_r8_artifacts.py'
+$mappingDirectory = Join-Path $repo 'app/build/outputs/mapping/release'
+$archiveRoot = Join-Path $repo 'app/build/outputs/r8-archive'
+& $PythonPath $archiveTool --apk $inputApk --mapping-dir $mappingDirectory --output $archiveRoot --version $version
+if ($LASTEXITCODE -ne 0) { throw 'R8 report archival failed; refusing to sign the APK.' }
 $outDir = Join-Path $repo 'app/build/outputs/apk/published'
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $outputApk = Join-Path $outDir "raiun-$version.apk"

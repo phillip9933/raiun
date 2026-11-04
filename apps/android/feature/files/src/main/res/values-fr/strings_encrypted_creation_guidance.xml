@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypt_password_guidance">Utilisez au moins 12 caractères, de préférence plusieurs mots sans lien entre eux. Choisissez un mot de passe unique.</string>
+    <string name="browser_encrypt_password_too_short">Utilisez au moins %1$d caractères pour créer un nouvel espace chiffré.</string>
+</resources>

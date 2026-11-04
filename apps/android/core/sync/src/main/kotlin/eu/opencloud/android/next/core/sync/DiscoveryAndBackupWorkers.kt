@@ -15,6 +15,7 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.FolderSnapshotScope
 import eu.opencloud.android.next.core.database.SpaceEntity
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.LibreGraphSpacesClient
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
@@ -28,7 +29,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import java.io.File
 
 class AccountDiscoveryWorker(
@@ -396,7 +396,7 @@ private fun CoroutineWorker.store() = FileBrowserStore(FileBrowserDatabase.creat
 private fun CoroutineWorker.remote(serverUrl: String) = RemoteDiscoveryClient(httpClient(serverUrl))
 
 private fun CoroutineWorker.httpClient(serverUrl: String) =
-    TlsPolicy(applicationContext).applyTo(OkHttpClient.Builder().build(), serverUrl)
+    TlsPolicy(applicationContext).applyTo(HttpClients.newBuilder().build(), serverUrl)
 
 internal data class FolderRefresh(
     val store: FileBrowserStore,

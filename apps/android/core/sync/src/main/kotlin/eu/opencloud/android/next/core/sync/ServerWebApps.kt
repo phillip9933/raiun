@@ -9,6 +9,7 @@ import eu.opencloud.android.next.core.model.auth.ServerAppProvider
 import eu.opencloud.android.next.core.network.EmbeddedWebAppMode
 import eu.opencloud.android.next.core.network.EmbeddedWebAppRequest
 import eu.opencloud.android.next.core.network.EmbeddedWebAppSession
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
@@ -119,7 +120,7 @@ class ServerWebApps(
             if (!account.isActive) denied()
             val auth = WorkerAuthorizationProvider(context).authorization(account)
             if (!permitted()) denied()
-            val http = TlsPolicy(context).applyTo(OkHttpClient(), account.serverUrl)
+            val http = TlsPolicy(context).applyTo(HttpClients.newClient(), account.serverUrl)
             withRequestCancellation(http.dispatcher::cancelAll) {
                 currentCoroutineContext().ensureActive()
                 if (!permitted()) denied()

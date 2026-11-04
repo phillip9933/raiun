@@ -30,6 +30,7 @@ dependencies {
     implementation(libs.androidx.core)
     implementation(libs.androidx.appcompat)
     implementation(project(":core:security"))
+    implementation(project(":core:network"))
     implementation(project(":core:sync"))
     implementation(project(":core:datastore"))
     implementation(project(":core:designsystem"))

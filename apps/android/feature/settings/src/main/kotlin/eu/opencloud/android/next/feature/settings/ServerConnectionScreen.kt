@@ -19,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.security.ClientCertificatePolicy
 import eu.opencloud.android.next.core.security.ServerConnectionRoute
 import eu.opencloud.android.next.core.security.TlsPolicy
@@ -33,7 +34,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
@@ -348,7 +348,7 @@ private fun testCanonicalConnection(
         check(endpoint.isHttps && endpoint.host == server.host) { "Connection test must use the canonical HTTPS host." }
         val client =
             TlsPolicy(context).applyTo(
-                OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build(),
+                HttpClients.newBuilder().callTimeout(15, TimeUnit.SECONDS).build(),
                 serverUrl,
             )
         val testClient =

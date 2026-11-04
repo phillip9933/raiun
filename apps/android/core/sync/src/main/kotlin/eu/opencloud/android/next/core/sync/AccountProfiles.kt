@@ -9,6 +9,7 @@ import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.model.AccountColor
 import eu.opencloud.android.next.core.model.cacheIdentity
 import eu.opencloud.android.next.core.network.AccountProfileClient
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.CancellationException
@@ -18,7 +19,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -119,7 +119,7 @@ object AccountProfiles {
         accountId: String,
     ) = withContext(Dispatchers.IO) {
         val account = account(context, accountId)
-        val http = TlsPolicy(context).applyTo(OkHttpClient(), account.serverUrl)
+        val http = TlsPolicy(context).applyTo(HttpClients.newClient(), account.serverUrl)
         val auth = WorkerAuthorizationProvider(context).authorization(account)
         val details = AccountProfileClient(http).details(account.serverUrl, auth)
         val personal =
@@ -188,7 +188,7 @@ object AccountProfiles {
         now: Long,
     ): String? =
         try {
-            val http = TlsPolicy(context).applyTo(OkHttpClient(), account.serverUrl)
+            val http = TlsPolicy(context).applyTo(HttpClients.newClient(), account.serverUrl)
             val auth = WorkerAuthorizationProvider(context).authorization(account)
             val profile = OpenCloudApi(http).profile(account.serverUrl, auth)
             val name = profile.displayName.takeIf(String::isNotBlank) ?: account.displayName
@@ -249,7 +249,7 @@ object AccountProfiles {
     private fun client(
         context: Context,
         account: AccountEntity,
-    ) = AccountProfileClient(TlsPolicy(context).applyTo(OkHttpClient(), account.serverUrl))
+    ) = AccountProfileClient(TlsPolicy(context).applyTo(HttpClients.newClient(), account.serverUrl))
 
     private fun preferences(context: Context) =
         context.getSharedPreferences("server-profile-avatars-v2", Context.MODE_PRIVATE)

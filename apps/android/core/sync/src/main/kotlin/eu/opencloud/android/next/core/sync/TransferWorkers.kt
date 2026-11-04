@@ -22,6 +22,7 @@ import eu.opencloud.android.next.core.model.cacheIdentity
 import eu.opencloud.android.next.core.model.resourceCacheDirectory
 import eu.opencloud.android.next.core.network.ContentFingerprint
 import eu.opencloud.android.next.core.network.DownloadExpectation
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.TransferClient
@@ -38,7 +39,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.OkHttpClient
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
@@ -306,8 +306,8 @@ abstract class TransferWorker(
 
     protected open fun client(account: AccountEntity): TransferClient {
         val base =
-            OkHttpClient
-                .Builder()
+            HttpClients
+                .newBuilder()
                 .readTimeout(60, TimeUnit.SECONDS)
                 .writeTimeout(60, TimeUnit.SECONDS)
                 .build()

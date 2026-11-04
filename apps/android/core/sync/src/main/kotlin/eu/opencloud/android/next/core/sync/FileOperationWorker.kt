@@ -16,6 +16,7 @@ import eu.opencloud.android.next.core.database.FileOperationStore
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.network.DavOperationClient
 import eu.opencloud.android.next.core.network.DownloadExpectation
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.safeMessage
@@ -30,7 +31,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.OkHttpClient
 import java.util.UUID
 
 class FileOperationManager(
@@ -90,7 +90,7 @@ class FileOperationManager(
             val account = requireNotNull(store.account(source.accountId))
             val authorization = WorkerAuthorizationProvider(context).authorization(account)
             val client =
-                DavOperationClient(TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl))
+                DavOperationClient(TlsPolicy(context).applyTo(HttpClients.newBuilder().build(), account.serverUrl))
 
             suspend fun occupied(path: String): Boolean =
                 operations.dao.destinationReserved(source.accountId, destinationSpace, path) != 0 ||
@@ -199,7 +199,9 @@ class FileOperationWorker(
                 require(webDavRoot(from) == operation.sourceRoot && webDavRoot(to) == operation.destinationRoot)
                 val authorization = WorkerAuthorizationProvider(applicationContext).authorization(account)
                 val client =
-                    DavOperationClient(TlsPolicy(applicationContext).applyTo(OkHttpClient(), account.serverUrl))
+                    DavOperationClient(
+                        TlsPolicy(applicationContext).applyTo(HttpClients.newClient(), account.serverUrl),
+                    )
                 val coroutine = currentCoroutineContext()
                 withRequestCancellation(client::cancelRequests, isOwned = {
                     operations.dao.find(operation.id)?.lease == lease

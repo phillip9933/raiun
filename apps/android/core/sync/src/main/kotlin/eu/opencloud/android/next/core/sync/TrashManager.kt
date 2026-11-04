@@ -4,12 +4,12 @@ import android.content.Context
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.SpaceEntity
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.RemoteTrashResource
 import eu.opencloud.android.next.core.network.TransferHttpException
 import eu.opencloud.android.next.core.network.WebDavFeatureClient
 import eu.opencloud.android.next.core.security.TlsPolicy
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.OkHttpClient
 
 class TrashManager(
     private val context: Context,
@@ -149,7 +149,7 @@ class TrashManager(
         )
     }
 
-    private fun httpClient(serverUrl: String) = TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), serverUrl)
+    private fun httpClient(serverUrl: String) = TlsPolicy(context).applyTo(HttpClients.newBuilder().build(), serverUrl)
 
     private companion object {
         val UNSUPPORTED_STATUS_CODES = setOf(404, 405, 501)

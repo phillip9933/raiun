@@ -5,6 +5,7 @@ import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.IncomingShareLease
 import eu.opencloud.android.next.core.database.IncomingShareStore
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.IncomingSharedItem
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
@@ -17,7 +18,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 
 /** Null means locally missing/stale evidence, not server revocation. Never publish stale network results. */
 class IncomingShareAccessRepository(
@@ -58,7 +58,7 @@ class IncomingShareAccessRepository(
             val inventory = IncomingShareStore(FileBrowserDatabase.create(app))
             return IncomingShareAccessRepository(inventory) { account, item ->
                 val authorization = WorkerAuthorizationProvider(app).authorization(account)
-                val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+                val http = TlsPolicy(app).applyTo(HttpClients.newClient(), account.serverUrl)
                 withContext(Dispatchers.IO) {
                     SharedFolderAccessClient(http).resolveWithMounts(account.serverUrl, authorization, item)
                 }

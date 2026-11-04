@@ -9,6 +9,7 @@ import androidx.core.content.ContextCompat
 import androidx.work.ForegroundInfo
 import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.model.auth.OidcConfiguration
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.bearerAuthorizationHeader
 import eu.opencloud.android.next.core.security.AccountSessions
@@ -67,8 +68,8 @@ class WorkerAuthorizationProvider internal constructor(
     }
 
     private companion object {
-        // Refresh traffic shares a pool only with refresh traffic, never transfer cancellation dispatchers.
-        val refreshClient: OkHttpClient = OkHttpClient.Builder().build()
+        // Refresh has its own cancellation scope; account credentials remain on individual requests.
+        val refreshClient: OkHttpClient = HttpClients.newBuilder().build()
     }
 }
 

@@ -6,6 +6,7 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.network.DavOperationClient
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
 import eu.opencloud.android.next.core.network.TransferClient
 import eu.opencloud.android.next.core.network.WebDavFeatureClient
@@ -27,7 +28,7 @@ class ProviderFolderOperations(
         AccountEntity,
     ) -> String = { WorkerAuthorizationProvider(context).authorization(it) },
     private val client: (String) -> OkHttpClient = {
-        TlsPolicy(context).applyTo(OkHttpClient.Builder().callTimeout(30, TimeUnit.SECONDS).build(), it)
+        TlsPolicy(context).applyTo(HttpClients.newBuilder().callTimeout(30, TimeUnit.SECONDS).build(), it)
     },
     private val accountLeaseFor: (String) -> () -> Boolean = { AccountSessions.get(context).beginLease(it) },
 ) {

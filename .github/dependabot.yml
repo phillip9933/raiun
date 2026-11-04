@@ -1,0 +1,57 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    commit-message:
+      prefix: "ci(deps)"
+    schedule:
+      interval: weekly
+    groups:
+      routine:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: gradle
+    directory: /apps/android
+    commit-message:
+      prefix: "build(deps)"
+    schedule:
+      interval: weekly
+    groups:
+      routine:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: /apps/desktop
+    commit-message:
+      prefix: "build(deps)"
+    schedule:
+      interval: weekly
+    groups:
+      routine:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: /apps/desktop/desktop-shell/src-tauri
+    commit-message:
+      prefix: "build(deps)"
+    schedule:
+      interval: weekly
+    groups:
+      routine:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

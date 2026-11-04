@@ -21,7 +21,7 @@ class TransferClient(
     private val client =
         client
             .newBuilder()
-            .dispatcher(okhttp3.Dispatcher())
+            .dispatcher(okhttp3.Dispatcher(client.dispatcher.executorService))
             .followRedirects(false)
             .followSslRedirects(false)
             .retryOnConnectionFailure(false)

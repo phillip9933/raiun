@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_review_title">共有元を確認</string>
+    <string name="incoming_review_warning">元の送信者は不明です。ファイル名は信頼できる情報ではありません。コンテンツプロバイダは Android がファイルを読み取る場所を示すもので、共有した相手の証明にはなりません。</string>
+    <string name="incoming_review_unknown_name">ファイル名不明（%1$d）</string>
+    <string name="incoming_review_provider">コンテンツプロバイダのパッケージ: %1$s</string>
+    <string name="incoming_review_unknown_provider">コンテンツプロバイダ不明</string>
+</resources>

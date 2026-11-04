@@ -1,6 +1,7 @@
 package eu.opencloud.android.next.core.sync
 
 import android.content.Context
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.IncomingSharedItem
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
@@ -14,7 +15,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.OkHttpClient
 
 /** Fresh exact-target rights and containment evidence, never permission to reuse an ordinary drive upload. */
 class SharedUploadDestinationResolver(
@@ -85,7 +85,7 @@ class SharedUploadDestinationResolver(
             return SharedUploadDestinationResolver(browser) { page, remote ->
                 val account = page.checked.lease.account
                 val authorization = WorkerAuthorizationProvider(app).authorization(account)
-                val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+                val http = TlsPolicy(app).applyTo(HttpClients.newClient(), account.serverUrl)
                 val selection =
                     IncomingSharedItem(
                         page.location.shareId,

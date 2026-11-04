@@ -11,13 +11,13 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.model.resourceCacheDirectory
 import eu.opencloud.android.next.core.model.validatedCachedFile
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
@@ -99,8 +99,8 @@ object ImagePreviews {
         val authorization = WorkerAuthorizationProvider(context).authorization(account)
         val client =
             TlsPolicy(context).applyTo(
-                OkHttpClient
-                    .Builder()
+                HttpClients
+                    .newBuilder()
                     .followRedirects(false)
                     .followSslRedirects(false)
                     .callTimeout(15, TimeUnit.SECONDS)

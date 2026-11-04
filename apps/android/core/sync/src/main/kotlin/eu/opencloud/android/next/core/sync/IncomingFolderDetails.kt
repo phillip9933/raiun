@@ -2,6 +2,7 @@ package eu.opencloud.android.next.core.sync
 
 import android.content.Context
 import eu.opencloud.android.next.core.network.EndpointPolicy
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.IncomingShareVisibilityClient
 import eu.opencloud.android.next.core.network.IncomingSharedItem
 import eu.opencloud.android.next.core.network.OpenCloudError
@@ -12,7 +13,6 @@ import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 
 data class IncomingFolderDetails(
     val name: String,
@@ -60,7 +60,7 @@ class IncomingFolderDetailsLoader(
         val account = page.checked.lease.account
         val authorization = WorkerAuthorizationProvider(app).authorization(account)
         requireCurrent(page, permit)
-        val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+        val http = TlsPolicy(app).applyTo(HttpClients.newClient(), account.serverUrl)
         IncomingShareVisibilityClient(http).setHidden(account.serverUrl, authorization, item, hidden)
         requireCurrent(page, permit)
     }

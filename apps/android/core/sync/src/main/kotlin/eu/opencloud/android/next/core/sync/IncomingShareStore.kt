@@ -36,6 +36,15 @@ class IncomingShareStore(
 ) {
     private val root = File(context.noBackupFilesDir, "incoming-shares")
 
+    /** Queries bounded, untrusted metadata only; never opens or stages source content. */
+    suspend fun review(sources: List<Uri>): List<IncomingShareReview> {
+        require(sources.isNotEmpty() && sources.size <= 100) { "Choose between 1 and 100 files." }
+        sources.forEach { uri ->
+            require(uri.scheme == "content" && !isOwnProvider(uri)) { "Share readable files from another app." }
+        }
+        return reviewIncomingShareMetadata(context, sources)
+    }
+
     fun isStaged(batchId: String): Boolean = hasSavedAtomicFile(AtomicFile(File(directory(batchId), "manifest.json")))
 
     fun destination(batchId: String): IncomingShareDestination? {
