@@ -22,7 +22,7 @@ raiun-cache = { path = "../raiun-cache" }
 raiun-vault = { path = "../raiun-vault" }
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 zeroize = "1"
 url = "2"
 tempfile.workspace = true

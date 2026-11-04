@@ -14,7 +14,7 @@ raiun-cache = { path = "../raiun-cache" }
 raiun-engine = { path = "../raiun-engine" }
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 tempfile.workspace = true
 url = "2"
 
