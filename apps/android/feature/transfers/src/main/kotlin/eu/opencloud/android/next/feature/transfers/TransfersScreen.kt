@@ -62,6 +62,7 @@ import eu.opencloud.android.next.core.database.TransferInventoryFilter
 import eu.opencloud.android.next.core.database.TransferInventoryPage
 import eu.opencloud.android.next.core.database.TransferState
 import eu.opencloud.android.next.core.database.VAULT_GROUP_LOCATION_KIND
+import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.sync.TransferManager
@@ -364,15 +365,15 @@ enum class TransferConflictDecision { REPLACE, KEEP_BOTH, CANCEL }
 
 internal fun categorizeTransfers(transfers: List<TransferEntity>): TransfersUiState =
     TransfersUiState(
-        active = transfers.filter { it.state in ACTIVE_STATES },
-        failed = transfers.filter { it.state in FAILED_STATES },
-        history = transfers.filter { it.state in HISTORY_STATES },
+        active = transfers.filter { it.typedState.isActive },
+        failed = transfers.filter { it.typedState.requiresAttention },
+        history = transfers.filter { it.typedState.isHistory },
     )
 
 internal fun bulkUploadRetryTargets(transfers: List<TransferEntity>): List<TransferEntity> =
     transfers.filter {
         it.direction == TransferDirection.UPLOAD.name &&
-            it.state in setOf(TransferState.FAILED.name, TransferState.RETRY.name)
+            it.typedState.allowsBulkRetry
     }
 
 internal fun bulkUploadConflictTargets(
@@ -385,10 +386,6 @@ internal fun bulkUploadConflictTargets(
             it.state == TransferState.CONFLICT.name
     }
 
-private val ACTIVE_STATES =
-    setOf(TransferState.QUEUED.name, TransferState.RUNNING.name, TransferState.RETRY.name, "AWAITING_UNLOCK")
-private val FAILED_STATES = setOf(TransferState.FAILED.name, TransferState.CONFLICT.name)
-private val HISTORY_STATES = setOf(TransferState.SUCCEEDED.name, TransferState.CANCELLED.name)
 private val ENCRYPTED_LOCATION_KINDS = setOf("VAULT", VAULT_GROUP_LOCATION_KIND)
 private val REPLACE_BLOCKED_LOCATION_KINDS = ENCRYPTED_LOCATION_KINDS + "SHARED_FOLDER"
 
@@ -680,7 +677,7 @@ private fun FilteredTransferContent(
                 }
             }
             transferSection(needsAttentionTitle, visibleState.failed) { transfer ->
-                FailedTransferRow(transfer, onRetry, onResolveConflict, conflictCancellationPending)
+                FailedTransferRow(transfer, onRetry, onCancel, onResolveConflict, conflictCancellationPending)
             }
             transferSection(historyTitle, visibleState.history) {
                 TransferRow(it, spaceName = state.spaceNames[it.spaceId])
@@ -729,12 +726,19 @@ private fun androidx.compose.foundation.lazy.LazyListScope.transferSection(
 private fun FailedTransferRow(
     transfer: TransferEntity,
     onRetry: (TransferEntity) -> Unit,
+    onCancel: (TransferEntity) -> Unit,
     onResolveConflict: (TransferEntity, TransferConflictDecision) -> Unit,
     conflictCancellationPending: Boolean,
 ) {
     TransferRow(
         transfer = transfer,
         onRetry = if (transfer.state == TransferState.FAILED.name) ({ onRetry(transfer) }) else null,
+        onCancel =
+            if (transfer.typedState == TransferState.UNKNOWN && transfer.locationKind != VAULT_GROUP_LOCATION_KIND) {
+                { onCancel(transfer) }
+            } else {
+                null
+            },
         onConflict =
             if (transfer.state == TransferState.CONFLICT.name) {
                 { decision -> onResolveConflict(transfer, decision) }
@@ -846,7 +850,9 @@ private fun TransferSupportingContent(
             )
         }
         TransferProgress(transfer)
-        transfer.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        if (transfer.typedState != TransferState.UNKNOWN) {
+            transfer.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
         TransferFailureDetails(transfer)
         onConflict?.let { TransferConflictActions(transfer.locationKind, conflictActionsEnabled, it) }
     }
@@ -854,7 +860,7 @@ private fun TransferSupportingContent(
 
 @Composable
 private fun TransferProgress(transfer: TransferEntity) {
-    if (transfer.state !in ACTIVE_STATES || transfer.state == "AWAITING_UNLOCK") return
+    if (!transfer.typedState.isRunnable) return
     if (transfer.bytesTotal > 0) {
         val progress = (transfer.bytesTransferred.toFloat() / transfer.bytesTotal).coerceIn(0f, 1f)
         LinearProgressIndicator({ progress }, Modifier.fillMaxWidth())
@@ -965,7 +971,11 @@ internal fun TransferConflictActions(
 @Composable
 private fun TransferFailureDetails(transfer: TransferEntity) {
     var expanded by remember(transfer.id) { mutableStateOf(false) }
-    if (transfer.state !in setOf("RETRY", "FAILED", "CONFLICT")) return
+    if (transfer.typedState == TransferState.UNKNOWN) {
+        Text(stringResource(R.string.transfers_unknown_state), style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    if (!transfer.typedState.requiresAttention && transfer.typedState != TransferState.RETRY) return
     val code = safeTransferDiagnosticCode(transfer.errorCode)
     Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXxs)) {
         if (transfer.state == "RETRY" && transfer.notBeforeEpochMillis > 0) {
@@ -1007,7 +1017,7 @@ private fun TransferDiagnosticDetails(
 @Composable
 private fun transferStatus(transfer: TransferEntity): String {
     val status =
-        if (transfer.state == "AWAITING_UNLOCK") {
+        if (transfer.typedState == TransferState.AWAITING_UNLOCK) {
             stringResource(R.string.transfers_awaiting_unlock)
         } else if (transfer.state == TransferState.RUNNING.name) {
             when {
@@ -1034,13 +1044,14 @@ private fun transferStatus(transfer: TransferEntity): String {
 
 @Composable
 private fun transferStateLabel(state: String): String =
-    when (TransferState.entries.firstOrNull { it.name == state }) {
+    when (TransferState.fromPersisted(state)) {
         TransferState.QUEUED -> stringResource(R.string.transfers_status_queued)
         TransferState.RETRY -> stringResource(R.string.transfers_status_retry)
         TransferState.CONFLICT -> stringResource(R.string.transfers_status_conflict)
         TransferState.SUCCEEDED -> stringResource(R.string.transfers_status_succeeded)
         TransferState.FAILED -> stringResource(R.string.transfers_status_failed)
         TransferState.CANCELLED -> stringResource(R.string.transfers_status_cancelled)
+        TransferState.UNKNOWN -> stringResource(R.string.transfers_needs_attention)
         else -> state.lowercase().replaceFirstChar(Char::uppercase)
     }
 

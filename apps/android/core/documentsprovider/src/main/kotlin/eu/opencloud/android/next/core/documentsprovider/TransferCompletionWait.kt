@@ -1,5 +1,6 @@
 package eu.opencloud.android.next.core.documentsprovider
 
+import eu.opencloud.android.next.core.model.TransferState
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -25,11 +26,16 @@ internal suspend fun awaitEditDownload(
         .combine(revocationChecks) { state, _ ->
             currentCoroutineContext().ensureActive()
             check(authorized()) { "Document editing is unavailable or locked." }
-            when (state) {
-                null -> throw FileNotFoundException("Download unavailable.")
-                "SUCCEEDED" -> true
-                "QUEUED", "RUNNING", "RETRY" -> false
-                else -> throw FileNotFoundException("The document download did not complete.")
+            when (val parsed = TransferState.fromPersisted(state)) {
+                TransferState.SUCCEEDED -> true
+                else ->
+                    if (parsed.isRunnable) {
+                        false
+                    } else {
+                        throw FileNotFoundException(
+                            "The document download did not complete.",
+                        )
+                    }
             }
         }.first { it }
 }

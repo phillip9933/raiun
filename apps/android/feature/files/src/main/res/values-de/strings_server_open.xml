@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_server_open_explanation">Hiermit wird die Datei auf dem Server geöffnet. „Öffnen mit“ öffnet eine lokale Kopie auf diesem Gerät. Bearbeitung und Zusammenarbeit hängen von den auf Ihrem Server eingerichteten Apps ab.</string>
+</resources>

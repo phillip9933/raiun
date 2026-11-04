@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_unknown_state">Diese Übertragung hat einen unbekannten gespeicherten Status. Sie wurde ohne erneuten Versuch beibehalten.</string>
+</resources>

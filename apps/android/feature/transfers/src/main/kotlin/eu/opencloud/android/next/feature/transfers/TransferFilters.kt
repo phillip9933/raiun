@@ -5,6 +5,7 @@ import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferInventoryFileType
 import eu.opencloud.android.next.core.database.TransferInventoryFilter
 import eu.opencloud.android.next.core.database.TransferInventoryStatus
+import eu.opencloud.android.next.core.model.TransferState
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -36,8 +37,8 @@ internal data class TransferFilters(
     private fun matchesStatus(state: String): Boolean =
         when (status) {
             TransferStatusFilter.ALL -> true
-            TransferStatusFilter.ACTIVE -> state in setOf("QUEUED", "RUNNING", "RETRY", "AWAITING_UNLOCK")
-            TransferStatusFilter.ATTENTION -> state in setOf("FAILED", "CONFLICT")
+            TransferStatusFilter.ACTIVE -> TransferState.fromPersisted(state).isActive
+            TransferStatusFilter.ATTENTION -> TransferState.fromPersisted(state).requiresAttention
             TransferStatusFilter.SUCCEEDED -> state == "SUCCEEDED"
             TransferStatusFilter.CANCELLED -> state == "CANCELLED"
         }

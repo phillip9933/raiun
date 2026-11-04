@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_server_open_explanation">サーバー上のファイルを開きます。「他のアプリで開く」では、この端末上のローカルコピーを開きます。編集や共同作業の利用可否は、サーバーに設定されたアプリによって異なります。</string>
+</resources>

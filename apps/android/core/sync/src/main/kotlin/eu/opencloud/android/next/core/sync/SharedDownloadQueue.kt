@@ -6,6 +6,7 @@ import eu.opencloud.android.next.core.database.SharedDownloadRecord
 import eu.opencloud.android.next.core.database.SharedDownloadStore
 import eu.opencloud.android.next.core.database.SharedFolderEntry
 import eu.opencloud.android.next.core.database.TransferEntity
+import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import kotlinx.coroutines.currentCoroutineContext
@@ -72,7 +73,7 @@ class SharedDownloadQueue(
     suspend fun restore(transferId: String): PreparedSharedDownload? {
         val record =
             store.read(transferId)?.takeIf {
-                it.transfer.state in setOf("QUEUED", "RUNNING", "RETRY")
+                it.transfer.typedState.isRunnable
             } ?: return null
         val source = resolver.prepare(request(record))
         currentCoroutineContext().ensureActive()

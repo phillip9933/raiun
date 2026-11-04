@@ -100,6 +100,32 @@ class TransferInventoryScreenTest {
         compose.onNodeWithText(opaquePath, substring = true).assertDoesNotExist()
     }
 
+    @Test fun unknownStateShowsSafeExplanationAndExplicitCancelWithoutRetry() {
+        val unknown = window(0).history.first().copy(state = "FUTURE_PRIVATE_MARKER", error = "unsafe raw row detail")
+        var cancelled: TransferEntity? = null
+        compose.setContent {
+            OpenCloudTheme {
+                TransfersScreen(
+                    state = categorizeTransfers(listOf(unknown)),
+                    selectedAccountId = "account",
+                    onNavigateBack = {},
+                    onRetry = { error("Unknown state must not be retried") },
+                    onCancel = { cancelled = it },
+                    onResolveConflict = { _, _ -> error("Unknown state must not resolve a conflict") },
+                    onRetryAll = {},
+                    onClearAll = {},
+                    onDismissError = {},
+                )
+            }
+        }
+        compose.onNodeWithText("This transfer has an unrecognized saved state.", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("FUTURE_PRIVATE_MARKER", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("unsafe raw row detail", substring = true).assertDoesNotExist()
+        compose.onNodeWithContentDescription("Retry").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Cancel transfer").performClick()
+        assertEquals(unknown, cancelled)
+    }
+
     private fun window(offset: Int): TransfersUiState {
         val entries =
             List(128) { index ->

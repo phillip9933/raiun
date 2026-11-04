@@ -6,6 +6,19 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class TransfersStateTest {
+    @Test fun `unknown rows stay visible without becoming retry targets or successful history`() {
+        val unknown = transfer("unknown", TransferState.FAILED).copy(state = "future")
+        val result = categorizeTransfers(listOf(unknown))
+        assertEquals(emptyList<TransferEntity>(), result.active)
+        assertEquals(listOf(unknown), result.failed)
+        assertEquals(emptyList<TransferEntity>(), result.history)
+        assertEquals(emptyList<TransferEntity>(), bulkUploadRetryTargets(listOf(unknown)))
+        assertEquals(
+            true,
+            TransferFilters(status = TransferStatusFilter.ATTENTION).matches(unknown, java.time.ZoneId.of("UTC")),
+        )
+    }
+
     @Test fun `categorizes durable Room transfer states`() {
         val result =
             categorizeTransfers(

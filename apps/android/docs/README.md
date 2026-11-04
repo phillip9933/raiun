@@ -4,17 +4,23 @@ Start with [README](../README.md) for installation and current limitations, and 
 
 | Document | Purpose |
 | --- | --- |
-| [Current architecture](CURRENT-ARCHITECTURE.md) | Module ownership, data flow, runtime invariants and unpublished candidate scope |
+| [Current architecture](CURRENT-ARCHITECTURE.md) | Module ownership, data flow, runtime invariants and version boundaries |
+| [Android hardening](ANDROID-HARDENING.md) | Destination ownership, compatible typed transfer states, caller URI checks and acceptance limits |
+| [Release shrinking evaluation](RELEASE-SHRINKING.md) | Opt-in minimized test variant, runtime pins, native/reflection blockers and measurement limits |
 | [Product backlog](../../../docs/PRODUCT-BACKLOG.md) | Queued Android and shared product improvements |
 | [OpenCloud 9 compatibility](OPENCLOUD-9.md) | Published-server review and guest invitation creation/management boundaries |
 | [Testing](TESTING.md) | Quality commands, device requirements and validation limits |
 | [Authentication](AUTHENTICATION.md) | OAuth/OIDC discovery, token handling, issuer-response compatibility and review boundaries |
+| [Credential storage](CREDENTIAL-STORAGE.md) | Versioned encrypted records, account binding, legacy migration and recovery boundaries |
+| [Server document apps](SERVER-DOCUMENT-APPS.md) | Server-backed viewing/editing versus local Open with, and supported security boundaries |
 | [Linux development](LINUX-DEVELOPMENT.md) | Installed local toolchain, commands and validation evidence |
 | [Encrypted vault guide](ENCRYPTED-VAULTS-PLAN.md) | Published encrypted-vault behavior, local follow-up, boundaries and interoperability |
 | [Scanner SDK](OFFLINE-SCANNER-SDK.md) | Pinned dependency setup and host ownership |
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Shared design mapping](SHARED-DESIGN.md) | Native Material theme, account accents and scoped accessibility checks |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
+| [Android 1.3.3 release notes](RELEASE-NOTES-1.3.3.md) | Server document apps, credential protection and transfer/share hardening |
+| [Android 1.3.2 release notes](RELEASE-NOTES-1.3.2.md) | Published maintenance, recovery and credential-handling fixes |
 | [Android 1.3.1 release notes](RELEASE-NOTES-1.3.1.md) | Android 1.3.1 authentication fixes and interoperability limits |
 | [Android 1.3.0 release notes](RELEASE-NOTES-1.3.0.md) | Android 1.3.0 changes and update guidance |
 | [Android 1.2.0 release notes](RELEASE-NOTES-1.2.0.md) | Android 1.2.0 changes and update guidance |

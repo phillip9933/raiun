@@ -29,28 +29,31 @@ internal interface VaultDeviceRememberCrypto {
 internal class AndroidVaultDeviceRememberCrypto : VaultDeviceRememberCrypto {
     override fun isPlatformSupported(): Boolean = Build.VERSION.SDK_INT >= 35
 
-    override fun create(alias: String): SecretKey {
-        check(isPlatformSupported())
-        require(alias.matches(Regex("raiun_vault_device_v1_[0-9a-f]{64}_[0-9a-f]{16}")))
-        val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
-        check(!keyStore.containsAlias(alias)) { "Refusing to adopt an existing device-remember alias." }
-        val spec =
-            KeyGenParameterSpec
-                .Builder(
-                    alias,
-                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-                ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(KEY_SIZE_BITS)
-                // Deliberately no setUserAuthenticationRequired/timeout. The device-unlocked
-                // requirement is the documented Android 15+ policy for this alias namespace.
-                .setUnlockedDeviceRequired(true)
-                .build()
-        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEY_STORE).run {
-            init(spec)
-            generateKey()
+    override fun create(alias: String): SecretKey =
+        // Keep platform API calls inside the Android 15+ branch for module lint.
+        if (Build.VERSION.SDK_INT >= 35) {
+            require(alias.matches(Regex("raiun_vault_device_v1_[0-9a-f]{64}_[0-9a-f]{16}")))
+            val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
+            check(!keyStore.containsAlias(alias)) { "Refusing to adopt an existing device-remember alias." }
+            val spec =
+                KeyGenParameterSpec
+                    .Builder(
+                        alias,
+                        KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                    ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(KEY_SIZE_BITS)
+                    // Deliberately no setUserAuthenticationRequired/timeout. The device-unlocked
+                    // requirement is the documented Android 15+ policy for this alias namespace.
+                    .setUnlockedDeviceRequired(true)
+                    .build()
+            KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEY_STORE).run {
+                init(spec)
+                generateKey()
+            }
+        } else {
+            error("Device remember requires Android 15 or later.")
         }
-    }
 
     override fun load(alias: String): SecretKey? {
         val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }

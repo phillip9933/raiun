@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_server_open_explanation">Cette action ouvre le fichier sur le serveur. « Ouvrir avec » ouvre une copie locale sur cet appareil. La modification et la collaboration dépendent des applications configurées sur votre serveur.</string>
+</resources>

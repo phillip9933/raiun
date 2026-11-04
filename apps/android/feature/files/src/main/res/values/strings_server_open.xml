@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_server_open_explanation">This opens the server file. Open with opens a local copy on this device. Editing and collaboration depend on the apps configured by your server.</string>
+</resources>

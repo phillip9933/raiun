@@ -126,12 +126,30 @@ class VaultViewModel internal constructor(
     private val pickerLease = VaultPickerLease()
     private var pickerTimeout: Job? = null
     private var pickerSuspended = false
-    private var destinationJob: Job? = null
-    private var destinationGeneration = 0L
-    private var destinationDirectory: VaultRouteDirectorySnapshot? = null
-    private val destinationPreviousOffsets = mutableListOf<Long>()
-    private var destinationSources: Map<String, PresentedVaultFolder> = emptyMap()
-    private var destinationSource: PresentedVaultFolder? = null
+    private val destinationPicker =
+        VaultDestinationPicker(
+            viewModelScope,
+            mutableState,
+            object : VaultDestinationOwner {
+                override fun capture(): VaultDestinationOwnerSnapshot? = destinationOwnerSnapshot()
+
+                override fun isCurrent(owner: VaultDestinationOwnerSnapshot): Boolean {
+                    val sessionCurrent = routeActive && session === owner.opened && accountId == owner.account
+                    val viewCurrent =
+                        generation == owner.routeGeneration && mutableState.value.lockRevision == owner.lockRevision
+                    return sessionCurrent && viewCurrent
+                }
+
+                override fun closeContents() = closeDirectory()
+
+                override fun reportFailure(
+                    owner: VaultDestinationOwnerSnapshot,
+                    failure: Exception,
+                ) {
+                    reportDestinationFailure(owner, failure)
+                }
+            },
+        )
 
     fun enterRoute(
         accountId: String,
@@ -1676,7 +1694,7 @@ class VaultViewModel internal constructor(
         if (busy || state.mode != VaultRouteMode.CONTENTS) return null
         val opened = session?.takeUnless { it.isOffline } ?: return null
         val account = accountId ?: return null
-        val selected = findEntry(id) ?: destinationSources[id] ?: return null
+        val selected = findEntry(id) ?: destinationPicker.source(id) ?: return null
         if (selected.remote.isVaultRoot) return null
         val owner = target ?: return null
         val location =
@@ -1722,184 +1740,37 @@ class VaultViewModel internal constructor(
     ) {
         val selected = findEntry(id) ?: return
         if (mutableState.value.loading || mutableState.value.mode != VaultRouteMode.CONTENTS) return
-        destinationSource = selected
-        loadDestinationFolders(path)
+        destinationPicker.begin(selected, path, presentedEntries)
     }
 
-    fun loadDestinationFolders(path: String) {
-        val request = destinationRequest(path) ?: return
-        if (mutableState.value.destinationPickerPath == null) destinationSources = presentedEntries.toMap()
-        destinationJob?.cancel()
-        closeDestinationDirectory()
-        closeDirectory()
-        mutableState.value =
-            mutableState.value.copy(
-                entries = emptyList(),
-                destinationPickerPath = path,
-                destinationPickerEntries = emptyList(),
-                destinationPickerPage = null,
-                destinationPickerLoading = true,
-                destinationPickerError = null,
-            )
-        destinationJob = viewModelScope.launch { openDestinationDirectory(request) }
-    }
+    fun loadDestinationFolders(path: String) = destinationPicker.load(path, presentedEntries)
 
-    private data class DestinationRequest(
-        val opened: VaultRouteSession,
-        val account: String,
-        val path: String,
-        val revision: Long,
-        val lockRevision: Long,
-        val routeGeneration: Long,
-    )
-
-    private fun destinationRequest(path: String): DestinationRequest? {
+    private fun destinationOwnerSnapshot(): VaultDestinationOwnerSnapshot? {
         val opened = session
         val account = accountId
         val available = mutableState.value.mode == VaultRouteMode.CONTENTS && !mutableState.value.loading
         if (opened == null || account == null || !available) return null
-        return DestinationRequest(
-            opened,
-            account,
-            path,
-            ++destinationGeneration,
-            mutableState.value.lockRevision,
-            generation,
-        )
+        return VaultDestinationOwnerSnapshot(opened, account, mutableState.value.lockRevision, generation, showHidden)
     }
 
-    private fun isCurrentDestination(request: DestinationRequest): Boolean {
-        val sessionCurrent = routeActive && session === request.opened && accountId == request.account
-        val viewCurrent =
-            destinationGeneration == request.revision && mutableState.value.lockRevision == request.lockRevision
-        return sessionCurrent && viewCurrent && generation == request.routeGeneration
-    }
-
-    @Suppress("TooGenericExceptionCaught") // Destination snapshots close on cancellation and late completion.
-    private suspend fun openDestinationDirectory(request: DestinationRequest) {
-        var snapshot: VaultRouteDirectorySnapshot? = null
-        var adopted = false
-        try {
-            val exclusion = destinationSource?.remote?.takeIf { it.isFolder }?.path
-            snapshot = request.opened.openDirectory(request.path, showHidden, exclusion)
-            currentCoroutineContext().ensureActive()
-            val entries = snapshot.page(0, VAULT_DIRECTORY_PAGE_SIZE)
-            currentCoroutineContext().ensureActive()
-            if (!isCurrentDestination(request)) return
-            destinationDirectory = snapshot
-            adopted = true
-            publishDestinationPage(snapshot, entries, 0)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            reportDestinationFailure(request, failure)
-        } finally {
-            if (!adopted) snapshot?.close()
-        }
-    }
-
-    fun destinationPage(previous: Boolean) {
-        val snapshot = destinationDirectory
-        val page = mutableState.value.destinationPickerPage
-        if (snapshot == null || page == null || mutableState.value.destinationPickerLoading) return
-        val canMove = if (previous) page.hasPrevious else page.hasNext
-        if (!canMove) return
-        val offset = if (previous) destinationPreviousOffsets.lastOrNull() else page.offset + page.count
-        val request = destinationRequest(mutableState.value.destinationPickerPath.orEmpty())
-        if (offset != null && request != null) {
-            destinationJob?.cancel()
-            mutableState.value =
-                mutableState.value.copy(destinationPickerEntries = emptyList(), destinationPickerLoading = true)
-            destinationJob =
-                viewModelScope.launch { loadDestinationPage(request, snapshot, page.offset, offset, previous) }
-        }
-    }
-
-    @Suppress("TooGenericExceptionCaught") // Page revocation reports safe errors and closes the invalid snapshot.
-    private suspend fun loadDestinationPage(
-        request: DestinationRequest,
-        snapshot: VaultRouteDirectorySnapshot,
-        previousOffset: Long,
-        offset: Long,
-        previous: Boolean,
-    ) {
-        var delivered = false
-        try {
-            val entries = snapshot.page(offset, VAULT_DIRECTORY_PAGE_SIZE)
-            currentCoroutineContext().ensureActive()
-            if (!isCurrentDestination(request) || destinationDirectory !== snapshot) return
-            if (previous) {
-                destinationPreviousOffsets.removeAt(destinationPreviousOffsets.lastIndex)
-            } else {
-                destinationPreviousOffsets += previousOffset
-            }
-            publishDestinationPage(snapshot, entries, offset)
-            delivered = true
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            reportDestinationFailure(request, failure)
-        } finally {
-            if (!delivered && destinationDirectory === snapshot) closeDestinationDirectory()
-        }
-    }
-
-    private fun publishDestinationPage(
-        snapshot: VaultRouteDirectorySnapshot,
-        entries: List<VaultFolder>,
-        offset: Long,
-    ) {
-        mutableState.value =
-            mutableState.value.copy(
-                destinationPickerLoading = false,
-                destinationPickerError = null,
-                destinationPickerPage =
-                    VaultDirectoryPageState(
-                        offset,
-                        snapshot.totalCount,
-                        entries.size,
-                        destinationPreviousOffsets.isNotEmpty(),
-                    ),
-                destinationPickerEntries =
-                    entries.map { entry ->
-                        VaultRouteEntry(
-                            entry.id + "\u0000" + entry.path,
-                            entry.name,
-                            entry.path,
-                            entry.isFolder,
-                            false,
-                            entry.size,
-                            entry.contentType,
-                            displaySize = if (entry.isFolder) null else encryptedPlaintextSize(entry.size),
-                        )
-                    },
-            )
-    }
+    fun destinationPage(previous: Boolean) = destinationPicker.page(previous)
 
     private fun reportDestinationFailure(
-        request: DestinationRequest,
+        owner: VaultDestinationOwnerSnapshot,
         failure: Exception,
     ) {
-        if (!isCurrentDestination(request)) return
         reportFailure(
             failure,
             VaultRouteError.CONTENTS,
-            VaultFailureContext(request.routeGeneration, request.account, lockOnRevocation = true),
+            VaultFailureContext(owner.routeGeneration, owner.account, lockOnRevocation = true),
         )
-        if (session === request.opened) {
+        if (session === owner.opened) {
             mutableState.value =
                 mutableState.value.copy(
                     destinationPickerLoading = false,
                     destinationPickerError = mutableState.value.error ?: VaultRouteError.CONTENTS,
                 )
         }
-    }
-
-    private fun closeDestinationDirectory() {
-        destinationDirectory?.close()
-        destinationDirectory = null
-        destinationPreviousOffsets.clear()
-        mutableState.value = mutableState.value.copy(destinationPickerPage = null)
     }
 
     fun dismissDestinationPicker() {
@@ -1912,21 +1783,7 @@ class VaultViewModel internal constructor(
         }
     }
 
-    private fun clearDestinationPicker() {
-        destinationGeneration++
-        destinationJob?.cancel()
-        destinationJob = null
-        closeDestinationDirectory()
-        destinationSources = emptyMap()
-        destinationSource = null
-        mutableState.value =
-            mutableState.value.copy(
-                destinationPickerPath = null,
-                destinationPickerEntries = emptyList(),
-                destinationPickerLoading = false,
-                destinationPickerError = null,
-            )
-    }
+    private fun clearDestinationPicker() = destinationPicker.clear()
 
     private suspend fun revalidateActionSource(
         opened: VaultRouteSession,
@@ -1995,7 +1852,7 @@ class VaultViewModel internal constructor(
     ): PresentedVaultFolder? {
         val transfer = action == VaultEntryAction.MOVE || action == VaultEntryAction.COPY
         if (transfer && mutableState.value.destinationPickerLoading) return null
-        return findEntry(id) ?: destinationSources[id]?.takeIf { transfer }
+        return findEntry(id) ?: destinationPicker.source(id)?.takeIf { transfer }
     }
 
     fun onEntryAction(
@@ -3662,11 +3519,6 @@ class VaultViewModel internal constructor(
         val vaultPath: String,
         val title: String,
         val remoteVaultId: String,
-    )
-
-    private data class PresentedVaultFolder(
-        val route: VaultRouteEntry,
-        val remote: VaultFolder,
     )
 }
 

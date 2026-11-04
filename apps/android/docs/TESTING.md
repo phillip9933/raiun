@@ -720,3 +720,73 @@ The owner tested the production-signed 1.3.2/code52 maintenance candidate and re
 Local validation passed 2,036 host tests with no failures/errors/skips, formatting/static analysis, screenshot checks, release lint and APK assembly. The accepted API26 and API35 native matrices each executed 85 passing cases, with seven and eight explicit platform/optional skips respectively. Unchanged-module results were retained across test-fixture corrections; affected suites were rerun. Production-signed upgrades from official1.3.1 retained a synthetic private file through bounded launch on both APIs. A separate native test validates the Room27-to28 migration. Synthetic upgrade results do not establish retention of real owner accounts or database contents.
 
 Account removal can remain pending when private files are active or recovery ownership cannot be established; the UI exposes retry rather than reporting incomplete cleanup as finished. The database migration is forward-only. Large-folder physical-device performance is not benchmarked. Further component cleanup, typed transfer states, release shrinking, credential slot binding and incoming-share sender provenance are tracked in public issues#51–55.
+
+
+## Local server-app and credential-binding follow-up — 4 November 2026
+
+The local branch `work/android-office-credential-hardening`, based on published Android 1.3.2 source `f19c3ede8e7d1aff3514680d22782f56fb32b188`, implements issues #21 and #54. It adds the ordinary-file **Open in web app** action and exact-slot authenticated credential envelopes with validated legacy migration. Source remains uncommitted and unpublished; existing release/device acceptance does not certify it.
+
+The final combined local gate passed formatting, static analysis, all 2,056 host cases (zero failures/errors/skips), screenshot verification, app/security-module release lint, debug and unsigned-release assembly and app/sync/security instrumentation assembly. Two action-menu screenshots were visually reviewed and updated for the added row; existing local export/copy assertions remain. Strict locale validation passed 1,601 keys across 12 modules for each of German, French, Spanish, European Portuguese and Japanese; all eight validator regressions passed.
+
+The affected native suites passed on disposable read-only API 26/API 35 emulators: API 26 executed 45 passing cases with one explicit platform skip; API 35 executed 43 passing cases with three explicit platform skips. These cover the complete security and sync suites, including three new real AndroidKeyStore cases per API and existing account-removal/transfer recovery. They are not a new full eight-module native release matrix. No owner phone or live Office provider was used.
+
+Independent source review resolved token/registration validation, invalidation-with-migration-failure and maximum-Unicode envelope boundary findings. Final review found no remaining actionable defect in the reviewed scope. The broader module lint exposed an existing unsupported-platform guard it could not prove; key creation now sits inside an explicit unchanged Android 15+ branch, with an Android 26 regression proving rejection before Keystore access. Earlier test-fixture compile/permission/error-expectation failures, one stopped fixture idling run, screenshot mismatches and lint attempts remain retained in local evidence. No security assertion, TLS check, vault exclusion or supported-device restriction was weakened to pass.
+
+Current build metadata remains 1.3.2/code 52 for local validation only. Before distributing a production-signed phone candidate, choose a higher version code and complete its signing/upgrade checks. Older builds cannot read new v2 credential records. Live provider editing/co-editing and physical account migration/restart checks remain separate; no new version, production signing or publication is implied.
+
+## Local hardening follow-up — 4 November 2026
+
+The unpublished follow-up to published Android 1.3.2 covers the bounded vault
+picker extraction (#51), shared transfer states (#52), credential-slot binding
+(#54), incoming-share caller checks (#55), and the preceding server web-app
+entry. The complete local gate passes **2,088 host cases, zero failures/errors/
+skips**, formatting, static/design checks, screenshot verification, app and
+security-module release lint, debug/unsigned-release assembly and native-test
+compilation. Five locales are complete for 1,603 keys; all eight validator
+regressions pass. Original German resources and the preceding credential-security
+source retain their baseline hashes.
+
+The eight-module native matrix passes **API 26: 89 cases, 7 explicit skips;
+API 35: 90 cases, 8 explicit skips**. The files module has no native cases.
+The API 35 share case uses a separate nonexported provider, a legitimate
+persistable grant, Activity recreation and an unrelated launch caller that must
+be denied even while the receiver can still read the URI. The packaged cipher
+case decrypts a public known answer and rejects tampering without plaintext.
+API 26 does not provide the newer caller-proof API; its platform skip is not a
+passing provenance check. These results do not establish physical OEM/profile/
+chooser/process-kill acceptance or a new independent GitHub release gate.
+
+Earlier failed attempts are retained. One historical cancellation fixture needed
+an available account to reach the strengthened transactional claim check;
+compiler/static-analysis integration corrections preserved the admission guards.
+The first direct native harness omitted the required screenshot output argument;
+a subsequent harness mistakenly selected an empty network module instead of the
+UI module. The accepted matrix supplies the output argument and uses the exact
+eight modules listed above. No assertion was removed or failed run relabelled.
+
+Evidence, exact artifact hashes, source manifests, logs, screenshots and the
+separate **experimental** R8 evaluation are in
+`outputs/android-next-issues-20261104/` outside Git. See
+[release shrinking](RELEASE-SHRINKING.md) for that evaluation's failures and
+acceptance limits; its results do not replace the normal-build matrix.
+Production shrinking remains disabled. No production signing, source publication
+or version change occurred. Before distributing a production-signed phone
+candidate, assign a higher version/code: the v2 credential envelope must not be
+exposed to an older build through an accidental same-version downgrade.
+
+## Android 1.3.3 release freeze
+
+The release retains the supported hardening above and assigns version 1.3.3/code
+53, above published 1.3.2/code 52. The owner authorized publication, original-key
+signing and scoped issue/branch closeout. Production R8 remains disabled; the
+failed minimized variant is an experiment and must never be uploaded as the
+release APK. Existing Room 28 data and transfer TEXT values remain compatible.
+The new credential envelope is forward-only; install over the existing app and
+do not downgrade after readable records have migrated.
+
+Release acceptance must use the frozen release commit's complete quality and
+API 26/API 35 matrix, original-signer APK identity/alignment/payload checks and a
+production-signed 1.3.2-to-1.3.3 synthetic upgrade. Results and exact hashes are
+retained under `outputs/android-release-1.3.3/` and the release commit's GitHub
+Actions runs. Prior counts above retain their own source and scope. Synthetic
+upgrade retention does not establish a complete real-account or phone matrix.

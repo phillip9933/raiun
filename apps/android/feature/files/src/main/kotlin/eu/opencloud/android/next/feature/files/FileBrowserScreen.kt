@@ -131,6 +131,7 @@ import eu.opencloud.android.next.core.database.TransferBrowserOverview
 import eu.opencloud.android.next.core.database.TransferDirection
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.datastore.DEFAULT_PINNED_NAVIGATION_ITEMS
 import eu.opencloud.android.next.core.datastore.FileDisplayOptions
 import eu.opencloud.android.next.core.datastore.NavigationItem
@@ -445,6 +446,7 @@ fun FileBrowserScreen(
     var dialog by remember { mutableStateOf<BrowserDialog?>(null) }
     var offlineFilter by rememberSaveable(accountId) { mutableStateOf(OfflineFilter.ALL) }
     var details by remember { mutableStateOf<ResourceEntity?>(null) }
+    var serverWebApp by remember(accountId) { mutableStateOf<ResourceEntity?>(null) }
     var expandedAdd by rememberSaveable { mutableStateOf(false) }
     var sortCriterion by rememberSaveable(accountId) { mutableStateOf(BrowserSortCriterion.Name) }
     var sortAscending by rememberSaveable(accountId) { mutableStateOf(true) }
@@ -1131,6 +1133,9 @@ fun FileBrowserScreen(
     }
     state.error?.let { BrowserNotice(stringResource(R.string.browser_file_operation), it, onClearMessage) }
     favoritesState.error?.let { BrowserNotice(stringResource(R.string.browser_favorites), it, onDismissFavoriteError) }
+    serverWebApp?.takeIf { it.accountId == accountId }?.let { resource ->
+        ServerWebAppDialog(resource, onDismiss = { serverWebApp = null })
+    }
     state.actionResource?.let { resource ->
         ResourceActionSheet(
             resource = resource,
@@ -1167,6 +1172,15 @@ fun FileBrowserScreen(
                             onOpenWith(resource)
                         }
                     )
+                } else {
+                    null
+                },
+            onOpenOnServer =
+                if (resource.kind == ResourceKind.FILE && resource.accountId == accountId) {
+                    {
+                        onDismissActions()
+                        serverWebApp = resource
+                    }
                 } else {
                     null
                 },
@@ -1462,15 +1476,11 @@ private fun SelectionTopAppBar(
 }
 
 @Composable
-private fun TransferSummary(
+internal fun TransferSummary(
     transfers: List<TransferEntity>,
     onOpenTransfers: () -> Unit,
 ) {
-    val active =
-        transfers.firstOrNull { it.state == TransferState.RUNNING.name }
-            ?: transfers.firstOrNull { it.state in ACTIVE_TRANSFER_STATES }
-            ?: transfers.firstOrNull { it.state in FAILED_TRANSFER_STATES }
-            ?: return
+    val active = browserTransferRepresentative(transfers) ?: return
     val progress =
         if (active.bytesTotal > 0) {
             (active.bytesTransferred.toFloat() / active.bytesTotal).coerceIn(0f, 1f)
@@ -1488,16 +1498,14 @@ private fun TransferSummary(
         Text(
             text = browserTransferSummary(active),
             color =
-                if (active.state in
-                    FAILED_TRANSFER_STATES
-                ) {
+                if (active.typedState.requiresAttention) {
                     MaterialTheme.colorScheme.error
                 } else {
                     MaterialTheme.colorScheme.onSurface
                 },
             style = MaterialTheme.typography.labelMedium,
         )
-        if (active.state in ACTIVE_TRANSFER_STATES) {
+        if (active.typedState.isRunnable) {
             if (active.bytesTotal >
                 0
             ) {
@@ -1636,10 +1644,6 @@ private fun VaultNavigationDrawerItem(onOpen: () -> Unit) {
         modifier = Modifier.padding(horizontal = OpenCloudDimensions.SpacingSm),
     )
 }
-
-private val ACTIVE_TRANSFER_STATES =
-    setOf(TransferState.QUEUED.name, TransferState.RUNNING.name, TransferState.RETRY.name)
-private val FAILED_TRANSFER_STATES = setOf(TransferState.CONFLICT.name, TransferState.FAILED.name)
 
 @Composable
 internal fun BrowserBottomNavigation(
@@ -1974,6 +1978,7 @@ fun ResourceActionSheet(
     onShare: (() -> Unit)? = null,
     sheetState: androidx.compose.material3.SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     onOpenWith: (() -> Unit)? = null,
+    onOpenOnServer: (() -> Unit)? = null,
     onDetails: (() -> Unit)? = null,
     onSend: (() -> Unit)? = null,
     onExport: ((Boolean) -> Unit)? = null,
@@ -1985,6 +1990,13 @@ fun ResourceActionSheet(
             SheetAction(
                 stringResource(R.string.browser_open_with),
                 Icons.AutoMirrored.Filled.OpenInNew,
+                onClick = it,
+            )
+        }
+        onOpenOnServer?.let {
+            SheetAction(
+                stringResource(R.string.document_web_open),
+                Icons.Default.Apps,
                 onClick = it,
             )
         }
@@ -2136,17 +2148,28 @@ internal fun ConflictResolutionDialog(
 }
 
 /** Small preview/test states may still supply explicit rows; production observes the scalar overview. */
-private fun legacyTransferOverview(
+internal fun legacyTransferOverview(
     transfers: List<TransferEntity>,
     account: String,
 ): TransferBrowserOverview {
-    val representative =
-        transfers.firstOrNull { it.state == "RUNNING" }
-            ?: transfers.firstOrNull { it.state in ACTIVE_TRANSFER_STATES }
-            ?: transfers.firstOrNull { it.state in FAILED_TRANSFER_STATES }
+    val representative = browserTransferRepresentative(transfers)
     val conflicts = bulkUploadConflictTargets(transfers, account)
     return TransferBrowserOverview(representative, conflicts.firstOrNull { it.locationKind != "VAULT" }, conflicts.size)
 }
+
+/** Matches the database overview ordering; awaiting authentication has no runnable progress banner. */
+internal fun browserTransferRepresentative(transfers: List<TransferEntity>): TransferEntity? =
+    transfers
+        .filter { it.typedState.isRunnable || it.typedState.requiresAttention }
+        .minWithOrNull(
+            compareBy<TransferEntity> {
+                when (it.typedState) {
+                    TransferState.RUNNING -> 0
+                    TransferState.QUEUED, TransferState.RETRY -> 1
+                    else -> 2
+                }
+            }.thenByDescending { it.createdAtEpochMillis }.thenByDescending { it.id },
+        )
 
 internal fun bulkUploadConflictTargets(
     transfers: List<TransferEntity>,

@@ -102,6 +102,17 @@ class VaultOfflineGroupWorkerTest {
         assertNotNull(constructor)
     }
 
+    @Test fun unknownParentStateFailsWithoutClaimingTheGroupOrReadingCiphertext() =
+        runBlocking {
+            val seed = seed(1)
+            val unknown = requireNotNull(seed.lease.parent).copy(state = "future-after-write")
+            database.transferDao().update(unknown)
+            val before = store.vaultOfflineGroups().find(seed.lease.group.id)
+            assertEquals(ListenableWorker.Result.failure(), worker(seed.lease.group.id).doWork())
+            assertEquals(before, store.vaultOfflineGroups().find(seed.lease.group.id))
+            assertEquals(0, downloads)
+        }
+
     @Test fun moreThan128MembersEndAwaitingUnlockAndNeverClaimAuthenticatedOfflineSuccess() =
         runBlocking {
             val seed = seed(130)

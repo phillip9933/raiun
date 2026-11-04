@@ -127,6 +127,15 @@ class VaultDownloadWorkerTest {
             assertEquals("CANCELLED", store.transfer("waiting")?.state)
         }
 
+    @Test fun `unknown encrypted state fails before deadline claim or payload access`() =
+        runTest {
+            seed()
+            val unknown = transfer("unknown").copy(state = "future-after-write", notBeforeEpochMillis = Long.MAX_VALUE)
+            store.enqueueCiphertextDownload(unknown)
+            assertEquals(ListenableWorker.Result.failure(), worker(unknown.id).doWork())
+            assertEquals(unknown, store.transfer(unknown.id))
+        }
+
     private suspend fun seed() {
         database.accountDao().upsert(AccountEntity("account", "https://example.test", "user", "User", "BASIC", false))
     }

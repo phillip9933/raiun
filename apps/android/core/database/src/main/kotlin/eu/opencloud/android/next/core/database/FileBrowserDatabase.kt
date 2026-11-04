@@ -407,7 +407,7 @@ data class TransferEntity(
     val mimeType: String?,
     val bytesTotal: Long,
     val bytesTransferred: Long = 0,
-    val state: String = TransferState.QUEUED.name,
+    val state: String = TransferState.QUEUED.persistedValue,
     val error: String? = null,
     val workId: String? = null,
     val overwrite: Boolean = false,
@@ -428,7 +428,7 @@ data class TransferEntity(
 
 enum class TransferDirection { UPLOAD, DOWNLOAD }
 
-enum class TransferState { QUEUED, RUNNING, RETRY, CONFLICT, AWAITING_UNLOCK, SUCCEEDED, FAILED, CANCELLED }
+typealias TransferState = eu.opencloud.android.next.core.model.TransferState
 
 @Entity(
     tableName = "folder_backups",
@@ -804,8 +804,6 @@ interface ResourceDao {
     suspend fun deleteForAccount(accountId: String)
 }
 
-private val PENDING_TRANSFER_STATES = setOf("QUEUED", "RUNNING", "RETRY")
-
 @Dao
 interface TransferDao {
     @Query(
@@ -860,7 +858,7 @@ interface TransferDao {
         val current = findById(expected.id)
         if (current == null ||
             current != expected ||
-            current.state !in setOf("FAILED", "CANCELLED", "CONFLICT", "RETRY")
+            !current.typedState.allowsExplicitRetry
         ) {
             return null
         }
@@ -893,12 +891,17 @@ interface TransferDao {
         val current = findById(id)
         val ownedByAnotherWorker = current?.workId != null && current.workId != workerId
         if (current == null ||
-            current.state !in PENDING_TRANSFER_STATES ||
+            !current.typedState.isRunnable ||
             ownedByAnotherWorker
         ) {
             return null
         }
-        val running = current.copy(state = TransferState.RUNNING.name, workId = workerId, updatedAtEpochMillis = now)
+        val running =
+            current.copy(
+                state = TransferState.RUNNING.persistedValue,
+                workId = workerId,
+                updatedAtEpochMillis = now,
+            )
         val blocked =
             current.direction == "UPLOAD" &&
                 uploadDestinationBusy(
@@ -911,7 +914,7 @@ interface TransferDao {
             // This worker has not started network I/O. Release its persisted RUNNING marker
             // so overlapping intents left by an older process cannot wait on each other forever.
             if (current.state == TransferState.RUNNING.name) {
-                update(current.copy(state = TransferState.RETRY.name, updatedAtEpochMillis = now))
+                update(current.copy(state = TransferState.RETRY.persistedValue, updatedAtEpochMillis = now))
             }
             null
         } else {
@@ -923,12 +926,8 @@ interface TransferDao {
     @Transaction
     suspend fun updateActive(transfer: TransferEntity): Boolean {
         val current = findById(transfer.id)
-        if (current == null ||
-            current.state !in PENDING_TRANSFER_STATES ||
-            current.workId != transfer.workId
-        ) {
-            return false
-        }
+        val owned = current?.typedState?.isRunnable == true && current.workId == transfer.workId
+        if (transfer.typedState == TransferState.UNKNOWN || !owned) return false
         update(transfer)
         return true
     }
@@ -941,7 +940,7 @@ interface TransferDao {
     ): Boolean {
         val current = findById(transfer.id)
         if (current == null ||
-            current.state !in PENDING_TRANSFER_STATES ||
+            !current.typedState.isRunnable ||
             current.workId != transfer.workId
         ) {
             return false
