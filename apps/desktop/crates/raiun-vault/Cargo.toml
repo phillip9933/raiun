@@ -7,7 +7,7 @@ publish.workspace = true
 
 [dependencies]
 aes = { version = "0.8.4", features = ["zeroize"] }
-base64 = "0.22.1"
+base64 = "0.23.1"
 caseless = "=0.2.2"
 crypto_secretbox = "0.1.1"
 getrandom = "0.4"
