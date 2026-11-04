@@ -18,7 +18,7 @@ raiun-opencloud = { path = "../raiun-opencloud" }
 getrandom = "0.4"
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 zeroize = "1"
 fs2 = "0.4"
 

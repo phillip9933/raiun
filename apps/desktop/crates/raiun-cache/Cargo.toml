@@ -8,7 +8,7 @@ publish.workspace = true
 [dependencies]
 raiun-core = { path = "../raiun-core" }
 rusqlite = { version = "0.32", features = ["bundled"] }
-sha2 = "0.10"
+sha2 = "0.11"
 tempfile.workspace = true
 url = "2.5"
 getrandom = "0.4"
