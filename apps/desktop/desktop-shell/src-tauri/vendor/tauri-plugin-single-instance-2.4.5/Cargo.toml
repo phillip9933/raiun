@@ -88,7 +88,7 @@ features = ["net"]
 version = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies.zbus]
-version = "5.9"
+version = "6.2"
 
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
 version = "0.60"
