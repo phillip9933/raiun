@@ -7,6 +7,7 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.database.VaultExclusion
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.RemoteSearchClient
 import eu.opencloud.android.next.core.network.RemoteSearchResource
 import eu.opencloud.android.next.core.network.safeMessage
@@ -18,7 +19,6 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
-import okhttp3.OkHttpClient
 
 interface SearchRepository {
     fun search(
@@ -38,7 +38,7 @@ fun createSearchRepository(
         exclusionFlow = database.vaultExclusionDao()::observe,
         remoteSearch = { account, query ->
             RemoteSearchClient(
-                client = TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl),
+                client = TlsPolicy(context).applyTo(HttpClients.newBuilder().build(), account.serverUrl),
             ).search(
                 endpointUrl = requireNotNull(account.remoteSearchUrl),
                 query = query,

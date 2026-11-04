@@ -24,8 +24,27 @@ plugins {
     alias(libs.plugins.roborazzi)
 }
 
+val appVersionCode = 55
 // Deliberately absent from ordinary builds: this candidate is for disposable native validation.
 val r8ValidationEnabled = providers.gradleProperty("raiun.r8Validation").map { it.toBooleanStrict() }.getOrElse(false)
+val r8InstrumentationEnabled =
+    providers
+        .gradleProperty("raiun.r8Instrumentation")
+        .map {
+            it.toBooleanStrict()
+        }.getOrElse(false)
+check(!r8InstrumentationEnabled || r8ValidationEnabled) { "R8 instrumentation requires raiun.r8Validation=true" }
+val r8TestAbiRules = providers.gradleProperty("raiun.r8TestAbiRules").orNull
+check(r8TestAbiRules == null || r8InstrumentationEnabled) {
+    "R8 test ABI rules require raiun.r8Instrumentation=true"
+}
+val r8UpgradeVersionCode = providers.gradleProperty("raiun.r8UpgradeVersionCode").orNull?.toInt()
+check(r8UpgradeVersionCode == null || (r8ValidationEnabled && !r8InstrumentationEnabled)) {
+    "Upgrade version overrides require standalone R8 validation"
+}
+check(r8UpgradeVersionCode == null || r8UpgradeVersionCode > appVersionCode) {
+    "The synthetic upgrade version must exceed the published version code"
+}
 
 android {
     namespace = "eu.opencloud.android.next"
@@ -46,8 +65,8 @@ android {
                 .toInt()
         // The scanner SDK ships native processing for 64-bit Android only.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
-        versionCode = 53
-        versionName = "1.3.3"
+        versionCode = r8UpgradeVersionCode ?: appVersionCode
+        versionName = "1.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEV_SERVER_URL", "\"\"")
@@ -63,10 +82,13 @@ android {
             buildConfigField("String", "DEV_SERVER_PASSWORD", localPropertyBuildConfigValue("dev.server.password"))
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
+                "proguard-native-r8.pro",
+                "proguard-storage-r8.pro",
             )
         }
         if (r8ValidationEnabled) {
@@ -77,6 +99,15 @@ android {
                 isDebuggable = false
                 isMinifyEnabled = true
                 isShrinkResources = true
+                // The independent standalone probe build omits these test-only access roots.
+                if (r8InstrumentationEnabled) {
+                    proguardFiles("proguard-r8-instrumentation.pro")
+                    r8TestAbiRules?.let { path ->
+                        val rules = file(path)
+                        check(rules.isFile) { "The explicit R8 test ABI rule file is missing" }
+                        proguardFiles(rules)
+                    }
+                }
                 versionNameSuffix = "-r8-validation"
                 testProguardFiles("r8-validation-test-rules.pro")
             }
@@ -102,6 +133,10 @@ android {
         unitTests.isIncludeAndroidResources = true
     }
     if (r8ValidationEnabled) testBuildType = "r8Validation"
+    if (r8InstrumentationEnabled) {
+        // Compose's debug-only test host must not enter the standalone/release manifest.
+        sourceSets.getByName("r8Validation").manifest.srcFile("src/r8Instrumentation/AndroidManifest.xml")
+    }
 
     sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("generated/updater-test-assets"))
     sourceSets

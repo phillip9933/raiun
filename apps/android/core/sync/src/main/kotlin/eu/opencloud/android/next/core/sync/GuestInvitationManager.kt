@@ -9,6 +9,7 @@ import eu.opencloud.android.next.core.network.GraphShareTarget
 import eu.opencloud.android.next.core.network.GuestPermission
 import eu.opencloud.android.next.core.network.GuestPermissions
 import eu.opencloud.android.next.core.network.GuestPermissionsClient
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.security.AccountSessions
@@ -17,7 +18,6 @@ import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import okhttp3.OkHttpClient
 
 /** Account-bound access to OpenCloud 9 guest permissions. Invitation URLs are never retained here. */
 class GuestInvitationManager(
@@ -85,7 +85,7 @@ class GuestInvitationManager(
 
         val client =
             GuestPermissionsClient(
-                TlsPolicy(context).applyTo(OkHttpClient(), account.serverUrl),
+                TlsPolicy(context).applyTo(HttpClients.newClient(), account.serverUrl),
                 beforeRequest = {
                     callerContext.ensureActive()
                     check(callerJob?.isActive != false && permit() && accountLease())

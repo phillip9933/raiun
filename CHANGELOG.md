@@ -2,6 +2,13 @@
 
 Android and desktop have independent versions and release pages.
 
+## Android 1.4.0 — 2026-11-04
+
+Apply connection settings more consistently, add a review step before uploading
+received shared files, set a stronger minimum password for newly created
+encrypted locations, improve transfer connection reuse, and reduce APK size by
+about 15%. See the [Android 1.4.0 release notes](apps/android/docs/RELEASE-NOTES-1.4.0.md).
+
 ## Desktop 0.7.5 Beta — 2026-11-04
 
 Linux and Windows GUI/CLI packages add the bounded design-plan operations,

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_review_title">Geteilte Quellen prüfen</string>
+    <string name="incoming_review_warning">Ursprünglicher Absender unbekannt. Dateinamen sind nicht vertrauenswürdig. Der Inhaltsanbieter gibt an, wo Android eine Datei liest, und belegt nicht, wer sie geteilt hat.</string>
+    <string name="incoming_review_unknown_name">Unbekannter Dateiname (%1$d)</string>
+    <string name="incoming_review_provider">Paket des Inhaltsanbieters: %1$s</string>
+    <string name="incoming_review_unknown_provider">Inhaltsanbieter unbekannt</string>
+</resources>

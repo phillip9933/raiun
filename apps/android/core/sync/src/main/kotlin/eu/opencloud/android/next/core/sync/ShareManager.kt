@@ -5,13 +5,13 @@ import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.ShareEntity
 import eu.opencloud.android.next.core.network.CreateShareRequest
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OcsShareType
 import eu.opencloud.android.next.core.network.OcsSharingClient
 import eu.opencloud.android.next.core.network.RemoteShare
 import eu.opencloud.android.next.core.network.ShareRecipient
 import eu.opencloud.android.next.core.network.UpdateShareRequest
 import eu.opencloud.android.next.core.security.TlsPolicy
-import okhttp3.OkHttpClient
 
 class ShareManager(
     private val context: Context,
@@ -131,7 +131,7 @@ class ShareManager(
         val capabilities = CapabilityRepository.get(context).refresh(account, authorization, store)
         require(capabilities.sharingEnabled) { "Sharing is not supported by this server." }
         val updatedAccount = requireNotNull(store.account(accountId)) { "The account is unavailable." }
-        val http = TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl)
+        val http = TlsPolicy(context).applyTo(HttpClients.newBuilder().build(), account.serverUrl)
         return ShareSession(
             updatedAccount,
             authorization,

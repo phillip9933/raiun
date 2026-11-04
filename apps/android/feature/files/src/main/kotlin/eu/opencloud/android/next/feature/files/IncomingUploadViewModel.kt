@@ -13,6 +13,7 @@ import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.sync.IncomingShareDestination
+import eu.opencloud.android.next.core.sync.IncomingShareReview
 import eu.opencloud.android.next.core.sync.IncomingShareStore
 import eu.opencloud.android.next.core.sync.SharedUploadQueue
 import eu.opencloud.android.next.core.sync.SharedUploadSource
@@ -50,13 +51,17 @@ class IncomingUploadViewModel(
             viewModelScope.launch(Dispatchers.IO) {
                 incomingAction({
                     val files = if (intake.isStaged(id)) intake.stage(id, emptyList()) {} else emptyList()
+                    val review = if (files.isEmpty()) intake.review(sources) else emptyList()
                     val accounts = store.activeAccounts()
                     mutableState.value =
                         restoredState(
                             id,
                             files,
                             accounts,
-                        ).copy(sourceCount = if (files.isEmpty()) sources.size else files.size)
+                        ).copy(
+                            sourceCount = if (files.isEmpty()) sources.size else files.size,
+                            review = review,
+                        )
                     if (!state.value.destinationLocked) accounts.firstOrNull()?.let { selectAccount(it.id) }
                 }) {
                     mutableState.value =
@@ -210,6 +215,7 @@ class IncomingUploadViewModel(
 data class IncomingUploadState(
     val files: List<SharedUploadSource> = emptyList(),
     val sourceCount: Int = 0,
+    val review: List<IncomingShareReview> = emptyList(),
     val accounts: List<AccountEntity> = emptyList(),
     val accountId: String? = null,
     val spaces: List<SpaceEntity> = emptyList(),

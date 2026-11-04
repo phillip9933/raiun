@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypt_password_guidance">Verwende mindestens 12 Zeichen, am besten mehrere unzusammenhängende Wörter. Wähle ein einzigartiges Passwort.</string>
+    <string name="browser_encrypt_password_too_short">Verwende mindestens %1$d Zeichen für einen neuen verschlüsselten Speicherort.</string>
+</resources>

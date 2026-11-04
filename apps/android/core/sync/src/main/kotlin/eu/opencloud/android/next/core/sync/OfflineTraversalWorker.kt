@@ -14,6 +14,7 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.OfflineTraversalStore
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
 import eu.opencloud.android.next.core.network.toOpenCloudError
@@ -23,7 +24,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 
 /** Small resumable passes; no recursive Kotlin stack and no full-tree in-memory queue. */
 internal class OfflineTraversal(
@@ -94,7 +94,7 @@ class OfflineTraversalWorker(
                         val account = requireNotNull(store.account(resource.accountId))
                         val accountLease = AccountSessions.get(applicationContext).beginLease(account.id)
                         val space = requireNotNull(store.space(resource.accountId, resource.spaceId))
-                        val client = TlsPolicy(applicationContext).applyTo(OkHttpClient(), account.serverUrl)
+                        val client = TlsPolicy(applicationContext).applyTo(HttpClients.newClient(), account.serverUrl)
                         refreshFolder(
                             FolderRefresh(
                                 store,

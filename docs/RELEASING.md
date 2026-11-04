@@ -21,7 +21,7 @@ Tags may point to the same validated commit for a coordinated launch. Separate r
 
 1. Freeze the intended platform release revision. Review each changelog, limitations, privacy notice and notices. Write short, plain-language release notes and describe supported platforms honestly.
 2. Run Android's [quality and API 26/API 35 emulator gates](../apps/android/docs/TESTING.md) and [packaging/signing checks](../apps/android/docs/RELEASING.md) on that exact source. Owner device/server acceptance remains required. Historical checks on the old layout are not migration results.
-3. Run the relevant desktop source gates, Linux packaging and focused exact-package isolated checks on the candidate. Reuse unchanged validated safety evidence and disclose the beta's unverified workflows; whole-category certification is not required for this beta. Desktop CI is `.github/workflows/desktop-ci.yml`; Desktop 0.7.0-beta.2 ships Linux x86_64 AppImage and Windows x86_64 NSIS packages with the same Desktop version.
+3. Run the relevant desktop source gates, Linux packaging and focused exact-package isolated checks on the candidate. Reuse unchanged validated safety evidence and disclose the beta's unverified workflows; whole-category certification is not required for this beta. Desktop CI is `.github/workflows/desktop-ci.yml`; Desktop 0.7.0-beta.2 ships Linux x86_64 AppImage and Windows x86_64 NSIS packages with the same Desktop version. In release records, distinguish checks run on the exact candidate from checks reused from unchanged source; a tag or skipped workflow is not a fresh CI pass. Keep the accepted beta scope explicit without implying omitted full suites or physical checks ran.
 4. Build and verify exact distributables. CI produces Android debug and unsigned release APKs; production signing remains local with the original identity. Keep credentials outside source and CI logs. Source relocation never authorizes a new identity.
 5. Verify Android name/code, application ID, certificate, empty development credentials, APK/native alignment and upgrade over the previous release. Verify desktop identities and upgrade/data compatibility separately.
 6. Use distinct assets such as `raiun-android-1.0.0.apk` and `raiun-desktop-0.7.0-beta.1-<os>-<arch>.<package>`, with checksums per release. Audit desktop updater handling of these tags before enabling it: a generic latest-release lookup may choose the other platform. GitHub supplies source archives automatically.
@@ -29,15 +29,10 @@ Tags may point to the same validated commit for a coordinated launch. Separate r
 
 If either app fails its gates, retain the candidate and report the failure. Android validation does not establish desktop readiness, and a desktop beta does not replace Android device acceptance.
 
-
 ## Public release-note style
 
-Write release notes for people using the app. Follow the owner's edited
-[Desktop 0.7.4 notes](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4):
-a short version/platform introduction, concise user-facing changes, then useful
-installation or update instructions. Include requirements, warnings or limits
-when they affect how someone installs or uses the release.
+Write release notes for people using the app: a short version/platform introduction, concise user-facing changes and useful installation/update instructions. Include supported limitations when they affect use. Do not overwrite the owner's edits to previously published notes.
 
-Keep test counts, native test scenarios, validation history and internal release
-process details in pull requests, acceptance records and build provenance. Do not
-regenerate or overwrite the owner's edits to published release notes.
+Keep execution counts, synthetic fixtures, machine/account context, validation history and internal release-process details in private development records. Public PR descriptions, release notes and updater notes should explain user-facing fixes, improvements, requirements and supported limitations. Package/source hashes and signature provenance may remain public.
+
+Dependabot proposes weekly Cargo version updates for the Desktop workspace and nested Tauri workspace, alongside Android/Actions checks. These proposals are not live Rust advisory scans and do not establish that GitHub repository security alerts are enabled; no automatic merges are configured.

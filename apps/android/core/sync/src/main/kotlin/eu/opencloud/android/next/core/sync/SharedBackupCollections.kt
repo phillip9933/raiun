@@ -1,6 +1,7 @@
 package eu.opencloud.android.next.core.sync
 
 import android.content.Context
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.TransferClient
@@ -10,7 +11,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.OkHttpClient
 
 /** Resolve every backup subfolder within a received share; never promote its scope to a drive. */
 internal class SharedBackupCollections(
@@ -69,7 +69,7 @@ internal class SharedBackupCollections(
             val resolver = SharedUploadDestinationResolver.create(app)
             return SharedBackupCollections(browser, resolver) { parent, name, checkCurrent ->
                 val account = parent.page.checked.lease.account
-                val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+                val http = TlsPolicy(app).applyTo(HttpClients.newClient(), account.serverUrl)
                 val token = WorkerAuthorizationProvider(app).authorization(account)
                 val url =
                     parent.webDavUrl

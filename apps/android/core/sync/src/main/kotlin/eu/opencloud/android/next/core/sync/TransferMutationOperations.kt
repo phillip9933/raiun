@@ -6,12 +6,12 @@ import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.database.StaleResourceException
 import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.network.GraphFavoriteClient
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.TransferClient
 import eu.opencloud.android.next.core.network.WebDavFeatureClient
 import eu.opencloud.android.next.core.security.TlsPolicy
-import okhttp3.OkHttpClient
 
 internal class TransferMutationOperations(
     private val context: Context,
@@ -45,7 +45,7 @@ internal class TransferMutationOperations(
             stale()
         }
         val root = webDavRoot(space)
-        val client = TransferClient(TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl))
+        val client = TransferClient(TlsPolicy(context).applyTo(HttpClients.newBuilder().build(), account.serverUrl))
         val authorization = WorkerAuthorizationProvider(context).authorization(account)
         client.createCollection(root.mutationChildUrl(destinationPath), authorization)
         refreshFolder(accountId, spaceId, parentId)
@@ -58,7 +58,7 @@ internal class TransferMutationOperations(
         val current = requireCurrent(resource, includeDescendants = false)
         val account = requireNotNull(store.account(current.accountId))
         val authorization = WorkerAuthorizationProvider(context).authorization(account)
-        GraphFavoriteClient(TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl))
+        GraphFavoriteClient(TlsPolicy(context).applyTo(HttpClients.newBuilder().build(), account.serverUrl))
             .setFavorite(account.serverUrl, current.remoteId, authorization, favorite)
         store.setFavorite(current, favorite)
     }
@@ -68,7 +68,7 @@ internal class TransferMutationOperations(
         val account = requireNotNull(store.account(current.accountId))
         val space = requireNotNull(store.space(current.accountId, current.spaceId))
         val authorization = WorkerAuthorizationProvider(context).authorization(account)
-        WebDavFeatureClient(TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl))
+        WebDavFeatureClient(TlsPolicy(context).applyTo(HttpClients.newBuilder().build(), account.serverUrl))
             .delete(webDavRoot(space).mutationChildUrl(current.path), authorization, current.eTag)
         store.delete(current.accountId, current.spaceId, current.remoteId)
     }
@@ -85,7 +85,7 @@ internal class TransferMutationOperations(
         val destinationPath = "${current.path.substringBeforeLast('/', "")}/$normalizedName"
         store.requireAllowedVaultPath(current.accountId, current.spaceId, destinationPath)
         val authorization = WorkerAuthorizationProvider(context).authorization(account)
-        WebDavFeatureClient(TlsPolicy(context).applyTo(OkHttpClient(), account.serverUrl))
+        WebDavFeatureClient(TlsPolicy(context).applyTo(HttpClients.newClient(), account.serverUrl))
             .renameFile(webDavRoot(space).mutationChildUrl(current.path), normalizedName, current.eTag, authorization)
         refreshFolder(current.accountId, current.spaceId, current.parentId)
     }

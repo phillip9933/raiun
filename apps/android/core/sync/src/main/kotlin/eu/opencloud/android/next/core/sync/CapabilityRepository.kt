@@ -6,6 +6,7 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.model.AppClock
 import eu.opencloud.android.next.core.model.SystemAppClock
 import eu.opencloud.android.next.core.model.auth.ServerCapabilities
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
@@ -13,7 +14,6 @@ import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 
 /** Freshness is process-local: after restart mutations must obtain policy again. */
@@ -85,7 +85,10 @@ class CapabilityRepository(
         fun get(context: Context): CapabilityRepository =
             instance ?: synchronized(this) {
                 instance ?: CapabilityRepository { account, authorization ->
-                    val client = TlsPolicy(context.applicationContext).applyTo(OkHttpClient(), account.serverUrl)
+                    val client =
+                        TlsPolicy(
+                            context.applicationContext,
+                        ).applyTo(HttpClients.newClient(), account.serverUrl)
                     OpenCloudApi(client).capabilities(account.serverUrl, authorization)
                 }.also { instance = it }
             }

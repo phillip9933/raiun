@@ -3,13 +3,13 @@ package eu.opencloud.android.next.core.sync
 import android.content.Context
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.ShareRecipient
 import eu.opencloud.android.next.core.network.SpaceMembersClient
 import eu.opencloud.android.next.core.security.AppLock
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import okhttp3.OkHttpClient
 
 class SpaceMembersRepository(
     private val context: Context,
@@ -66,7 +66,7 @@ class SpaceMembersRepository(
         val auth = WorkerAuthorizationProvider(context).authorization(account)
         currentCoroutineContext().ensureActive()
         check(permit() && store.account(accountId) == account)
-        val client = SpaceMembersClient(TlsPolicy(context).applyTo(OkHttpClient(), account.serverUrl))
+        val client = SpaceMembersClient(TlsPolicy(context).applyTo(HttpClients.newClient(), account.serverUrl))
         val result =
             action(client, account.serverUrl, auth) {
                 currentCoroutineContext().ensureActive()

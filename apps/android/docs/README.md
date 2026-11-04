@@ -19,6 +19,7 @@ Start with [README](../README.md) for installation and current limitations, and 
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Shared design mapping](SHARED-DESIGN.md) | Native Material theme, account accents and scoped accessibility checks |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
+| [Android 1.4.0 release notes](RELEASE-NOTES-1.4.0.md) | Connection settings, incoming-share review, encrypted-location passwords and transfer improvements |
 | [Android 1.3.3 release notes](RELEASE-NOTES-1.3.3.md) | Server document apps, credential protection and transfer/share hardening |
 | [Android 1.3.2 release notes](RELEASE-NOTES-1.3.2.md) | Published maintenance, recovery and credential-handling fixes |
 | [Android 1.3.1 release notes](RELEASE-NOTES-1.3.1.md) | Android 1.3.1 authentication fixes and interoperability limits |

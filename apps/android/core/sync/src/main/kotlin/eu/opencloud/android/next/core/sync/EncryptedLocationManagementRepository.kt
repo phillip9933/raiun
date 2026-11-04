@@ -5,6 +5,7 @@ import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.network.EndpointPolicy
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.LibreGraphSpacesClient
 import eu.opencloud.android.next.core.network.OcsShareType
 import eu.opencloud.android.next.core.network.OcsSharingClient
@@ -544,7 +545,7 @@ internal class EncryptedManagementDependencies(
                 spaceRootsFor = vaults::encryptedSpaces,
                 folderRootsFor = vaults::encryptedFolders,
                 authorizationFor = { WorkerAuthorizationProvider(context).authorization(it) },
-                clientFor = { TlsPolicy(context).applyTo(OkHttpClient(), it.serverUrl) },
+                clientFor = { TlsPolicy(context).applyTo(HttpClients.newClient(), it.serverUrl) },
                 permitFor = { AppLock(context).beginAppAction() },
             )
         }

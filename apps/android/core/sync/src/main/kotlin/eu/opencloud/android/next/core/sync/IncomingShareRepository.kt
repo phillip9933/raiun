@@ -5,6 +5,7 @@ import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.IncomingShareEntity
 import eu.opencloud.android.next.core.database.IncomingShareStore
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.IncomingSharedItem
 import eu.opencloud.android.next.core.network.IncomingSharesClient
 import eu.opencloud.android.next.core.network.OpenCloudError
@@ -16,7 +17,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 
 /** Publishes only complete discovery; storage grants no access until root/permission resolution. */
 class IncomingShareRepository(
@@ -65,7 +65,7 @@ class IncomingShareRepository(
                 val account = requireNotNull(accounts.account(accountId))
                 check(account.isActive)
                 val authorization = WorkerAuthorizationProvider(application).authorization(account)
-                val http = TlsPolicy(application).applyTo(OkHttpClient(), account.serverUrl)
+                val http = TlsPolicy(application).applyTo(HttpClients.newClient(), account.serverUrl)
                 withContext(Dispatchers.IO) {
                     IncomingSharesClient(http).list(account.serverUrl, authorization)
                 }

@@ -11,13 +11,13 @@ import androidx.work.WorkerParameters
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
 import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 
 class PendingPinWorker(
     context: Context,
@@ -51,7 +51,7 @@ class PendingPinWorker(
         val accountLease = AccountSessions.get(applicationContext).beginLease(pin.accountId)
         val space = requireNotNull(store.space(pin.accountId, pin.spaceId))
         val client =
-            RemoteDiscoveryClient(TlsPolicy(applicationContext).applyTo(OkHttpClient(), account.serverUrl))
+            RemoteDiscoveryClient(TlsPolicy(applicationContext).applyTo(HttpClients.newClient(), account.serverUrl))
         val authorization = WorkerAuthorizationProvider(applicationContext).authorization(account)
         var parentId: String? = null
         var path = "/"

@@ -6,6 +6,7 @@ import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.SpaceEntity
 import eu.opencloud.android.next.core.network.EndpointPolicy
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.LibreGraphSpacesClient
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
@@ -31,7 +32,9 @@ class SpaceManagementManager private constructor(
         authorizationFor = { account ->
             WorkerAuthorizationProvider(context.applicationContext).authorization(account)
         },
-        clientFor = { account -> TlsPolicy(context.applicationContext).applyTo(OkHttpClient(), account.serverUrl) },
+        clientFor = { account ->
+            TlsPolicy(context.applicationContext).applyTo(HttpClients.newClient(), account.serverUrl)
+        },
         endpointPolicy = EndpointPolicy(),
     )
 

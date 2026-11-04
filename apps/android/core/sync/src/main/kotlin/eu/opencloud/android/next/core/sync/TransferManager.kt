@@ -24,6 +24,7 @@ import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.database.vaultOfflineGroups
 import eu.opencloud.android.next.core.model.AppClock
 import eu.opencloud.android.next.core.model.SystemAppClock
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.TransferClient
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.ensureActive
@@ -218,7 +219,7 @@ class TransferManager(
         val space = requireNotNull(store.space(accountId, spaceId))
         require(account.isActive && !space.isDisabled && !space.isDeleted) { "The backup location is unavailable." }
         val root = webDavRoot(space)
-        val http = TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl)
+        val http = TlsPolicy(context).applyTo(HttpClients.newBuilder().build(), account.serverUrl)
         val authorization = WorkerAuthorizationProvider(context).authorization(account)
         val created =
             withRequestCancellation(

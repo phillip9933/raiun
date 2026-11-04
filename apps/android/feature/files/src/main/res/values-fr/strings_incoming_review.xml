@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_review_title">Vérifier les sources partagées</string>
+    <string name="incoming_review_warning">Expéditeur d’origine inconnu. Les noms de fichiers ne sont pas fiables. Le fournisseur de contenu indique où Android lit un fichier, sans prouver qui l’a partagé.</string>
+    <string name="incoming_review_unknown_name">Nom de fichier inconnu (%1$d)</string>
+    <string name="incoming_review_provider">Paquet du fournisseur de contenu : %1$s</string>
+    <string name="incoming_review_unknown_provider">Fournisseur de contenu inconnu</string>
+</resources>

@@ -18,7 +18,7 @@ import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
 class IncomingUploadViewModelTest {
-    @Test fun loadingUnconfirmedShareDoesNotOpenProviderOrStageBytes() =
+    @Test fun loadingUnconfirmedShareReviewsUnknownMetadataWithoutStagingBytes() =
         runBlocking {
             val context = RuntimeEnvironment.getApplication()
             WorkManager.initialize(context, Configuration.Builder().build())
@@ -29,6 +29,9 @@ class IncomingUploadViewModelTest {
             val state = withTimeout(5_000) { viewModel.state.first { !it.busy } }
             assertEquals(1, state.sourceCount)
             assertTrue(state.files.isEmpty())
+            assertEquals(1, state.review.size)
+            assertEquals(null, state.review.single().name)
+            assertEquals(null, state.review.single().providerPackage)
             assertFalse(IncomingShareStore(context).isStaged(batch))
         }
 }

@@ -3,13 +3,11 @@ package eu.opencloud.android.next.ui
 import android.app.Application
 import android.app.KeyguardManager
 import android.content.ContentResolver
-import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import eu.opencloud.android.next.core.database.vaultOfflineGroups
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.security.VaultDeviceRememberException
@@ -18,31 +16,17 @@ import eu.opencloud.android.next.core.security.VaultIdentity
 import eu.opencloud.android.next.core.security.VaultKeyStore
 import eu.opencloud.android.next.core.security.VaultPreferenceStatus
 import eu.opencloud.android.next.core.security.VaultPreferenceTargetKind
-import eu.opencloud.android.next.core.security.VaultPreferences
 import eu.opencloud.android.next.core.security.VaultRememberBinding
 import eu.opencloud.android.next.core.security.VaultRememberChoice
 import eu.opencloud.android.next.core.security.VaultUnlockPolicy
-import eu.opencloud.android.next.core.sync.BoundaryEndpoint
-import eu.opencloud.android.next.core.sync.VaultBoundaryEndpoint
-import eu.opencloud.android.next.core.sync.VaultDirectorySnapshot
 import eu.opencloud.android.next.core.sync.VaultExternalCopyLease
 import eu.opencloud.android.next.core.sync.VaultExternalCopyStore
 import eu.opencloud.android.next.core.sync.VaultFolder
 import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.core.sync.VaultLocationKind
-import eu.opencloud.android.next.core.sync.VaultOfflineSession
-import eu.opencloud.android.next.core.sync.VaultOfflineStore
-import eu.opencloud.android.next.core.sync.VaultRepository
-import eu.opencloud.android.next.core.sync.VaultSession
 import eu.opencloud.android.next.core.sync.VaultUnlockException
 import eu.opencloud.android.next.core.sync.VaultUnlockFailure
 import eu.opencloud.android.next.core.sync.asBoundaryEntry
-import eu.opencloud.android.next.core.sync.completePendingOfflineDownloads
-import eu.opencloud.android.next.core.sync.completePendingOfflineGroups
-import eu.opencloud.android.next.core.sync.enqueueBackgroundOfflineDownload
-import eu.opencloud.android.next.core.sync.enqueueBackgroundOfflineGroup
-import eu.opencloud.android.next.core.sync.enqueueBackgroundReplacement
-import eu.opencloud.android.next.core.sync.enqueueBackgroundUpload
 import eu.opencloud.android.next.core.sync.withCancellableVaultUploadSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -53,21 +37,13 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.InputStream
-import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
@@ -105,7 +81,6 @@ class VaultViewModel internal constructor(
     private var directory: VaultRouteDirectorySnapshot? = null
     private val previousDirectoryOffsets = mutableListOf<Long>()
     private var showHidden = false
-    private var loadedPreviewRequest: VaultPreviewRequest? = null
     private var pendingTransferSource: VaultFolder? = null
     private var currentSource: VaultLocation? = null
     private var discoveryReturn: DiscoveryReturn? = null
@@ -120,12 +95,38 @@ class VaultViewModel internal constructor(
     private var explicitDeviceForgetJob: Job? = null
     private var pendingEnrollmentIdentity: VaultIdentity? = null
     private var pendingDeletedVaultCleanup: VaultIdentity? = null
-    private val thumbnailMutex = Mutex()
     private val presentedEntries = mutableMapOf<String, PresentedVaultFolder>()
     private var pendingTransfer: PendingVaultTransfer? = null
     private val pickerLease = VaultPickerLease()
     private var pickerTimeout: Job? = null
     private var pickerSuspended = false
+    private val previewContent =
+        VaultPreviewContent(
+            application,
+            ioDispatcher,
+            mutableState,
+            object : VaultPreviewOwner {
+                override fun isCurrent(request: VaultPreviewRequest): Boolean =
+                    this@VaultViewModel.isCurrent(request.token, request.account) && session === request.session
+
+                override fun backingAccessValid(request: VaultPreviewRequest): Boolean =
+                    accountId == request.account && session === request.session && routeActive
+
+                override fun isThumbnailCurrent(request: VaultThumbnailRequest): Boolean =
+                    this@VaultViewModel.isThumbnailCurrent(request)
+
+                override fun reportFailure(
+                    request: VaultPreviewRequest,
+                    failure: Exception,
+                ) {
+                    this@VaultViewModel.reportFailure(
+                        failure,
+                        VaultRouteError.PREVIEW,
+                        VaultFailureContext(request.token, request.account, lockOnRevocation = true),
+                    )
+                }
+            },
+        )
     private val destinationPicker =
         VaultDestinationPicker(
             viewModelScope,
@@ -1045,7 +1046,7 @@ class VaultViewModel internal constructor(
         mutableState.value = mutableState.value.copy(preview = null, loading = false, error = null)
         val request = previewRequest(id, token) ?: return
         mutableState.value = mutableState.value.copy(loading = true, error = null, preview = null)
-        operationJob = viewModelScope.launch { loadPreview(request) }
+        operationJob = viewModelScope.launch { previewContent.load(request) }
     }
 
     /** Creates a short-lived plaintext handoff only after the user accepts the external-app warning. */
@@ -1059,7 +1060,7 @@ class VaultViewModel internal constructor(
         val account = accountId ?: return
         val remote =
             if (id == null) {
-                loadedPreviewRequest?.takeIf { it.session === opened && it.account == account }?.remoteEntry
+                previewContent.loadedRequest?.takeIf { it.session === opened && it.account == account }?.remoteEntry
             } else {
                 findEntry(id)?.remote
             }
@@ -1115,9 +1116,7 @@ class VaultViewModel internal constructor(
     private suspend fun refreshExternalHandoffSource(request: ExternalHandoffRequest): VaultFolder? {
         val current = revalidateActionSource(request.session, request.remote)
         if (!isCurrent(request.token, request.account) || session !== request.session) return null
-        loadedPreviewRequest?.takeIf { it.remoteEntry == request.remote }?.let {
-            loadedPreviewRequest = it.copy(remoteEntry = current)
-        }
+        previewContent.refreshSource(request.remote, current)
         return current
     }
 
@@ -1155,7 +1154,7 @@ class VaultViewModel internal constructor(
         offset: Long? = null,
         length: Long = 0,
     ) {
-        val request = loadedPreviewRequest
+        val request = previewContent.loadedRequest
         val backing = preview.backing
         val rangeValid = validPreviewTextRange(backing, offset, length, bytes.size)
         if (request == null || !canSavePreview(preview, request) || !rangeValid) {
@@ -1206,7 +1205,7 @@ class VaultViewModel internal constructor(
                     if (isCurrent(token, request.account) && session === request.session) {
                         // Admission may have committed before scheduling/delivery was interrupted.
                         // Retain the draft but require a fresh version before another replacement.
-                        loadedPreviewRequest = null
+                        previewContent.forgetRequest()
                         mutableState.value =
                             mutableState.value.copy(
                                 preview = preview.copy(editable = false),
@@ -2251,98 +2250,35 @@ class VaultViewModel internal constructor(
         return contentsRequest(entry.path)
     }
 
-    /** Decoded thumbnails stay in memory and become unusable when their originating lease changes. */
-    @Suppress("TooGenericExceptionCaught") // Optional thumbnails must not block directory browsing.
-    suspend fun loadThumbnail(id: String): ByteArray? {
-        val request = thumbnailRequest(id) ?: return null
-        var bytes: ByteArray? = null
-        return try {
-            withContext(ioDispatcher) {
-                bytes =
-                    thumbnailMutex.withLock {
-                        if (!isThumbnailCurrent(request)) return@withLock null
-                        if (!isVaultVideo(request.entry.route.name) &&
-                            request.entry.route.size <= IN_MEMORY_PREVIEW_BYTES
-                        ) {
-                            return@withLock request.session.preview(request.entry.remote)
-                        }
-                        streamedThumbnail(request)
-                    }
-            }
-            val ready = bytes
-            if (ready != null && ready.size <= MAX_VAULT_IMAGE_BYTES && isThumbnailCurrent(request)) {
-                ready.also { bytes = null }
-            } else {
-                null
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            null
-        } finally {
-            bytes?.fill(0)
-        }
-    }
-
-    private suspend fun streamedThumbnail(request: ThumbnailRequest): ByteArray? {
-        val backing = EncryptedPreviewBacking.create(getApplication()) { isThumbnailCurrent(request) }
-        return try {
-            request.session.download(request.entry.remote, backing.outputStream(), Long.MAX_VALUE)
-            backing.seal()
-            val bitmap =
-                if (isVaultVideo(request.entry.route.name)) {
-                    loadEncryptedVideoThumbnail(getApplication(), backing)
-                } else {
-                    decodeBoundedBitmap(backing, maximumDimension = 256)
-                }
-            bitmap?.let(::encodeThumbnail)
-        } finally {
-            backing.close()
-        }
-    }
-
-    private fun encodeThumbnail(bitmap: Bitmap): ByteArray? =
-        try {
-            ByteArrayOutputStream().use { output ->
-                if (bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) output.toByteArray() else null
-            }
-        } finally {
-            bitmap.recycle()
-        }
+    /** Decoded thumbnails stay in memory and retain their originating route and source lease. */
+    suspend fun loadThumbnail(id: String): ByteArray? = thumbnailRequest(id)?.let { previewContent.loadThumbnail(it) }
 
     @Suppress("ReturnCount") // Reject unsupported images before decrypting or allocating thumbnail data.
-    private fun thumbnailRequest(id: String): ThumbnailRequest? {
+    private fun thumbnailRequest(id: String): VaultThumbnailRequest? {
         if (mutableState.value.mode != VaultRouteMode.CONTENTS || mutableState.value.loading) return null
         val entry = findEntry(id) ?: return null
         if (entry.route.isFolder ||
-            (previewKind(entry.route.name) != VaultPreviewKind.IMAGE && !isVaultVideo(entry.route.name))
+            (vaultPreviewKind(entry.route.name) != VaultPreviewKind.IMAGE && !isVaultVideo(entry.route.name))
         ) {
             return null
         }
         val opened = session ?: return null
         val account = accountId ?: return null
-        return ThumbnailRequest(opened, account, generation, entry)
+        return VaultThumbnailRequest(opened, account, generation, entry)
     }
 
-    private fun isThumbnailCurrent(request: ThumbnailRequest): Boolean =
+    private fun isThumbnailCurrent(request: VaultThumbnailRequest): Boolean =
         isCurrent(request.token, request.account) &&
             session === request.session &&
             findEntry(request.entry.route.id) === request.entry &&
             !mutableState.value.loading
-
-    private data class ThumbnailRequest(
-        val session: VaultRouteSession,
-        val account: String,
-        val token: Long,
-        val entry: PresentedVaultFolder,
-    )
 
     @Suppress("ReturnCount") // Reject invalid or stale preview requests before starting any work.
     private fun previewRequest(id: String, token: Long): VaultPreviewRequest? {
         val presented = findEntry(id) ?: return null
         val entry = presented.route
         if (entry.isFolder) return null
-        val kind = previewKind(entry.name)
+        val kind = vaultPreviewKind(entry.name)
         if (kind == VaultPreviewKind.UNSUPPORTED) return failPreviewRequest()
         val maximumBytes = Long.MAX_VALUE
         val opened = session ?: return null
@@ -2361,95 +2297,6 @@ class VaultViewModel internal constructor(
     private fun failPreviewRequest(): VaultPreviewRequest? {
         mutableState.value = mutableState.value.copy(error = VaultRouteError.PREVIEW)
         return null
-    }
-
-    // These boundaries expose heterogeneous failures; CancellationException is rethrown explicitly.
-    // Early exits reject stale or unsupported previews before publication.
-    @Suppress("TooGenericExceptionCaught", "ReturnCount", "CyclomaticComplexMethod")
-    private suspend fun loadPreview(request: VaultPreviewRequest) {
-        var bytes: ByteArray? = null
-        var backing: EncryptedPreviewBacking? = null
-        try {
-            val memoryThreshold =
-                if (request.kind == VaultPreviewKind.TEXT) {
-                    minOf(IN_MEMORY_PREVIEW_BYTES, MAX_VAULT_EDIT_TEXT_BYTES)
-                } else {
-                    IN_MEMORY_PREVIEW_BYTES
-                }
-            if (request.remoteEntry.size > memoryThreshold) {
-                backing =
-                    EncryptedPreviewBacking.create(getApplication()) {
-                        accountId == request.account && session === request.session && routeActive
-                    }
-                request.session.download(request.remoteEntry, backing.outputStream(), Long.MAX_VALUE)
-                backing.seal()
-                if (!isCurrent(request.token, request.account) || session !== request.session) return
-                loadedPreviewRequest = request
-                mutableState.value =
-                    mutableState.value.copy(
-                        loading = false,
-                        error = null,
-                        preview =
-                            VaultRoutePreview(
-                                request.title,
-                                ByteArray(0),
-                                request.kind,
-                                editable =
-                                    request.kind == VaultPreviewKind.TEXT &&
-                                        !request.session.isOffline &&
-                                        request.remoteEntry.strongETag != null,
-                                backing = backing,
-                            ),
-                    )
-                backing = null
-                return
-            }
-            bytes = request.session.preview(request.remoteEntry)
-            if (
-                bytes.size > request.maximumBytes ||
-                !isCurrent(request.token, request.account) ||
-                session !== request.session
-            ) {
-                bytes.fill(0)
-                return
-            }
-            val kind = request.kind.decodedKind(bytes.size)
-            if (kind == VaultPreviewKind.UNSUPPORTED) {
-                bytes.fill(0)
-                bytes = null
-                mutableState.value =
-                    mutableState.value.copy(loading = false, error = VaultRouteError.PREVIEW, preview = null)
-                return
-            }
-            loadedPreviewRequest = request
-            mutableState.value =
-                mutableState.value.copy(
-                    loading = false,
-                    error = null,
-                    preview =
-                        VaultRoutePreview(
-                            request.title,
-                            bytes,
-                            kind,
-                            editable =
-                                kind == VaultPreviewKind.TEXT &&
-                                    !request.session.isOffline &&
-                                    request.remoteEntry.strongETag != null,
-                        ),
-                )
-            bytes = null
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            reportFailure(
-                failure,
-                VaultRouteError.PREVIEW,
-                VaultFailureContext(request.token, request.account, lockOnRevocation = true),
-            )
-        } finally {
-            bytes?.fill(0)
-            backing?.close()
-        }
     }
 
     /** The first page retains the same root/password proof as the complete validated directory. */
@@ -3425,16 +3272,6 @@ class VaultViewModel internal constructor(
             VaultPreferenceTargetKind.FOLDER
         }
 
-    private fun previewKind(name: String): VaultPreviewKind {
-        val extension = name.substringAfterLast('.', "").lowercase()
-        return when (extension) {
-            "txt", "md", "csv", "json", "xml", "yaml", "yml", "log", "ini", "toml" -> VaultPreviewKind.TEXT
-            "png", "jpg", "jpeg", "webp", "gif", "bmp", "heic", "heif", "avif" -> VaultPreviewKind.IMAGE
-            "pdf" -> VaultPreviewKind.PDF
-            else -> VaultPreviewKind.UNSUPPORTED
-        }
-    }
-
     private fun VaultTarget.expectedIdentity() =
         VaultIdentity(
             accountId = location.accountId,
@@ -3484,14 +3321,7 @@ class VaultViewModel internal constructor(
         session = null
     }
 
-    private fun clearPreview() {
-        loadedPreviewRequest = null
-        mutableState.value = mutableState.value.copy(previewSaving = false, previewSaveError = null)
-        mutableState.value.preview?.let { preview ->
-            preview.bytes.fill(0)
-            preview.backing?.close()
-        }
-    }
+    private fun clearPreview() = previewContent.clear()
 
     private fun clearVerifiedKeyMaterial() {
         verifiedKeyMaterial?.fill(0)
@@ -3522,573 +3352,7 @@ class VaultViewModel internal constructor(
     )
 }
 
-interface VaultRouteRepository {
-    /** Immutable non-secret account row; absent adapters opt out of remembered-key restore. */
-    suspend fun unlockAccountSnapshot(accountId: String): Any? = null
-
-    /** Durable Room owner scope for device-remember binding; absent adapters opt out safely. */
-    suspend fun rememberBinding(accountId: String): VaultRememberBinding? = null
-
-    fun unlockCredentialPermit(accountId: String): () -> Boolean = { false }
-
-    suspend fun offlineLocations(accountId: String): List<VaultLocation> = emptyList()
-
-    suspend fun removeOffline(identity: VaultIdentity) = Unit
-
-    suspend fun locations(accountId: String): List<VaultLocation>
-
-    suspend fun folders(
-        accountId: String,
-        location: VaultLocation,
-        path: String,
-    ): List<VaultFolder>
-
-    suspend fun unlock(
-        accountId: String,
-        target: VaultLocation,
-        vaultPath: String,
-        password: CharArray,
-    ): VaultRouteSession
-
-    suspend fun unlockWithKeyMaterial(
-        accountId: String,
-        target: VaultLocation,
-        vaultPath: String,
-        keyMaterial: ByteArray,
-    ): VaultRouteSession
-}
-
-interface VaultRouteDirectorySnapshot : AutoCloseable {
-    val totalCount: Long
-
-    suspend fun page(
-        offset: Long = 0,
-        limit: Int = VAULT_DIRECTORY_PAGE_SIZE,
-    ): List<VaultFolder>
-
-    override fun close()
-}
-
-/** Compatibility for small legacy test doubles. Android adapters always override openDirectory. */
-private class SmallVaultRouteDirectorySnapshot(
-    entries: List<VaultFolder>,
-    showHidden: Boolean,
-    excludedPath: String?,
-) : VaultRouteDirectorySnapshot {
-    private val entries =
-        entries
-            .also { require(it.size <= 256) }
-            .filter { showHidden || !it.name.startsWith('.') }
-            .filter { excludedPath == null || it.path != excludedPath && !it.path.startsWith(excludedPath + "/") }
-            .sortedWith(
-                compareBy<VaultFolder> { !it.isFolder }
-                    .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
-                    .thenBy { it.name }
-                    .thenBy { it.encryptedPath }
-                    .thenBy { it.id },
-            )
-    private var closed = false
-    override val totalCount: Long get() = entries.size.toLong()
-
-    override suspend fun page(
-        offset: Long,
-        limit: Int,
-    ): List<VaultFolder> {
-        check(!closed)
-        require(offset >= 0 && limit in 1..256)
-        return entries.drop(offset.coerceAtMost(entries.size.toLong()).toInt()).take(limit)
-    }
-
-    override fun close() {
-        closed = true
-    }
-}
-
-private class AndroidVaultRouteDirectorySnapshot(
-    private val snapshot: VaultDirectorySnapshot,
-) : VaultRouteDirectorySnapshot {
-    override val totalCount get() = snapshot.totalCount
-
-    override suspend fun page(
-        offset: Long,
-        limit: Int,
-    ) = snapshot.page(offset, limit)
-
-    override fun close() = snapshot.close()
-}
-
 const val VAULT_DIRECTORY_PAGE_SIZE = 128
-
-interface VaultRouteSession {
-    fun boundaryEndpoint(location: VaultLocation): BoundaryEndpoint = unsupportedVaultMutation()
-
-    fun observePendingOffline(): kotlinx.coroutines.flow.Flow<Unit> = kotlinx.coroutines.flow.emptyFlow()
-
-    suspend fun completePendingOffline() = Unit
-
-    fun offlineAvailable(entry: VaultFolder): Boolean? = if (isOffline) true else null
-
-    val isOffline: Boolean get() = false
-
-    suspend fun pinOffline(entry: VaultFolder): Unit = unsupportedVaultMutation()
-
-    suspend fun pinOfflineDirectory(path: String): Unit = unsupportedVaultMutation()
-
-    val identity: VaultIdentity
-
-    suspend fun list(path: String): List<VaultFolder>
-
-    suspend fun openDirectory(
-        path: String,
-        showHidden: Boolean = false,
-        excludedPath: String? = null,
-    ): VaultRouteDirectorySnapshot = SmallVaultRouteDirectorySnapshot(list(path), showHidden, excludedPath)
-
-    suspend fun preview(entry: VaultFolder): ByteArray
-
-    suspend fun exportVerifiedKeyMaterial(): ByteArray
-
-    suspend fun encodeDirectoryPath(plainPath: String): String = plainPath
-
-    suspend fun decodeDirectoryPath(encryptedRelativePath: String): String = encryptedRelativePath
-
-    suspend fun createFolder(
-        parentPath: String,
-        name: String,
-    ): VaultFolder = unsupportedVaultMutation()
-
-    suspend fun delete(entry: VaultFolder): Unit = unsupportedVaultMutation()
-
-    suspend fun rename(
-        entry: VaultFolder,
-        newName: String,
-    ): VaultFolder = unsupportedVaultMutation()
-
-    suspend fun move(
-        entry: VaultFolder,
-        destinationPath: String,
-        newName: String = entry.name,
-    ): VaultFolder = unsupportedVaultMutation()
-
-    suspend fun copy(
-        entry: VaultFolder,
-        destinationPath: String,
-        newName: String = entry.name,
-    ): VaultFolder = unsupportedVaultMutation()
-
-    suspend fun upload(
-        parentPath: String,
-        name: String,
-        source: InputStream,
-        size: Long,
-        mimeType: String?,
-    ): VaultFolder = unsupportedVaultMutation()
-
-    suspend fun queueUpload(
-        parentPath: String,
-        name: String,
-        source: InputStream,
-        size: Long,
-        mimeType: String?,
-    ): Unit = unsupportedVaultMutation()
-
-    suspend fun replaceText(
-        entry: VaultFolder,
-        source: InputStream,
-        size: Long,
-    ): VaultFolder = unsupportedVaultMutation()
-
-    suspend fun queueReplacement(
-        entry: VaultFolder,
-        source: InputStream,
-        size: Long,
-    ): Unit = unsupportedVaultMutation()
-
-    suspend fun download(
-        entry: VaultFolder,
-        sink: OutputStream,
-        maxPlaintextBytes: Long,
-    ): Long = unsupportedVaultMutation()
-
-    suspend fun renameVaultRoot(newName: String): VaultLocation = unsupportedVaultMutation()
-
-    suspend fun deleteVaultRoot(): Unit = unsupportedVaultMutation()
-
-    fun close()
-}
-
-private fun <T> unsupportedVaultMutation(): T = throw UnsupportedOperationException("Vault operation is unavailable.")
-
-interface VaultBiometricKeyStore {
-    fun hasEnrollment(identity: VaultIdentity): Boolean
-
-    fun prepareEnrollment(identity: VaultIdentity): Cipher
-
-    fun completeEnrollment(
-        identity: VaultIdentity,
-        cipher: Cipher,
-        keyMaterial: ByteArray,
-    )
-
-    fun cancelEnrollment(identity: VaultIdentity)
-
-    fun prepareUnlock(identity: VaultIdentity): Cipher
-
-    fun completeUnlock(
-        identity: VaultIdentity,
-        cipher: Cipher,
-    ): ByteArray
-
-    fun cancelUnlock(identity: VaultIdentity)
-
-    fun forget(identity: VaultIdentity)
-}
-
-internal interface VaultOfferPreferences {
-    fun status(identity: VaultIdentity): VaultPreferenceStatus?
-
-    fun remember(
-        identity: VaultIdentity,
-        title: String,
-        targetKind: VaultPreferenceTargetKind,
-    )
-
-    fun decline(
-        identity: VaultIdentity,
-        title: String,
-        targetKind: VaultPreferenceTargetKind,
-    )
-
-    fun remove(identity: VaultIdentity)
-}
-
-private class AndroidVaultRouteRepository(
-    private val application: Application,
-) : VaultRouteRepository {
-    private val repository = VaultRepository(application)
-    private val offline = VaultOfflineStore(application)
-    private val accounts =
-        eu.opencloud.android.next.core.database.FileBrowserStore(
-            eu.opencloud.android.next.core.database.FileBrowserDatabase
-                .create(application),
-        )
-
-    override suspend fun unlockAccountSnapshot(accountId: String): Any? =
-        accounts.account(accountId)?.takeIf {
-            it.isActive
-        }
-
-    override suspend fun rememberBinding(accountId: String): VaultRememberBinding? {
-        val groups = accounts.vaultOfflineGroups()
-        val activeBeforeCapture = accounts.account(accountId)?.isActive == true
-        val owner = if (activeBeforeCapture) groups.captureOwner(accountId) else null
-        val ownerMatchesAccount = owner?.accountId == accountId
-        val ownerCurrentAfterCapture = owner != null && ownerMatchesAccount && groups.isCurrentOwner(owner)
-        val activeAfterCapture = accounts.account(accountId)?.isActive == true
-        val ownerCurrentAfterAccountCheck = owner != null && groups.isCurrentOwner(owner)
-        val currentOwner =
-            owner?.takeIf {
-                ownerCurrentAfterCapture && activeAfterCapture && ownerCurrentAfterAccountCheck
-            }
-        return currentOwner?.let { VaultRememberBinding(it.incarnation, it.accountIdentityDigest) }
-    }
-
-    override fun unlockCredentialPermit(accountId: String): () -> Boolean =
-        eu.opencloud.android.next.core.security.AccountSessions
-            .get(application)
-            .beginLease(accountId)
-
-    override suspend fun offlineLocations(accountId: String) = offline.locations(accountId)
-
-    override suspend fun removeOffline(identity: VaultIdentity) {
-        offline.remove(identity)
-    }
-
-    override suspend fun locations(accountId: String) = repository.locations(accountId)
-
-    override suspend fun folders(
-        accountId: String,
-        location: VaultLocation,
-        path: String,
-    ) = repository.folders(accountId, location, path)
-
-    override suspend fun unlock(
-        accountId: String,
-        target: VaultLocation,
-        vaultPath: String,
-        password: CharArray,
-    ): VaultRouteSession =
-        if (target.offlineOnly) {
-            AndroidOfflineVaultRouteSession(
-                requireNotNull(offline.openWithPassword(accountId, target, password)),
-                application,
-                offline,
-            )
-        } else {
-            AndroidVaultRouteSession(repository.unlock(accountId, target, vaultPath, password), offline, application)
-        }
-
-    override suspend fun unlockWithKeyMaterial(
-        accountId: String,
-        target: VaultLocation,
-        vaultPath: String,
-        keyMaterial: ByteArray,
-    ): VaultRouteSession =
-        if (target.offlineOnly) {
-            AndroidOfflineVaultRouteSession(
-                requireNotNull(offline.openWithKeyMaterial(accountId, target, keyMaterial)),
-                application,
-                offline,
-            )
-        } else {
-            AndroidVaultRouteSession(
-                repository.unlockWithKeyMaterial(accountId, target, vaultPath, keyMaterial),
-                offline,
-                application,
-            )
-        }
-}
-
-private class AndroidVaultRouteSession(
-    private val session: VaultSession,
-    private val offline: VaultOfflineStore,
-    private val application: Application,
-) : VaultRouteSession {
-    override fun boundaryEndpoint(location: VaultLocation): BoundaryEndpoint = VaultBoundaryEndpoint(session, location)
-
-    override suspend fun pinOffline(entry: VaultFolder) {
-        if (entry.isFolder) {
-            session.enqueueBackgroundOfflineGroup(application, entry.path, entry)
-        } else {
-            session.enqueueBackgroundOfflineDownload(application, entry)
-        }
-    }
-
-    override fun observePendingOffline(): kotlinx.coroutines.flow.Flow<Unit> =
-        pendingOfflineDownloads(application, identity)
-
-    override suspend fun completePendingOffline() {
-        session.completePendingOfflineGroups(application, offline)
-        session.completePendingOfflineDownloads(application, offline)
-        val revision = offlineListingRevision
-        refreshPageOfflineStatus(lastPageEntries, revision)
-    }
-
-    override suspend fun pinOfflineDirectory(path: String) {
-        session.enqueueBackgroundOfflineGroup(application, path)
-    }
-
-    override val identity get() = session.identity
-
-    private var savedFiles: List<VaultFolder>? = null
-    private var lastPageEntries: List<VaultFolder> = emptyList()
-    private var offlineListingRevision = 0L
-
-    override fun offlineAvailable(entry: VaultFolder): Boolean? =
-        if (entry.isFolder) {
-            null
-        } else {
-            savedFiles?.any {
-                it.encryptedPath == entry.encryptedPath && it.strongETag == entry.strongETag
-            }
-        }
-
-    override suspend fun list(path: String): List<VaultFolder> {
-        ++offlineListingRevision
-        lastPageEntries = emptyList()
-        savedFiles = null
-        return session.list(path)
-    }
-
-    override suspend fun openDirectory(
-        path: String,
-        showHidden: Boolean,
-        excludedPath: String?,
-    ): VaultRouteDirectorySnapshot {
-        val snapshot = session.openDirectory(path, showHidden, excludedPath)
-        val revision = ++offlineListingRevision
-        return object : VaultRouteDirectorySnapshot {
-            override val totalCount get() = snapshot.totalCount
-
-            override suspend fun page(
-                offset: Long,
-                limit: Int,
-            ): List<VaultFolder> {
-                var delivered = false
-                try {
-                    val entries = snapshot.page(offset, limit)
-                    lastPageEntries = entries
-                    refreshPageOfflineStatus(entries, revision)
-                    currentCoroutineContext().ensureActive()
-                    delivered = true
-                    return entries
-                } finally {
-                    if (!delivered) snapshot.close()
-                }
-            }
-
-            override fun close() {
-                if (offlineListingRevision == revision) {
-                    offlineListingRevision++
-                    lastPageEntries = emptyList()
-                    savedFiles = null
-                }
-                snapshot.close()
-            }
-        }
-    }
-
-    @Suppress("TooGenericExceptionCaught") // Optional status cannot block live encrypted browsing.
-    private suspend fun refreshPageOfflineStatus(entries: List<VaultFolder>, revision: Long) {
-        val refreshed =
-            try {
-                session.offlineFiles(offline, entries)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                null
-            }
-        if (revision == offlineListingRevision) savedFiles = refreshed
-    }
-
-    override suspend fun preview(entry: VaultFolder) = session.preview(entry)
-
-    override suspend fun exportVerifiedKeyMaterial() = session.exportVerifiedKeyMaterial()
-
-    override suspend fun encodeDirectoryPath(plainPath: String) = session.encodeDirectoryPath(plainPath)
-
-    override suspend fun decodeDirectoryPath(encryptedRelativePath: String) =
-        session.decodeDirectoryPath(encryptedRelativePath)
-
-    override suspend fun createFolder(
-        parentPath: String,
-        name: String,
-    ) = session.createFolder(parentPath, name)
-
-    override suspend fun delete(entry: VaultFolder) = session.delete(entry)
-
-    override suspend fun rename(
-        entry: VaultFolder,
-        newName: String,
-    ) = session.rename(entry, newName)
-
-    override suspend fun move(
-        entry: VaultFolder,
-        destinationPath: String,
-        newName: String,
-    ) = session.move(entry, destinationPath, newName)
-
-    override suspend fun copy(
-        entry: VaultFolder,
-        destinationPath: String,
-        newName: String,
-    ) = session.copy(entry, destinationPath, newName)
-
-    override suspend fun upload(
-        parentPath: String,
-        name: String,
-        source: InputStream,
-        size: Long,
-        mimeType: String?,
-    ) = session.upload(parentPath, name, source, size, mimeType)
-
-    override suspend fun queueUpload(
-        parentPath: String,
-        name: String,
-        source: InputStream,
-        size: Long,
-        mimeType: String?,
-    ) {
-        session.enqueueBackgroundUpload(application, parentPath, name, source, size)
-    }
-
-    override suspend fun replaceText(
-        entry: VaultFolder,
-        source: InputStream,
-        size: Long,
-    ): VaultFolder =
-        session.upload(
-            parentPath = entry.path.trim('/').substringBeforeLast('/', ""),
-            name = entry.name,
-            source = source,
-            size = size,
-            mimeType = entry.contentType,
-            overwrite = entry,
-        )
-
-    override suspend fun queueReplacement(
-        entry: VaultFolder,
-        source: InputStream,
-        size: Long,
-    ) {
-        session.enqueueBackgroundReplacement(application, entry, source, size)
-    }
-
-    override suspend fun download(
-        entry: VaultFolder,
-        sink: OutputStream,
-        maxPlaintextBytes: Long,
-    ) = session.download(entry, sink, maxPlaintextBytes)
-
-    override suspend fun renameVaultRoot(newName: String) = session.renameVaultRoot(newName)
-
-    override suspend fun deleteVaultRoot() = session.deleteVaultRoot()
-
-    override fun close() {
-        savedFiles = null
-        lastPageEntries = emptyList()
-        session.close()
-    }
-}
-
-private class AndroidVaultBiometricKeyStore(
-    private val store: VaultKeyStore,
-) : VaultBiometricKeyStore {
-    override fun hasEnrollment(identity: VaultIdentity) = store.hasEnrollment(identity)
-
-    override fun prepareEnrollment(identity: VaultIdentity) = store.prepareEnrollment(identity)
-
-    override fun completeEnrollment(
-        identity: VaultIdentity,
-        cipher: Cipher,
-        keyMaterial: ByteArray,
-    ) = store.completeEnrollment(identity, cipher, keyMaterial)
-
-    override fun cancelEnrollment(identity: VaultIdentity) = store.cancelEnrollment(identity)
-
-    override fun prepareUnlock(identity: VaultIdentity) = store.prepareUnlock(identity)
-
-    override fun completeUnlock(
-        identity: VaultIdentity,
-        cipher: Cipher,
-    ) = store.completeUnlock(identity, cipher)
-
-    override fun cancelUnlock(identity: VaultIdentity) = store.cancelUnlock(identity)
-
-    override fun forget(identity: VaultIdentity) = store.forget(identity)
-}
-
-private class AndroidVaultOfferPreferences(
-    application: Application,
-) : VaultOfferPreferences {
-    private val preferences = VaultPreferences(application)
-
-    override fun status(identity: VaultIdentity) = preferences.status(identity)
-
-    override fun remember(
-        identity: VaultIdentity,
-        title: String,
-        targetKind: VaultPreferenceTargetKind,
-    ) = preferences.remember(identity, title, targetKind)
-
-    override fun decline(
-        identity: VaultIdentity,
-        title: String,
-        targetKind: VaultPreferenceTargetKind,
-    ) = preferences.decline(identity, title, targetKind)
-
-    override fun remove(identity: VaultIdentity) = preferences.remove(identity)
-}
 
 private fun ByteArray.toHex(): String = joinToString(separator = "") { byte -> "%02x".format(byte) }
 
@@ -4097,9 +3361,6 @@ private class VaultRememberCommitUnknownException(
 ) : IllegalStateException("Device remember enrollment outcome was unknown.")
 
 private class VaultRememberRevocationException : IllegalStateException("The previous phone key could not be revoked.")
-
-private const val IN_MEMORY_PREVIEW_BYTES = 8 * 1024 * 1024
-private const val MAX_VAULT_IMAGE_BYTES = 8 * 1024 * 1024
 
 internal fun classifyVaultFailure(
     failure: Throwable,
@@ -4173,16 +3434,6 @@ private data class VaultFailureContext(
     val classifyVaultIdentity: Boolean = true,
 )
 
-private data class VaultPreviewRequest(
-    val session: VaultRouteSession,
-    val account: String,
-    val remoteEntry: VaultFolder,
-    val title: String,
-    val kind: VaultPreviewKind,
-    val maximumBytes: Long,
-    val token: Long,
-)
-
 private sealed class PendingVaultTransfer(
     open val identity: VaultIdentity,
     open val uri: Uri?,
@@ -4239,52 +3490,6 @@ private fun readDocumentMetadata(
     )
 }
 
-private fun VaultPreviewKind.decodedKind(size: Int): VaultPreviewKind =
-    if (size >= 0) this else VaultPreviewKind.UNSUPPORTED
-
-private class AndroidOfflineVaultRouteSession(
-    private val session: VaultOfflineSession,
-    private val application: Application,
-    private val offline: VaultOfflineStore,
-) : VaultRouteSession {
-    override val isOffline = true
-    override val identity get() = session.identity
-
-    override fun observePendingOffline(): kotlinx.coroutines.flow.Flow<Unit> =
-        pendingOfflineDownloads(application, identity)
-
-    override suspend fun completePendingOffline() {
-        session.completePendingOfflineGroups(application, offline)
-        session.completePendingOfflineDownloads(application, offline)
-    }
-
-    override suspend fun list(path: String) = session.list(path)
-
-    override suspend fun openDirectory(
-        path: String,
-        showHidden: Boolean,
-        excludedPath: String?,
-    ): VaultRouteDirectorySnapshot =
-        AndroidVaultRouteDirectorySnapshot(session.openDirectory(path, showHidden, excludedPath))
-
-    override suspend fun preview(entry: VaultFolder) = session.preview(entry)
-
-    override suspend fun exportVerifiedKeyMaterial() = session.exportVerifiedKeyMaterial()
-
-    override suspend fun encodeDirectoryPath(plainPath: String) = session.encodeDirectoryPath(plainPath)
-
-    override suspend fun decodeDirectoryPath(encryptedRelativePath: String) =
-        session.decodeDirectoryPath(encryptedRelativePath)
-
-    override suspend fun download(
-        entry: VaultFolder,
-        sink: OutputStream,
-        maxPlaintextBytes: Long,
-    ) = session.download(entry, sink, maxPlaintextBytes)
-
-    override fun close() = session.close()
-}
-
 /** Process-local callback lease: no scanner destination or key is serialized. */
 internal class VaultScanLease(
     val destinationLabel: String,
@@ -4330,31 +3535,3 @@ internal fun validEditableText(bytes: ByteArray): Boolean {
         false
     }
 }
-
-private fun isVaultVideo(name: String): Boolean =
-    name.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT) in
-        setOf("mp4", "m4v", "mov", "webm", "mkv", "3gp", "avi", "mpeg", "mpg")
-
-private fun pendingOfflineDownloads(
-    application: Application,
-    identity: VaultIdentity,
-): kotlinx.coroutines.flow.Flow<Unit> {
-    val store =
-        eu.opencloud.android.next.core.database.FileBrowserStore(
-            eu.opencloud.android.next.core.database.FileBrowserDatabase
-                .create(application),
-        )
-    return kotlinx.coroutines.flow
-        .combine(
-            store.observeAwaitingCiphertextDownloads(identity.accountId, "vault-offline:${identity.remoteVaultId}"),
-            store.vaultOfflineGroups().observeAwaiting(identity.accountId, identity.driveId, identity.remoteVaultId),
-        ) { files, group ->
-            listOfNotNull(files, group).joinToString("|").takeIf { it.isNotEmpty() }
-        }.pendingOfflineCompletionEvents()
-}
-
-/** An empty queue separates attempts, even when a retry retains the same transfer identity. */
-internal fun Flow<String?>.pendingOfflineCompletionEvents(): Flow<Unit> =
-    distinctUntilChanged()
-        .filterNotNull()
-        .map { Unit }

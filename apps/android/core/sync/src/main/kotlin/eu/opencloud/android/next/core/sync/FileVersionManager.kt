@@ -6,13 +6,13 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.network.FileVersionsClient
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.RemoteFileVersion
 import eu.opencloud.android.next.core.security.AppLock
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
 class FileVersionManager(
@@ -94,6 +94,6 @@ class FileVersionManager(
 
     private fun client(server: String) =
         FileVersionsClient(
-            TlsPolicy(context).applyTo(OkHttpClient.Builder().callTimeout(30, TimeUnit.SECONDS).build(), server),
+            TlsPolicy(context).applyTo(HttpClients.newBuilder().callTimeout(30, TimeUnit.SECONDS).build(), server),
         )
 }

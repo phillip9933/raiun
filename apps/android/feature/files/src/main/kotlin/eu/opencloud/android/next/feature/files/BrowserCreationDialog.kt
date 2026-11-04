@@ -78,7 +78,14 @@ internal fun BrowserCreationDialog(
     }
     val valid =
         name.isNotBlank() &&
-            (!encrypted || (password.isNotEmpty() && password == confirmation && onEncryptedCreate != null))
+            (
+                !encrypted ||
+                    (
+                        EncryptedCreationPasswordPolicy.isAcceptable(password) &&
+                            password == confirmation &&
+                            onEncryptedCreate != null
+                    )
+            )
     AlertDialog(
         onDismissRequest = {
             clearSecrets()
@@ -99,33 +106,9 @@ internal fun BrowserCreationDialog(
                     singleLine = true,
                 )
                 if (onEncryptedCreate != null) {
-                    Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
-                        Row(
-                            modifier =
-                                Modifier.fillMaxWidth().toggleable(
-                                    value = encrypted,
-                                    enabled = !busy,
-                                    role = Role.Switch,
-                                    onValueChange = {
-                                        encrypted = it
-                                        if (!it) clearSecrets()
-                                    },
-                                ),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(encryptLabel, modifier = Modifier.weight(1f))
-                            Switch(
-                                checked = encrypted,
-                                onCheckedChange = null,
-                                enabled = !busy,
-                            )
-                        }
-                        Text(
-                            text = stringResource(R.string.browser_encrypt_new_summary),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = OpenCloudDimensions.SpacingMd),
-                        )
+                    EncryptionChoice(encryptLabel, encrypted, !busy) {
+                        encrypted = it
+                        if (!it) clearSecrets()
                     }
                 }
                 if (encrypted) {
@@ -137,6 +120,7 @@ internal fun BrowserCreationDialog(
                         visible = passwordVisible,
                         onToggleVisibility = { passwordVisible = !passwordVisible },
                     )
+                    EncryptedCreationPasswordGuidance(password)
                     PasswordField(
                         value = confirmation,
                         onValueChange = { confirmation = it },
@@ -177,6 +161,57 @@ internal fun BrowserCreationDialog(
             }) { Text(stringResource(R.string.browser_cancel)) }
         },
     )
+}
+
+@Composable
+private fun EncryptionChoice(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
+        Row(
+            modifier =
+                Modifier.fillMaxWidth().toggleable(
+                    value = checked,
+                    enabled = enabled,
+                    role = Role.Switch,
+                    onValueChange = onCheckedChange,
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, modifier = Modifier.weight(1f))
+            Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+        }
+        Text(
+            text = stringResource(R.string.browser_encrypt_new_summary),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = OpenCloudDimensions.SpacingMd),
+        )
+    }
+}
+
+@Composable
+private fun EncryptedCreationPasswordGuidance(password: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
+        Text(
+            stringResource(R.string.browser_encrypt_password_guidance),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (password.isNotEmpty() && !EncryptedCreationPasswordPolicy.isAcceptable(password)) {
+            Text(
+                stringResource(
+                    R.string.browser_encrypt_password_too_short,
+                    EncryptedCreationPasswordPolicy.MINIMUM_CHARACTERS,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
 }
 
 @Composable

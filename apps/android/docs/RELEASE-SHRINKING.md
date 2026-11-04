@@ -1,6 +1,8 @@
 # Release shrinking evaluation — #53
 
-Production `release` builds still have R8 disabled. The local evaluation for [issue #53](https://github.com/phillip9933/raiun/issues/53) adds an opt-in `r8Validation` build type; it does not enable shrinking for published builds. Building a candidate, resolving its dependencies or passing host tests does not establish runtime compatibility.
+The Android 1.4.0/code 55 candidate enables R8 code optimization/minification and resource shrinking for `release`; debug builds remain unshrunk. The dated sections below preserve the local evaluation evidence and its limits. They do not establish any additional device, network or failure-mode acceptance. Current release validation and publication status are recorded separately in [Testing](TESTING.md).
+
+Runtime retention is limited to the audited native ABI and generated settings schema in `proguard-native-r8.pro` and `proguard-storage-r8.pro`. Test ABI roots and the nonexported Compose test host are confined to the explicitly opted-in instrumentation target, never ordinary release.
 
 ## Build and test the isolated candidate
 
@@ -15,8 +17,7 @@ The following explicit property creates `r8Validation`, initializes it from `rel
 ```sh
 ./gradlew -Praiun.r8Validation=true \
   :app:verifyR8ValidationRuntimeArtifacts \
-  :app:assembleR8Validation \
-  :app:assembleR8ValidationAndroidTest
+  :app:assembleR8Validation
 ```
 
 This candidate enables code optimization/minification and resource shrinking. It remains **non-debuggable**, inherits the release build's empty development-server credentials, and uses only Gradle's existing standard **debug signing configuration**. It keeps the application ID and numerical version code, with a `-r8-validation` version-name suffix for the synthetic test journeys; it is not a production-signed replacement or an update for an owner installation. Install it only on the disposable emulator/test installation authorized for this work. No production signing configuration is introduced.
@@ -25,10 +26,14 @@ This candidate enables code optimization/minification and resource shrinking. It
 
 Both updater-verification APKs and the separate incoming-share provider APK are generated as instrumentation assets using the standard debug key. Their generators run for `mergeR8ValidationAndroidTestAssets` as well as the normal debug test assets. These fixture APKs are not assets of the application being shipped.
 
-On each explicitly selected disposable API 26/API 35 emulator, run the app's native suite:
+Preserve that standalone APK, mapping and merged configuration before building the instrumentation target. The test harness has a separate opt-in for AndroidX tracing/Kotlin helper methods and the updater verifier's test-only reflection seam. Those rules must not be used for standalone size or native-probe acceptance. They are not production requirements. The current harness also needs an exact compiled test-to-target ABI inventory, described below; the two opt-in flags alone do not retain every method called by the separate test APK.
+
+On each explicitly selected disposable API 26/API 35 emulator, build and run the app's native suite with the explicit harness property:
 
 ```sh
-ANDROID_SERIAL=<authorized-emulator-serial> ./gradlew -Praiun.r8Validation=true \
+ANDROID_SERIAL=<authorized-emulator-serial> ./gradlew \
+  -Praiun.r8Validation=true -Praiun.r8Instrumentation=true \
+  -Praiun.r8TestAbiRules=/absolute/path/to/current-test-abi.pro \
   :app:connectedR8ValidationAndroidTest
 ```
 
@@ -48,7 +53,7 @@ The retained `outputs/android-next-issues-20261104/apk-baseline-breakdown.json` 
 
 The historical complete APK was **115,503,766 bytes**, including ZIP/signature/alignment overhead. Native libraries account for about **67.47%** of that file; compressed DEX accounts for about **17.82%**. R8 does not rewrite the native ELF payloads or interpret opaque model assets. The uncompressed DEX total must not be reported as achievable download savings.
 
-Build the ordinary and minimized APKs from the same frozen current source before making a size claim. Record both hashes, complete APK bytes and compressed/uncompressed category totals. Compare native-library and model entry hashes to distinguish shrinking from a dependency, ABI or asset change. Preserve the R8 mapping, merged configuration, usage/seeds, resource reports and every warning or failed attempt. No measured reduction is recorded here yet.
+Build the ordinary and minimized APKs from the same frozen current source before making a size claim. Record both hashes, complete APK bytes and compressed/uncompressed category totals. Compare native-library and model entry hashes to distinguish shrinking from a dependency, ABI or asset change. Preserve the R8 mapping, merged configuration, usage/seeds, resource reports and every warning or failed attempt. The historical executed evaluation below records its own measurements; new source needs a new comparison.
 
 ## Native and reflection boundaries
 
@@ -78,9 +83,9 @@ Inspect the merged R8 configuration and the standalone candidate before running 
 
 The `core:crypto` native suite exercises that library's own test APK. Its result alone does not prove JNA/Sodium works inside the app's minimized DEX. Acceptance needs actual minimized-app crypto operations and failure handling, worker reconstruction and Room reopen/migration, Keystore/OAuth/serialization, provider/app-lock enforcement, incoming URI admission, OpenCV processing/export and learned ONNX inference. Include dynamic error paths, process/restart behavior where relevant, and both supported Android API baselines. ARM64 physical-device acceptance remains distinct from x86_64 emulator execution.
 
-Build success, host tests and a subset of native tests are useful bounded evidence. Production shrinking stays disabled until the standalone candidate, its exact narrow rules and the required runtime paths are demonstrated compatible. Signing, publication and a change to the default release configuration remain separate decisions.
+Build success, host tests and a subset of native tests are useful bounded evidence, not standalone runtime acceptance. The later local enablement at the end of this guide records the additional completed gates. Rerun the relevant checks when compiler, native dependency, serializer or recovery boundaries change; signing/publication remain separate actions.
 
-## Executed evaluation — 4 November 2026
+## Historical first evaluation — 4 November 2026
 
 The opt-in app and its test APK build after two **test-APK-only** suppressions
 for AndroidX Test's absent compile-time Error Prone annotations
@@ -136,3 +141,84 @@ instrumentation harness and the broader acceptance matrix described above.
 Mappings, configuration, seeds/usage/resource reports, APKs, bounded probe results,
 AndroidX failures and the unchanged native/model hashes remain in
 `outputs/android-next-issues-20261104/`. No production key or owner device was used.
+
+## Earlier local native-rule and harness follow-up — 4 November 2026
+
+The `r8Validation` variant adds [`proguard-native-r8.pro`](../app/proguard-native-r8.pro) and [`proguard-storage-r8.pro`](../app/proguard-storage-r8.pro). The release variant uses the required native and settings-schema rules. The dated evaluation below records the dependency and reflection review; re-audit these bindings when pinned dependencies change.
+
+The optional `raiun.r8Instrumentation=true` property requires `raiun.r8Validation=true` and adds [`proguard-r8-instrumentation.pro`](../app/proguard-r8-instrumentation.pro). AGP's app/test classpath sharing requires the AndroidX tracing methods and Kotlin lazy facade used by the test runner to survive in the target. The private updater-verifier reflection entrypoint is also retained solely for its test. Exact coroutine subclass/default-interface callback methods are retained for target-to-test calls not visible to static reference tracing. These rules do not change ordinary `release`; omit the instrumentation property for independent probes and measurement. A successful instrumented private-verifier test cannot establish retention of that entrypoint in the standalone APK.
+
+The independent framework fixture now accepts `--mapping <exact-standalone-mapping.txt>` and the additional probes `crypto-known-answer`, `scanner-standard` and `scanner-learned`. It packages only framework code and target-name metadata. The crypto probe checks a fixed public encrypted fixture and rejects tampering before plaintext output. Scanner probes use a synthetic bitmap; the standard path also invokes OpenCV's native exception path, and the learned path uses the bundled model. If optimization removes or changes a reflected shape, the fixture returns `unsupported-optimized-shape`; this is neither a pass nor automatically an app defect. Run an unshrunk control without mapping as well. Never retain target code merely to make this independent probe work.
+
+The additional optional `raiun.r8TestAbiRules=/absolute/path/to/current-test-abi.pro` is accepted only with the instrumentation flag, verifies the file exists, and appends it only to the instrumentation target. The current inventory was generated by R8 TraceReferences from **classfile/JAR inputs**, not APK/DEX: the actual `r8Validation` app classes, release-fallback module classes and all 128 verified external runtime artifacts are the target; actual `r8ValidationAndroidTest` classes and test-only classes are the source. Android 36 and compile-only classes form the tool library. Shared source/target class definitions are byte-identical. Test-only external artifacts came from the shared `debugAndroidTestRuntimeClasspath` inventory, whose current dependencies are declared in the common `androidTestImplementation` configuration; variant-specific dependency changes require a new inventory.
+
+The resulting 493 exact class/member blocks contain no wildcard. The final test inventory also preserves their ABI names: removing `allowobfuscation` from 471 blocks leaves the same members; 22 enum blocks already preserved names. Coroutine tooling can generate calls with original method names after target mapping, so preserving reachability alone was insufficient. Raw and stable inventories, hashes and the exact flag-only derivation are retained separately. This preserves methods legitimately inlined/deleted in the standalone app but called across the test APK boundary, such as `OkHttpClient.Builder.addInterceptor`. Use the inventory only for this test target, regenerate it after compiled input/dependency changes, and retain the input hashes and command. APK-only tracing returned an empty inventory and was rejected. Optional/hidden platform and annotation diagnostics were downgraded only within the tracing tool, retained and reviewed; no application warning suppression was added. The complete reproducible preparation script, inputs/provenance and exact commands are in `outputs/android-refactor-shrinking-20261104/trace-classfiles/`. This is local evaluation tooling, not a general production keep configuration.
+
+Rule inventories, exact source and bytecode references, failed attempts and execution evidence are retained under `outputs/android-refactor-shrinking-20261104/`. At this earlier evaluation stage, production shrinking remained disabled; the later enablement is documented below.
+
+### Standalone results and limits
+
+The same-source, non-debuggable standard-debug-key control is **115,583,773 bytes** and the standalone minimized APK is **98,491,878 bytes**: **17,091,895 bytes / 14.787% smaller**. All 20 native libraries and every non-profile asset, including `assets/docquad/docquadnet256.ort`, are byte-identical. Code-dependent ART baseline profiles differ as expected. Both APKs pass 16-KiB ZIP/native-load alignment checks. The ordinary unsigned APK is 115,521,982 bytes; signing overhead is not counted as shrinking savings.
+
+The exact standalone APK (without tracing, updater-test or test-ABI keep roots) has SHA256 `87179e75a5b940839332e862fe0e3465ace5e998be1768c06c1df4f289d40c12`. Independent probes on **both API 26 and API 35** show:
+
+| Probe | Unshrunk control | Standalone R8 |
+| --- | --- | --- |
+| Packaged JNA initialization | Pass | Pass |
+| Exact OpenCV native exception class/constructor lookup | Pass | Pass |
+| Fixed crypto known-answer and tamper rejection before plaintext | Pass | Pass |
+| Standard scanner detection and native exception invocation | Pass | Unsupported optimized constructor shape |
+| Learned scanner bundled-model inference, finite metrics and actual native OpenCV exception | Pass | Pass |
+| Protobuf parse/serialize/reopen of all 14 nondefault settings fields | Pass | Pass |
+
+The learned detector was checked for silent fallback: this method requires ONNX session execution and materialization of both model outputs. The probe does not assert corner accuracy, document quality, export or ARM64 behavior. Bounded cold launcher startup reports success on both APIs; it is not sign-in or file-operation acceptance.
+
+Retained failed attempts exposed two further JNA full-mode dependencies: the `FFIType` field-order annotation needs its class kept, and reflective constructor access needs `Klass.newInstance` to stay in its original package without inlining/relocation. The final narrow rules address both; the successful crypto probes exercise their initialization. An API 26 unshrunk scanner failure was a probe defect: enumerating unrelated methods resolved API 28-only signatures. The corrected probe looks up only the specific detection method. The optimized standard constructor remains unavailable to that probe and is not counted as a pass.
+
+The broader optimized run exposed a real storage defect after the harness could reach UI startup: generated Protobuf Lite message metadata references the original AppSettings field names. The storage rule retains only those 14 exact fields/types; it keeps no parser, builder or probe entrypoint. No `.proto`, wire format, Room schema or persisted setting is changed. The independent probe uses the actual optimized parser/schema/encoder, compares exact canonical wire bytes, reopens the output and checks all fields, including repeated values. Reaudit this rule when `app_settings.proto` changes.
+
+### Optimized instrumentation outcome
+
+The final instrumentation APK is a distinct artifact from the standalone APK. It includes the explicit stable test ABI inventory, the narrow reflection/callback rules, and a **nonexported** Compose host activity through `src/r8Instrumentation/AndroidManifest.xml`. The overlay is selected only with `raiun.r8Instrumentation=true`. Normal/standalone manifests contain no such host; packaged manifest inspection confirms unchanged permissions, production components, package, version code and non-debuggable state. No third-party dependency or checksum equality requirement was added or weakened to supply the host.
+
+The complete app suite passes **API 26: 30 cases, 6 explicit skips; API 35: 33 cases, 5 explicit skips**, using the same final target/test APK hashes. API 26 initially failed five screenshot-output-directory checks when explicitly sent to an unavailable external path. An unchanged-APK full rerun using the target's private cache passes with the original assertions. Private output was not extracted through `run-as`; no root/permission change was used. An earlier preflight encountered stopped emulators before executing any tests; task-owned read-only copies were restarted, preserving originals and failed logs. These harness corrections do not turn the earlier failed runs into passes.
+
+The suite exercises the optimized app's parser, crypto, scanner JPEG/PDF export, updater verification and security/UI paths. Direct static test references and the private-verifier keep roots affect this instrumentation target, so these results cannot certify standalone retention of all those paths. The independent standalone probes above remain separate. Native library-module suites run against their own unshrunk test APKs, as recorded in [Testing](TESTING.md).
+
+**Historical decision at this point in the evaluation: production shrinking remained disabled.** The follow-up work and later enablement are recorded in the dated sections below. Physical ARM64 acceptance remains distinct from x86_64 emulator results. These historical notes do not claim current-release checks or publication.
+
+## Acceptance and local enablement — 4 November 2026 (historical candidate evidence)
+
+The remaining gates passed against both the validation build and the **actual release build type**, without test retention roots. `release` now enables `isMinifyEnabled` and `isShrinkResources`, with the same native/storage rules inherited by `r8Validation`. The app ID, version name/code, provider authorities, signing configuration, Room schema 28 and persisted formats are unchanged. An explicitly guarded `raiun.r8UpgradeVersionCode=54` was used only for synthetic higher-version testing; the default remains 1.3.3/code 53.
+
+### Independent standalone scanner and data checks
+
+Both API 26/API 35 pass standard detection, learned inference, native OpenCV errors, crypto known-answer/tamper rejection and all 14-field Protobuf parse/serialize/reopen in the actual minified release. Standard processing no longer depends on a removed public constructor: the fixture obtains the real processor through the surviving learned-detector quality binding and invokes the actual static residual method.
+
+The independent `scanner-export` probe verifies a 2300×3100 JPEG, black-text/white-paper pixel content, a two-page PDF with 552×744-point pages and both 2300×3100 embedded images, cancellation after staging creation, staging cleanup and unchanged source bytes. No app class/method was retained just for a probe. Optimized exporter/callback shapes were reviewed from fresh APK disassembly and bound to the exact APK/mapping; reviewed recipes and provenance remain with the evidence. Missing or changed shapes fail rather than guess arguments. This does not establish ScanSession import/close, mid-PDF cancellation or camera/image-quality acceptance.
+
+### Cold upgrade and real worker reconstruction
+
+The baseline uses the exact published 1.3.3 APK payload, locally re-signed with the existing standard debug key. All675 non-signature ZIP entries match the official asset. This synthetic trust domain avoids production-key activation while retaining package identity/UID across the update. Disposable clones were recreated before seeding; the seed operation must never be applied to an owner installation merely because its account list is empty.
+
+On both APIs, baseline 53→actual minified release 54 preserves a synthetic account, pinned offline bytes, real settings protobuf bytes and encrypted v2 credential ciphertext. The candidate reopens the real Room database through its open helper and decrypts the existing password through the actual Android Keystore-backed store in a different process. Baseline work remains delayed/ENQUEUED at the seed boundary, and the baseline is force-stopped before replacement.
+
+Real startup reconstructs three stale-worker intents (QUEUED/RETRY/RUNNING). Actual Upload/DownloadWorker instances reach a deliberately unsupported location before authorization/network, producing typed FAILED/UNSUPPORTED and failed WorkSpecs with their original UUID, progress, attempts and ETag retained. SUCCEEDED/CANCELLED/AWAITING_UNLOCK/CONFLICT/unknown rows remain unchanged with no new WorkSpecs. The baseline-persisted cleanup worker reconstructs and succeeds; the orphan is removed while pinned data survives. Startup cleanup may remove the orphan before that delayed worker, so deletion is not attributed exclusively to it.
+
+These are real cold-start scheduling and data-preservation checks, **not successful network-transfer/resume**, death during an active transfer, encrypted-payload/biometric hardware, or production-key upgrade acceptance. Unsupported encrypted byte-offset continuation remains outside this work.
+
+### Reproducible CI and symbols
+
+`scripts/run_r8_native_checks.py` builds/preserves the standalone APK and map, inventories current compiled validation app/test inputs, generates exact name-preserving ABI rules and builds/runs the separate optimized app suite. It refuses a non-emulator or mismatched AVD/API, uses private-cache screenshot output, requires raw completed test outcomes and preserves failed logs. `prepare_r8_test_abi.py` verifies every resolved binary against canonical pins, exact release/validation coordinate-hash multisets, identical alias duplicates and unknown missing definitions. Unused allowed pins are recorded rather than treated as required platform artifacts. No application warning suppression is generated.
+
+The emulator workflow retains all eight normal suites and adds this gate on API 26/API 35. Local execution is acceptance evidence; no remote CI run, commit or push occurred. Focused helper tests cover pin/hash/class conflicts, diagnostic classification, nonempty complete test outcomes and stale mapping rejection.
+
+`archive_r8_artifacts.py` checks the mapping ID embedded in root DEX and archives mapping/configuration/seeds/usage/resources under version + unsigned-APK SHA256, refusing conflicting overwrites. Both packaging helpers call it before signing; the quality workflow retains release maps. Copy the version/hash archive to durable release evidence outside `build` before cleaning local outputs. No symbol archive is added to the published APK asset folder.
+
+Current evidence, exact APK/mapping hashes, source snapshots and preserved failed tooling attempts are in `outputs/android-shrinking-acceptance-20261104/`. Physical ARM64/OEM acceptance remains distinct; no production signing, installation on an owner device, commit, push or publication is implied by local enablement.
+
+### Final local results
+
+The actual default unsigned release is 98,479,598 bytes versus 115,521,982 bytes for the retained same-source unshrunk unsigned control: **17,042,384 bytes / 14.753% smaller**. Default code 53 DEX is byte-identical to the actual-release code 54 DEX exercised in the cold-upgrade and scanner probes; only the testing version override differs. Native libraries/non-profile assets/model remain byte-identical, ZIP 16-KiB alignment passes, the app remains nondebuggable, and the normal manifest/configuration contain neither test host nor test-only ABI/verifier rules.
+
+The complete regular gate passes 2,094 host cases with zero failures/skips, screenshot verification, formatting/static analysis, release lint and debug/minified-release assembly. The portable CI runner completes all phases locally on API 26 with raw outcomes **30 passes/6 explicit skips**; its exact final app/test artifacts pass **33 cases/5 skips** on API 35. Ten focused Python helper checks pass; both packaging scripts parse without executing signing. The matching symbol archive is retained outside `build` in the task evidence. No remote CI run or publication is claimed.

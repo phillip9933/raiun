@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
@@ -79,7 +80,7 @@ fun IncomingUploadRoute(
                 pluralStringResource(R.plurals.document_incoming_files, state.sourceCount, state.sourceCount),
                 style = MaterialTheme.typography.titleMedium,
             )
-            Text(state.files.take(3).joinToString { it.name }, maxLines = 3)
+            IncomingShareReviewWarning()
             if (!state.busy && state.files.isEmpty() && state.sourceCount > 0) {
                 Text(stringResource(R.string.document_shared_copy_on_upload))
             }
@@ -95,28 +96,13 @@ fun IncomingUploadRoute(
                 viewModel::openFolder,
                 viewModel::up,
             )
-            Button(
-                onClick = viewModel::upload,
-                enabled =
-                    !state.busy && state.spaceId != null && state.sourceCount > 0,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    if (state.destinationLocked) {
-                        stringResource(
-                            R.string.document_retry_uploads,
-                        )
-                    } else {
-                        stringResource(R.string.document_upload_here)
-                    },
-                )
-            }
+            IncomingUploadConfirmationButton(state, viewModel::upload)
         }
     }
 }
 
 @Composable
-private fun androidx.compose.foundation.layout.ColumnScope.IncomingDestinationChoices(
+internal fun androidx.compose.foundation.layout.ColumnScope.IncomingDestinationChoices(
     state: IncomingUploadState,
     onAccount: (String) -> Unit,
     onSpace: (String) -> Unit,
@@ -125,6 +111,29 @@ private fun androidx.compose.foundation.layout.ColumnScope.IncomingDestinationCh
 ) {
     val enabled = !state.busy && !state.destinationLocked
     LazyColumn(Modifier.weight(1f)) {
+        item { Text(stringResource(R.string.incoming_review_title), style = MaterialTheme.typography.titleSmall) }
+        items(state.sourceCount, key = { "source-$it" }) { index ->
+            val source = state.review.getOrNull(index)
+            ListItem(
+                headlineContent = {
+                    Text(
+                        source?.name ?: state.files.getOrNull(index)?.name
+                            ?: stringResource(R.string.incoming_review_unknown_name, index + 1),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                supportingContent = {
+                    Text(
+                        source?.providerPackage?.let { stringResource(R.string.incoming_review_provider, it) }
+                            ?: stringResource(R.string.incoming_review_unknown_provider),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
+        }
+
         item { Text(stringResource(R.string.document_account), style = MaterialTheme.typography.titleSmall) }
         items(state.accounts, key = { "account-${it.id}" }) { account ->
             ListItem(
@@ -170,5 +179,33 @@ private fun androidx.compose.foundation.layout.ColumnScope.IncomingDestinationCh
                 modifier = Modifier.clickable(enabled = enabled) { onFolder(folder) },
             )
         }
+    }
+}
+
+@Composable
+internal fun IncomingShareReviewWarning() {
+    Text(stringResource(R.string.incoming_review_warning), style = MaterialTheme.typography.bodyMedium)
+}
+
+@Composable
+internal fun IncomingUploadConfirmationButton(
+    state: IncomingUploadState,
+    onUpload: () -> Unit,
+) {
+    Button(
+        onClick = onUpload,
+        enabled =
+            !state.busy && state.spaceId != null && state.sourceCount > 0,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            if (state.destinationLocked) {
+                stringResource(
+                    R.string.document_retry_uploads,
+                )
+            } else {
+                stringResource(R.string.document_upload_here)
+            },
+        )
     }
 }

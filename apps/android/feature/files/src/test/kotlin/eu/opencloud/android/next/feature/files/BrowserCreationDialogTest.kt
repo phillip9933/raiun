@@ -67,19 +67,51 @@ class BrowserCreationDialogTest {
         compose.onNodeWithText("Name").performTextInput("Private")
         compose.onNodeWithText("Encrypt folder").assertExists()
         compose.onAllNodes(isToggleable())[0].performClick()
-        compose.onNodeWithText("Vault password").performTextInput("secret")
+        compose.onNodeWithText("Vault password").performTextInput("correct horse battery")
         compose.onAllNodesWithContentDescription("Show password")[0].performClick()
         compose.onNodeWithContentDescription("Hide password").assertExists()
         compose.onNodeWithContentDescription("Hide password").performClick()
-        compose.onNodeWithText("Confirm vault password").performTextInput("wrong")
+        compose.onNodeWithText("Confirm vault password").performTextInput("wrong password")
         compose.onNodeWithText("Create").assertIsNotEnabled()
         compose.onNodeWithText("Confirm vault password").performTextClearance()
-        compose.onNodeWithText("Confirm vault password").performTextInput("secret")
+        compose.onNodeWithText("Confirm vault password").performTextInput("correct horse battery")
         compose.onNodeWithText("Create").performClick()
         assertEquals("Private", createdName)
-        assertEquals("secret", seenPassword)
+        assertEquals("correct horse battery", seenPassword)
         assertNotNull(callbackArray)
         assertTrue(callbackArray!!.all { it == '\u0000' })
+    }
+
+    @Test fun encryptedCreationRefusesShortPasswordAndAcceptsLongPassphrase() {
+        var encryptedCalls = 0
+        compose.setContent {
+            OpenCloudTheme {
+                BrowserCreationDialog(
+                    title = "New Space",
+                    encryptLabel = "Encrypt Space",
+                    onPlainCreate = {},
+                    onEncryptedCreate = { _, _ -> encryptedCalls++ },
+                    onDismiss = {},
+                )
+            }
+        }
+        compose.onNodeWithText("Name").performTextInput("Archive")
+        compose.onAllNodes(isToggleable())[0].performClick()
+        compose.onNodeWithText("Vault password").performTextInput("short")
+        compose.onNodeWithText("Confirm vault password").performTextInput("short")
+        compose
+            .onNodeWithText(
+                "Use at least 12 characters, preferably several unrelated words. Choose a unique password.",
+            ).assertExists()
+        compose.onNodeWithText("Create").assertIsNotEnabled()
+        assertEquals(0, encryptedCalls)
+
+        compose.onNodeWithText("Vault password").performTextClearance()
+        compose.onNodeWithText("Confirm vault password").performTextClearance()
+        compose.onNodeWithText("Vault password").performTextInput("river maple orbit lantern")
+        compose.onNodeWithText("Confirm vault password").performTextInput("river maple orbit lantern")
+        compose.onNodeWithText("Create").performClick()
+        assertEquals(1, encryptedCalls)
     }
 
     @Test fun busyCreationCannotSubmitAgain() {

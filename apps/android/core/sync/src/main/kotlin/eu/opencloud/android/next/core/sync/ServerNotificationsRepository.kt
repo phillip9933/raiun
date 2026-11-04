@@ -3,13 +3,13 @@ package eu.opencloud.android.next.core.sync
 import android.content.Context
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.ServerNotification
 import eu.opencloud.android.next.core.network.ServerNotificationsClient
 import eu.opencloud.android.next.core.security.AppLock
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import okhttp3.OkHttpClient
 
 class ServerNotificationsRepository(
     context: Context,
@@ -39,7 +39,7 @@ class ServerNotificationsRepository(
         val authorization = WorkerAuthorizationProvider(app).authorization(account)
         currentCoroutineContext().ensureActive()
         check(permit() && store.account(accountId) == account)
-        val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+        val http = TlsPolicy(app).applyTo(HttpClients.newClient(), account.serverUrl)
         val result = action(ServerNotificationsClient(http), account.serverUrl, authorization)
         currentCoroutineContext().ensureActive()
         check(permit() && store.account(accountId) == account)

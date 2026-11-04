@@ -6,6 +6,7 @@ import eu.opencloud.android.next.core.database.SharedFolderEntry
 import eu.opencloud.android.next.core.database.SharedLocalFile
 import eu.opencloud.android.next.core.database.SharedLocalFileStore
 import eu.opencloud.android.next.core.model.validatedCachedFile
+import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.TransferClient
@@ -15,7 +16,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
@@ -170,7 +170,7 @@ class SharedLocalReader(
                     val authorization = WorkerAuthorizationProvider(app).authorization(account)
                     if (!permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
                     if (!resolver.isCurrent(source)) staleRead()
-                    val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+                    val http = TlsPolicy(app).applyTo(HttpClients.newClient(), account.serverUrl)
                     authorizeSharedContent(source, TransferClient(http), authorization)
                 },
                 permit,
