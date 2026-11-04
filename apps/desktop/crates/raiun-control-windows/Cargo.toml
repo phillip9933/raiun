@@ -19,7 +19,7 @@ zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 fs2 = "0.4"
-windows = { version = "=0.61.3", default-features = false, features = [
+windows = { version = "=0.62.2", default-features = false, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Com",
