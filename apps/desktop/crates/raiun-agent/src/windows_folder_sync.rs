@@ -8,11 +8,16 @@ mod vault_control {
 }
 use raiun_cloudfiles_windows::ConfiguredRootIdentity;
 use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
+use raiun_core::backend::{
+    CloudBackend, CloudError, CloudSpace, ErrorKind, RemoteEntry, WriteCondition,
+};
 use raiun_core::{CONFIG_SCHEMA_VERSION, Config, FolderPair, MediaImportJob, SyncMode};
 use raiun_engine::{
     Engine, SyncRevocationHandle,
     folder_pairs::{AccountScope, FolderPairsDocument, FolderPairsStore},
 };
+use raiun_opencloud::vault_backend::VaultBackend;
+use raiun_vault::session::{VaultSessionCoordinator, VaultSessionScope};
 use std::collections::BTreeMap;
 use windows_folder_requests::FolderRequest;
 use windows_profile_registry::{Registry, SourceKind};
@@ -34,6 +39,262 @@ pub(super) struct Setup {
     pub spaces: Vec<CloudSpace>,
     pub directory: PrivateDirectory,
     pub cloud_root: Option<RootConfiguration>,
+    pub vault_sessions: Arc<VaultSessionCoordinator>,
+    pub profile: String,
+}
+
+/// The offline settings path has no remote capability or worker. Its identity
+/// is reconstructed by the caller from the protected session and root owner.
+pub(super) struct OfflineSetup {
+    pub source_admissions: SharedSourceAdmissions,
+    pub profile: String,
+    pub generation: u64,
+    pub scope: AccountScope,
+    pub account_id: String,
+    pub origin: String,
+    pub directory: PrivateDirectory,
+}
+
+struct OfflineBackend {
+    origin: String,
+}
+impl OfflineBackend {
+    fn unavailable<T>() -> Result<T, CloudError> {
+        Err(CloudError::new(
+            ErrorKind::Offline,
+            "Folder network work requires a connected account",
+        ))
+    }
+}
+impl CloudBackend for OfflineBackend {
+    fn server_origin(&self) -> Option<String> {
+        Some(self.origin.clone())
+    }
+    fn spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
+        Self::unavailable()
+    }
+    fn list(
+        &self,
+        _: &str,
+        _: &str,
+        _: &mut dyn FnMut(RemoteEntry) -> Result<(), CloudError>,
+    ) -> Result<(), CloudError> {
+        Self::unavailable()
+    }
+    fn stat(&self, _: &str, _: &str) -> Result<RemoteEntry, CloudError> {
+        Self::unavailable()
+    }
+    fn download(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: &Path,
+    ) -> Result<RemoteEntry, CloudError> {
+        Self::unavailable()
+    }
+    fn upload(
+        &self,
+        _: &str,
+        _: &str,
+        _: &Path,
+        _: WriteCondition,
+    ) -> Result<RemoteEntry, CloudError> {
+        Self::unavailable()
+    }
+    fn mkdir(&self, _: &str, _: &str) -> Result<RemoteEntry, CloudError> {
+        Self::unavailable()
+    }
+    fn delete(&self, _: &str, _: &str, _: &str) -> Result<(), CloudError> {
+        Self::unavailable()
+    }
+    fn rename(&self, _: &str, _: &str, _: &str, _: &str) -> Result<RemoteEntry, CloudError> {
+        Self::unavailable()
+    }
+}
+
+pub(super) fn offline_settings(
+    setup: OfflineSetup,
+    request: FolderRequest,
+    authorized: &AtomicU64,
+) -> Result<Value, String> {
+    use sha2::Digest;
+    if setup.generation == 0 || authorized.load(Ordering::Acquire) != setup.generation {
+        return Err("The account changed before folder work".into());
+    }
+    let scope_bytes = serde_json::to_vec(&setup.scope).map_err(store_error)?;
+    let scope_digest = format!("{:x}", sha2::Sha256::digest(&scope_bytes));
+    let backend = Arc::new(OfflineBackend {
+        origin: setup.origin.clone(),
+    });
+    let engine = Engine::open_private_windows(setup.directory, backend)
+        .and_then(|engine| engine.with_account_scope(setup.account_id, setup.origin))
+        .map_err(store_error)?;
+    let store = FolderPairsStore::new(engine.clone(), setup.scope).map_err(store_error)?;
+    // Opening saved settings never creates a document or starts sync.
+    let document = store
+        .load()
+        .map_err(store_error)?
+        .ok_or("Saved folder settings are unavailable")?;
+    let mut config = document.config().clone();
+    let check = || -> Result<(), String> {
+        if authorized.load(Ordering::Acquire) == setup.generation {
+            Ok(())
+        } else {
+            Err("The account changed before folder settings were saved".into())
+        }
+    };
+    let source_admitted = |pair: &FolderPair| -> Result<(), String> {
+        let snapshot = setup
+            .source_admissions
+            .lock()
+            .map_err(|_| "Source admission is unavailable")?
+            .clone();
+        let valid = snapshot
+            .profiles()
+            .get(&setup.profile)
+            .is_some_and(|profile| {
+                profile.source_reservations().iter().any(|row| {
+                    row.scope_digest() == scope_digest
+                        && row.kind() == SourceKind::FolderPair
+                        && row.id() == pair.id
+                        && Some(row.root().path()) == pair.local_path.to_str()
+                })
+            });
+        if valid {
+            Ok(())
+        } else {
+            Err("Saved source admission changed; settings were preserved".into())
+        }
+    };
+    let result = match request {
+        FolderRequest::Pairs => serde_json::to_value(config.pairs).map_err(store_error)?,
+        FolderRequest::Transfers => {
+            serde_json::to_value(engine.transfers(500).map_err(store_error)?)
+                .map_err(store_error)?
+        }
+        FolderRequest::Pause { paused } => {
+            check()?;
+            store
+                .set_pause(
+                    document.revision(),
+                    paused,
+                    document.paused_space_ids().to_vec(),
+                )
+                .map_err(store_error)?;
+            json!({})
+        }
+        FolderRequest::SpacePause { space_id, paused } => {
+            if !config.pairs.iter().any(|pair| pair.space_id == space_id) {
+                return Err("This saved Space has no folder connection".into());
+            }
+            let mut ids = document.paused_space_ids().to_vec();
+            ids.retain(|id| id != &space_id);
+            if paused {
+                ids.push(space_id.clone());
+            }
+            check()?;
+            store
+                .set_pause(document.revision(), document.paused(), ids.clone())
+                .map_err(store_error)?;
+            json!({"space_id":space_id,"paused":paused,"paused_space_ids":ids})
+        }
+        FolderRequest::Exclusions { id, excluded_paths } => {
+            let pair = config
+                .pairs
+                .iter_mut()
+                .find(|pair| pair.id == id)
+                .ok_or("Folder connection not found")?;
+            source_admitted(pair)?;
+            pair.excluded_paths = excluded_paths;
+            let policy = engine.prepare_pair_policy(pair).map_err(store_error)?;
+            let exclusions = pair.excluded_paths.clone();
+            check()?;
+            store
+                .replace(document.revision(), config)
+                .map_err(store_error)?;
+            policy.publish();
+            json!({"pair_id":id,"excluded_paths":exclusions})
+        }
+        FolderRequest::Update {
+            id,
+            expected_pair,
+            expected_auth_generation,
+            mode,
+            content_filter,
+            exclusions,
+            excluded_paths,
+        } => {
+            if expected_auth_generation != setup.generation {
+                return Err(
+                    "Folder settings changed with the active account; refresh and retry".into(),
+                );
+            }
+            let pair = config
+                .pairs
+                .iter_mut()
+                .find(|pair| pair.id == id)
+                .ok_or("Folder connection not found")?;
+            if pair != &expected_pair {
+                return Err(
+                    "Folder connection changed before settings were saved; refresh and retry"
+                        .into(),
+                );
+            }
+            source_admitted(pair)?;
+            pair.mode = mode;
+            pair.content_filter = content_filter;
+            pair.exclusions = exclusions;
+            pair.excluded_paths = excluded_paths;
+            pair.validate_exclusions()
+                .map_err(|_| "Folder exclusions are invalid")?;
+            let updated = pair.clone();
+            let policy = engine.prepare_pair_policy(pair).map_err(store_error)?;
+            check()?;
+            store
+                .replace(document.revision(), config)
+                .map_err(store_error)?;
+            policy.publish();
+            json!({"pair":updated})
+        }
+        FolderRequest::Remove { id } => {
+            if let Some(pair) = config.pairs.iter().find(|pair| pair.id == id) {
+                source_admitted(pair)?;
+                let policy = engine.prepare_pair_retirement(&id).map_err(store_error)?;
+                config.pairs.retain(|pair| pair.id != id);
+                check()?;
+                store
+                    .replace(document.revision(), config)
+                    .map_err(store_error)?;
+                policy.publish();
+            }
+            json!({})
+        }
+        FolderRequest::SpaceDisconnect { space_id } => {
+            let pairs = config
+                .pairs
+                .iter()
+                .filter(|pair| pair.space_id == space_id)
+                .collect::<Vec<_>>();
+            for pair in &pairs {
+                source_admitted(pair)?;
+            }
+            let ids = pairs.iter().map(|pair| pair.id.clone()).collect::<Vec<_>>();
+            if !ids.is_empty() {
+                let policy = engine.prepare_pair_retirements(&ids).map_err(store_error)?;
+                config.pairs.retain(|pair| pair.space_id != space_id);
+                check()?;
+                store
+                    .replace(document.revision(), config)
+                    .map_err(store_error)?;
+                policy.publish();
+            }
+            json!({"space_id":space_id,"removed_pair_ids":ids})
+        }
+        _ => return Err("Connect this account before using this folder action".into()),
+    };
+    check()?;
+    Ok(result)
 }
 
 pub(super) struct Runtime {
@@ -47,6 +308,9 @@ pub(super) struct Runtime {
     spaces: Vec<CloudSpace>,
     roots: BTreeMap<String, PinnedDirectory>,
     cloud_root: Option<RootConfiguration>,
+    vault_sessions: Arc<VaultSessionCoordinator>,
+    profile: String,
+    origin: String,
     next_periodic_sync: std::time::Instant,
     next_media_sync: std::time::Instant,
 }
@@ -84,7 +348,9 @@ impl Runtime {
         let scope_bytes = serde_json::to_vec(&setup.scope).map_err(store_error)?;
         let scope_digest = format!("{:x}", sha2::Sha256::digest(&scope_bytes));
         let engine = Engine::open_private_windows(setup.directory, setup.client.clone())
-            .and_then(|engine| engine.with_account_scope(setup.account_id.clone(), setup.origin))
+            .and_then(|engine| {
+                engine.with_account_scope(setup.account_id.clone(), setup.origin.clone())
+            })
             .map_err(store_error)?;
         let store = FolderPairsStore::new(engine.clone(), setup.scope).map_err(store_error)?;
         if store.load().map_err(store_error)?.is_none() {
@@ -108,13 +374,12 @@ impl Runtime {
             engine,
             store,
             client: setup.client,
-            spaces: setup
-                .spaces
-                .into_iter()
-                .filter(|space| !space.encrypted)
-                .collect(),
+            spaces: setup.spaces.into_iter().collect(),
             roots: BTreeMap::new(),
             cloud_root: setup.cloud_root,
+            vault_sessions: setup.vault_sessions,
+            profile: setup.profile,
+            origin: setup.origin,
             next_periodic_sync: std::time::Instant::now() + Duration::from_secs(30),
             next_media_sync: std::time::Instant::now() + Duration::from_secs(30),
         };
@@ -152,8 +417,44 @@ impl Runtime {
     fn space(&self, id: &str) -> Result<&CloudSpace, String> {
         self.spaces
             .iter()
-            .find(|space| space.id == id && !space.encrypted)
-            .ok_or_else(|| "This Space is unavailable to ordinary folder sync".into())
+            .find(|space| space.id == id)
+            .ok_or_else(|| "This Space is unavailable to folder sync".into())
+    }
+    fn vault_engine_for_pair(&self, pair: &FolderPair) -> Result<Engine, String> {
+        let binding = pair
+            .vault
+            .as_ref()
+            .ok_or("The encrypted folder binding is missing")?;
+        let space = self.space(&pair.space_id)?;
+        if !space.encrypted && binding.root_path == "/" {
+            return Err("Choose an encrypted folder within this Space".into());
+        }
+        let scope = VaultSessionScope::new(
+            &self.profile,
+            &self.origin,
+            &pair.space_id,
+            &binding.root_resource_id,
+        )
+        .map_err(|_| "The encrypted folder scope is invalid")?;
+        if !self
+            .vault_sessions
+            .is_unlocked(&scope)
+            .map_err(store_error)?
+        {
+            return Err("Unlock this encrypted folder before syncing".into());
+        }
+        let backend = VaultBackend::new(
+            (*self.client).clone(),
+            Arc::clone(&self.vault_sessions),
+            scope,
+            binding.root_path.clone(),
+        )
+        .map_err(|_| "The encrypted folder changed or is unavailable")?;
+        Ok(self.engine.with_vault_backend(
+            pair.space_id.clone(),
+            binding.clone(),
+            Arc::new(backend),
+        ))
     }
     // Keep the shared ordinary-root helper usable by media admission without
     // making a job reject its own source. Only pair callers add this check.
@@ -221,10 +522,21 @@ impl Runtime {
         config: &Config,
         replacing: Option<&str>,
     ) -> Result<PinnedDirectory, String> {
-        if pair.vault.is_some() || !pair.local_path.is_absolute() {
-            return Err("Choose an ordinary absolute local folder".into());
+        if !pair.local_path.is_absolute() {
+            return Err("Choose an absolute local folder".into());
         }
         let space = self.space(&pair.space_id)?;
+        if space.encrypted && pair.vault.is_none() {
+            return Err("Unlock and select this encrypted Space before syncing".into());
+        }
+        if !space.encrypted
+            && pair
+                .vault
+                .as_ref()
+                .is_some_and(|binding| binding.root_path == "/")
+        {
+            return Err("The selected vault does not match this ordinary Space".into());
+        }
         if pair.mode != SyncMode::DownloadOnly && !space.writable {
             return Err("The selected Space is read only".into());
         }
@@ -267,12 +579,15 @@ impl Runtime {
         }
         // Validate the selected ordinary remote folder using the same DAV
         // semantics as the existing Linux engine; encrypted targets fail closed.
-        let remote = self
-            .client
-            .stat(&pair.space_id, &pair.remote_path)
-            .map_err(|_| "Could not verify the selected cloud folder")?;
+        let remote = if pair.vault.is_some() {
+            self.vault_engine_for_pair(pair)?
+                .stat(&pair.space_id, &pair.remote_path)
+        } else {
+            self.client.stat(&pair.space_id, &pair.remote_path)
+        }
+        .map_err(|_| "Could not verify the selected cloud folder")?;
         if !remote.directory
-            || remote.encrypted
+            || (pair.vault.is_none() && remote.encrypted)
             || (pair.mode != SyncMode::DownloadOnly && !remote.writable)
         {
             return Err("The selected cloud folder is unavailable for this sync mode".into());
@@ -330,7 +645,9 @@ impl Runtime {
             }
             FolderRequest::Spaces => serde_json::to_value(&self.spaces).map_err(store_error),
             FolderRequest::List { space_id, path } => {
-                self.space(&space_id)?;
+                if self.space(&space_id)?.encrypted {
+                    return Err("Browse encrypted folders through the unlocked vault".into());
+                }
                 let mut entries = vec![];
                 self.client
                     .list(&space_id, &path, &mut |entry| {
@@ -537,7 +854,12 @@ impl Runtime {
                 windows_profile_registry::SourceKind::FolderPair,
                 &pair.id,
             )?;
-            self.engine.sync_pair(&pair).map_err(
+            let engine = if pair.vault.is_some() {
+                self.vault_engine_for_pair(&pair)?
+            } else {
+                self.engine.clone()
+            };
+            engine.sync_pair(&pair).map_err(
                 |_| "Folder sync needs attention; local and recovery data were preserved",
             )?;
         }

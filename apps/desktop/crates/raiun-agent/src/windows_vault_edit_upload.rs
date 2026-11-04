@@ -21,6 +21,15 @@ impl WindowsAgent {
         active: Arc<AtomicBool>,
         policy: windows_vault_close_worker::FreshCloseCompletionPolicy,
     ) -> Result<Value, String> {
+        let cached = {
+            self.state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?
+                .offline_cached
+        };
+        if cached {
+            return self.queue_windows_vault_fresh_capture(job, active, policy);
+        }
         // Only the originating consumer supplies this cancellation identity.
         // Never consult a current/replacement worker or hold its ownership lock.
         let writable_bytes = policy.writable_bytes();
@@ -159,7 +168,6 @@ impl WindowsAgent {
         };
         use raiun_core::backend::{ErrorKind, RemoteEntry};
         use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
-        use sha2::{Digest, Sha256};
         use std::time::Instant;
 
         // The default is remote-only. Fresh local completion is permitted only
@@ -348,8 +356,43 @@ impl WindowsAgent {
                 "The retained edit belongs to a different authenticated account scope".into(),
             );
         }
-        let retained = ledger
-            .read_body()
+        let streamed_body = ledger.reference().is_streamed();
+        let timeout = if streamed_body {
+            raiun_cloudfiles_windows::StreamedRecoveryPolicy::default()
+                .total_timeout()
+                .as_secs()
+        } else {
+            300
+        };
+        let cancellation = if streamed_body {
+            CancellationToken::for_recovery_job(
+                raiun_cloudfiles_windows::StreamedRecoveryPolicy::default(),
+            )
+            .cancellation()
+            .clone()
+        } else {
+            CancellationToken::for_offline_job()
+        };
+        let deadline = Instant::now()
+            + Duration::from_secs(
+                session
+                    .expires_at
+                    .saturating_sub(unix_time_now())
+                    .min(timeout),
+            );
+        let cancelled = || {
+            cancellation.is_cancelled()
+                || cancellation.is_expired()
+                || Instant::now() >= deadline
+                || self.generation.load(Ordering::Acquire) != generation
+                || self.provider.authorized_generation.load(Ordering::Acquire) != generation
+                || verified.backend.is_revoked()
+                || fresh_active
+                    .as_ref()
+                    .is_some_and(|active| !active.load(Ordering::Acquire))
+        };
+        let mut retained = ledger
+            .read_body_cancelled(&cancelled)
             .map_err(|_| "The protected retained edit is unavailable")?;
         let original = ledger.reference().entry();
         let target = ExistingVaultUploadTarget::new(
@@ -387,10 +430,10 @@ impl WindowsAgent {
         // by silently selecting a replacement login, connection or unlock.
         current()?;
         verify_fresh_dispatch()?;
-        let mut attempt = match ledger.reopen_attempt() {
+        let mut attempt = match ledger.reopen_attempt_from_body(&retained) {
             Ok(attempt) => attempt,
             Err(vault_edit_upload::Error::Missing) => ledger
-                .initialize_attempt()
+                .initialize_attempt_from_body(&retained)
                 .map_err(|_| "The upload attempt could not be durably initialized")?,
             Err(_) => return Err("The protected upload attempt is unavailable".into()),
         };
@@ -402,21 +445,41 @@ impl WindowsAgent {
         let ticket = attempt.begin_attempt(&ledger).map_err(
             |_| "This retained edit already has an attempt; inspect recovery before continuing",
         )?;
-        let cancellation = CancellationToken::for_offline_job();
-        let deadline = Instant::now()
-            + Duration::from_secs(session.expires_at.saturating_sub(unix_time_now()).min(300));
-        let cancelled = || {
-            cancellation.is_cancelled()
-                || cancellation.is_expired()
-                || Instant::now() >= deadline
-                || self.generation.load(Ordering::Acquire) != generation
-                || self.provider.authorized_generation.load(Ordering::Acquire) != generation
-                || verified.backend.is_revoked()
-                || fresh_active
-                    .as_ref()
-                    .is_some_and(|active| !active.load(Ordering::Acquire))
+        let body_len = retained.len();
+        let body_sha256 = retained.sha256();
+        // Reader cancellation is pure owned atomics/job clock. It may run while
+        // SDK encryption/decryption owns its exact epoch registry lease.
+        let reader_cancelled: Arc<dyn Fn() -> bool + Send + Sync> = {
+            let token = cancellation.clone();
+            let agent = self.generation.clone();
+            let provider = self.provider.authorized_generation.clone();
+            let backend = verified.backend.clone();
+            let active = fresh_active.clone();
+            Arc::new(move || {
+                token.is_cancelled()
+                    || token.is_expired()
+                    || Instant::now() >= deadline
+                    || agent.load(Ordering::Acquire) != generation
+                    || provider.load(Ordering::Acquire) != generation
+                    || backend.is_revoked()
+                    || active.as_ref().is_some_and(|a| !a.load(Ordering::Acquire))
+            })
         };
-        let mut source = std::io::Cursor::new(retained.bytes_for_recovery());
+        let mut streamed_source = if streamed_body {
+            Some(
+                retained
+                    .streamed_reader(reader_cancelled)
+                    .map_err(|_| "The protected streamed edit is unavailable")?,
+            )
+        } else {
+            None
+        };
+        let mut source = std::io::Cursor::new(
+            retained
+                .legacy()
+                .map(|v| v.bytes_for_recovery())
+                .unwrap_or(&[]),
+        );
         // Normalize remote evidence without cloning or reconstructing the live
         // completion capability. The remote-only path deliberately never mints it.
         struct VerifiedResult {
@@ -447,51 +510,72 @@ impl WindowsAgent {
                 ),
             }
             .map_err(|_| "The retained edit upload context changed")?;
-            verified
-                .backend
-                .upload_existing_vault_capture_live(
+            let uploaded = if let Some(source) = streamed_source.as_mut() {
+                verified
+                    .backend
+                    .upload_existing_vault_streamed_capture_live(
+                        target,
+                        source,
+                        body_len,
+                        body_sha256,
+                        control,
+                        &cancelled,
+                    )
+            } else {
+                verified.backend.upload_existing_vault_capture_live(
                     target,
                     &mut source,
-                    retained.bytes_for_recovery().len() as u64,
+                    body_len,
                     control,
                     &cancelled,
                 )
-                .map(|result| match result {
-                    VaultLiveUploadOutcome::Verified(capability) => {
-                        let receipt = capability.remote_evidence();
-                        UploadResult::Verified(Box::new(VerifiedResult {
-                            entry: receipt.entry().clone(),
-                            digest: receipt.plaintext_sha256(),
-                            completion: Some(capability),
-                        }))
-                    }
-                    VaultLiveUploadOutcome::NeedsReconciliation { .. } => {
-                        UploadResult::NeedsReconciliation
-                    }
-                })
+            };
+            uploaded.map(|result| match result {
+                VaultLiveUploadOutcome::Verified(capability) => {
+                    let receipt = capability.remote_evidence();
+                    UploadResult::Verified(Box::new(VerifiedResult {
+                        entry: receipt.entry().clone(),
+                        digest: receipt.plaintext_sha256(),
+                        completion: Some(capability),
+                    }))
+                }
+                VaultLiveUploadOutcome::NeedsReconciliation { .. } => {
+                    UploadResult::NeedsReconciliation
+                }
+            })
         } else {
-            verified
-                .backend
-                .upload_existing_vault_capture(
+            let uploaded = if let Some(source) = streamed_source.as_mut() {
+                verified.backend.upload_existing_vault_streamed_capture(
                     &target,
-                    &mut source,
-                    retained.bytes_for_recovery().len() as u64,
+                    source,
+                    body_len,
+                    body_sha256,
                     Arc::clone(&self.provider.authorized_generation),
                     generation,
                     &cancelled,
                 )
-                .map(|result| match result {
-                    VaultExistingOverwriteOutcome::Verified(receipt) => {
-                        UploadResult::Verified(Box::new(VerifiedResult {
-                            entry: receipt.entry().clone(),
-                            digest: receipt.plaintext_sha256(),
-                            completion: None,
-                        }))
-                    }
-                    VaultExistingOverwriteOutcome::NeedsReconciliation { .. } => {
-                        UploadResult::NeedsReconciliation
-                    }
-                })
+            } else {
+                verified.backend.upload_existing_vault_capture(
+                    &target,
+                    &mut source,
+                    body_len,
+                    Arc::clone(&self.provider.authorized_generation),
+                    generation,
+                    &cancelled,
+                )
+            };
+            uploaded.map(|result| match result {
+                VaultExistingOverwriteOutcome::Verified(receipt) => {
+                    UploadResult::Verified(Box::new(VerifiedResult {
+                        entry: receipt.entry().clone(),
+                        digest: receipt.plaintext_sha256(),
+                        completion: None,
+                    }))
+                }
+                VaultExistingOverwriteOutcome::NeedsReconciliation { .. } => {
+                    UploadResult::NeedsReconciliation
+                }
+            })
         };
         let uncertain = || {
             json!({"state":"uncertain", "capture_id":capture_id,
@@ -506,23 +590,36 @@ impl WindowsAgent {
         }
         match outcome {
             Ok(UploadResult::Verified(receipt)) => {
-                let digest: [u8; 32] = Sha256::digest(retained.bytes_for_recovery()).into();
+                let digest = body_sha256;
                 if receipt.digest != digest {
                     let _ = attempt.record_uncertain(&ledger, ticket);
                     return Ok(uncertain());
                 }
                 let entry = &receipt.entry;
-                if attempt
-                    .record_readback_evidence(
+                let recorded = if streamed_body {
+                    attempt.record_streamed_readback_evidence(
                         &ledger,
                         ticket,
                         &entry.id,
                         &entry.etag,
                         &entry.etag,
-                        retained.bytes_for_recovery(),
+                        body_len,
+                        body_sha256,
                     )
-                    .is_err()
-                {
+                } else {
+                    attempt.record_readback_evidence(
+                        &ledger,
+                        ticket,
+                        &entry.id,
+                        &entry.etag,
+                        &entry.etag,
+                        retained
+                            .legacy()
+                            .ok_or("The retained legacy body changed")?
+                            .bytes_for_recovery(),
+                    )
+                };
+                if recorded.is_err() {
                     return Ok(uncertain());
                 }
                 if let Some(capability) = receipt.completion {
@@ -535,7 +632,7 @@ impl WindowsAgent {
                             "retained":true, "local_cleanup":"incomplete", "automatic_retry":false}),
                         );
                     }
-                    let store = match ledger.local_completion_store() {
+                    let store = match ledger.local_completion_store_from_body(&retained) {
                         Ok(store) => store,
                         Err(_) => {
                             return Ok(

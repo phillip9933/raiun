@@ -11,6 +11,7 @@ publish.workspace = true
 synthetic-test-ca = ["raiun-opencloud/synthetic-test-ca"]
 
 [dependencies]
+raiun-headless = { path = "../raiun-headless" }
 raiun-control = { path = "../raiun-control" }
 serde.workspace = true
 serde_json.workspace = true

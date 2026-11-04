@@ -286,6 +286,17 @@ impl Drop for CancelFilePageOnDrop {
 }
 
 impl WindowsAgent {
+    pub(super) fn windows_device_cache_quota_set(&self, request: &Value) -> Result<Value, String> {
+        let quota = request
+            .get("quota_bytes")
+            .and_then(Value::as_u64)
+            .filter(|q| (256 * 1024 * 1024..=1_u64 << 40).contains(q))
+            .ok_or("Cache limit must be between 256 MiB and 1 TiB")?;
+        let mut request = request.clone();
+        request["quota_bytes"] = json!(quota);
+        self.windows_file_request(&request, Some("device_quota_set"))
+    }
+
     pub(super) fn windows_device_cache_usage(&self, request: &Value) -> Result<Value, String> {
         self.windows_file_request(request, Some("device_usage"))
     }
@@ -395,6 +406,27 @@ impl WindowsAgent {
                 .ok_or("Refresh the Windows drive identity")?,
         };
         let (cache_status, job_status) = match operation {
+            Some("device_quota_set") => {
+                let quota_bytes = request
+                    .get("quota_bytes")
+                    .and_then(Value::as_u64)
+                    .ok_or("Enter a valid cache limit")?;
+                let (response, result) = std::sync::mpsc::sync_channel(1);
+                self.provider
+                    .commands
+                    .try_send(ProviderCommand::SetDeviceCacheQuota {
+                        binding,
+                        quota_bytes,
+                        response,
+                    })
+                    .map_err(|_| "Device cache settings are unavailable")?;
+                (
+                    None,
+                    Some(result.recv_timeout(Duration::from_secs(30)).map_err(
+                        |_| "Could not confirm the saved limit; refresh before retrying",
+                    )??),
+                )
+            }
             Some("device_usage") => {
                 let (response, result) = std::sync::mpsc::sync_channel(1);
                 self.provider
@@ -569,7 +601,10 @@ impl WindowsAgent {
             return Err("The account changed; refresh the file status".into());
         }
         if let Some(mut status) = job_status {
-            if matches!(operation, Some("list" | "folder_list" | "device_usage")) {
+            if matches!(
+                operation,
+                Some("list" | "folder_list" | "device_usage" | "device_quota_set")
+            ) {
                 // Attach scope only after the account/session/root postflight.
                 status["profile_id"] = json!(self.profile_scope.as_str());
                 status["auth_generation"] = json!(generation);

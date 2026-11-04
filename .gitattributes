@@ -14,3 +14,11 @@ apps/android/app/src/main/assets/third-party/** -text
 # Preserve third-party notice bytes and upstream whitespace verbatim.
 apps/desktop/legal/** -text -whitespace
 apps/desktop/packaging/linux/appimage-licenses/** -text -whitespace
+
+# Runtime-notice provenance pins these exact source bytes on Linux and Windows.
+apps/desktop/Cargo.lock text eol=lf
+apps/desktop/desktop-shell/src-tauri/Cargo.lock text eol=lf
+apps/desktop/package-lock.json text eol=lf
+apps/desktop/desktop-shell/package-lock.json text eol=lf
+apps/desktop/LICENSE -text
+apps/desktop/NOTICE -text

@@ -2,6 +2,17 @@
 
 Android and desktop have independent versions and release pages.
 
+## Desktop 0.7.5 Beta — 2026-11-04
+
+Linux and Windows GUI/CLI packages add the bounded design-plan operations,
+including verified cross-vault file Copy/Move, Windows encrypted Sync Folders,
+qualified offline folder controls and protected recovery visibility. Lightweight
+headless CLI packages are included. Linux upload verification now handles delayed
+revision metadata, and ordinary online saves work when listing-cache metadata is
+unavailable. Existing account/root binding, conditional writes and recovery
+protection remain. See the [release notes](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5)
+for supported limits and the reused basic-check scope.
+
 ## Android 1.3.1 — 2026-10-30
 
 Fix Authelia sign-ins that completed but received HTTP 401 for file requests, including accounts already saved on the phone. Preserve saved credentials after unexplained token-endpoint 401 responses, improve validation of login metadata and fix intermittent database locks while preparing encrypted folders for offline use. See the [Android release notes](apps/android/docs/RELEASE-NOTES-1.3.1.md).
@@ -15,9 +26,8 @@ Guest invitation management, clearer account colors and settings, improved large
 The Linux and Windows Desktop Beta uses numeric versioning. It brings a
 unified Sync Folders workspace, editable sync filters/exclusions, grouped Settings,
 per-account appearance, retained-account controls and the Windows in-place
-installer. The Windows reconnect fix was owner-verified with both the Default and
-a newly added account. Focused package/upgrade and data-retention checks passed; broader beta limits
-remain documented. Android remains on 1.2.0. See the [Desktop
+installer. It fixes Windows saved-sign-in reconnection on servers issuing
+short-lived access tokens. Android remains on 1.2.0. See the [Desktop
 changelog](apps/desktop/CHANGELOG.md) and [Sync Folders guide](apps/desktop/docs/SYNC-FOLDERS.md).
 
 ## Coordinated release — 2026-10-27

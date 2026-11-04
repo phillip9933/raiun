@@ -50,6 +50,36 @@ impl DispositionDescriptor {
         value.validate()?;
         Ok(value)
     }
+    #[cfg(windows)]
+    pub(crate) fn from_streamed_capture(
+        scope: &Scope,
+        reference: &CaptureRef,
+        hydration: &Hydration,
+        retained: &super::windows_vault_streamed_edit::AuthenticatedStreamedCapture,
+    ) -> Result<Self> {
+        let descriptor = retained.descriptor();
+        let baseline = descriptor.baseline();
+        if !reference.is_streamed()
+            || descriptor.scope() != scope
+            || descriptor.id() != reference.id()
+            || retained.frame() != reference.frame()
+            || baseline.opaque_file() != reference.entry().opaque()
+            || baseline.strong_etag() != reference.entry().etag()
+            || baseline.native_volume() != scope.native_root().0
+            || baseline.native_file() != hydration.file_index()
+        {
+            return Err(Error::Foreign);
+        }
+        let value = Self {
+            scope: scope.clone(),
+            reference: reference.clone(),
+            hydration: hydration.clone(),
+            body_len: descriptor.len(),
+            body_sha256: descriptor.sha256(),
+        };
+        value.validate()?;
+        Ok(value)
+    }
     pub(crate) fn validate(&self) -> Result<()> {
         self.scope
             .authenticated_store_binding()
@@ -61,7 +91,7 @@ impl DispositionDescriptor {
         self.hydration
             .validate_for_entry(self.reference.entry())
             .map_err(|_| Error::Invalid)?;
-        if self.body_len > capture::MAX_BODY_BYTES as u64
+        if self.body_len > self.reference.body_limit()
             || self.body_sha256 == [0; 32]
             || !capture::strong_etag(self.reference.entry().etag())
             || self.reference.entry().is_directory()
@@ -102,7 +132,8 @@ pub(crate) fn validate_retained_capture(
     retained: &RetainedEdit,
 ) -> Result<()> {
     let baseline = retained.historical_baseline();
-    if retained.scope() != scope
+    if reference.is_streamed()
+        || retained.scope() != scope
         || retained.capture_id() != reference.id()
         || retained.encoded_frame_ref() != reference.frame()
         || baseline.opaque_file() != reference.entry().opaque()

@@ -19,6 +19,14 @@ zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 fs2 = "0.4"
+windows = { version = "=0.61.3", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Variant",
+] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -27,6 +35,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Registry",
+    "Win32_System_SystemInformation",
     "Win32_System_Memory",
     "Win32_System_Pipes",
     "Win32_System_Threading",

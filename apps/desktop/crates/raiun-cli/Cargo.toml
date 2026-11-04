@@ -13,8 +13,15 @@ path = "src/main.rs"
 clap = { workspace = true }
 serde.workspace = true
 raiun-core = { path = "../raiun-core" }
+raiun-headless = { path = "../raiun-headless" }
+rpassword = "7"
+zeroize = "1"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+raiun-control-windows = { path = "../raiun-control-windows" }
 
 [lints]
 workspace = true

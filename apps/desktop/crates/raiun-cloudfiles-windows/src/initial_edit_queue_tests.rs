@@ -507,3 +507,26 @@ fn verified_dispatch_default_returns_no_proof_and_retains_owned_location() {
         [b"legacy-durable".to_vec()]
     );
 }
+
+#[test]
+fn queued_job_keeps_exact_deadline_and_expiry_retains_record_without_remote_calls() {
+    let temp = private_tempdir();
+    let scope = fixture_scope("queue-expiry");
+    let recovery = prepared(temp.path(), &scope);
+    let queue = InitialEditQueue::default();
+    let job = crate::StreamedRecoveryJob::for_test_timeout(std::time::Duration::ZERO);
+    let deadline = job.deadline();
+    let receipt = append_receipt(recovery.as_ref(), "personal", b"retained").with_test_job(job);
+    queue.push(recovery, receipt).unwrap();
+    let pending = queue.take().unwrap().unwrap();
+    assert_eq!(pending.recovery_job().unwrap().deadline(), deadline);
+    let remote = RevokedRemote {
+        authorization_checks: Mutex::new(0),
+    };
+    assert!(pending.dispatch_verified(&remote).is_err());
+    assert_eq!(*remote.authorization_checks.lock().unwrap(), 0);
+    assert_eq!(
+        read_records(temp.path(), journal_scope(&scope, "personal")),
+        vec![b"retained".to_vec()]
+    );
+}

@@ -1,11 +1,12 @@
 [package]
 name = "raiun-desktop-shell"
-version = "0.7.4"
+version = "0.7.5"
 edition = "2024"
 rust-version = "1.90"
 publish = false
 
 [workspace]
+exclude = ["vendor/tauri-plugin-single-instance-2.4.5"]
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
@@ -22,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "=2.4.5", path = "vendor/tauri-plugin-single-instance-2.4.5" }
 tauri-plugin-updater = "=2.14.0"
 tempfile = "=3.27.0"
 url = "2"

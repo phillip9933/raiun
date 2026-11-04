@@ -68,6 +68,7 @@ struct State {
     disconnect: bool,
     unauthorized: bool,
     get_delay_ms: u64,
+    content_get_gate: Option<Arc<CopyPutGate>>,
     copy_put_gate: Option<Arc<CopyPutGate>>,
 }
 
@@ -338,6 +339,17 @@ fn serve(mut stream: TcpStream, authority: &str, state: &Arc<Mutex<State>>) {
 
     if state.lock().unwrap().disconnect {
         return;
+    }
+
+    // Tests can hold an actual content request until the intended race has
+    // happened, rather than hoping a wall-clock response delay is long enough.
+    let content_gate = if method == "GET" && target.starts_with("/dav/") {
+        state.lock().unwrap().content_get_gate.clone()
+    } else {
+        None
+    };
+    if let Some(gate) = content_gate {
+        gate.reached_prefix();
     }
 
     let get_delay_ms = if method == "GET" && target.starts_with("/dav/") {
@@ -4283,7 +4295,16 @@ fn ciphertext_epoch_change_during_pin_never_activates_the_partial_generation() {
     let fixture = Fixture::start();
     let (backend, _sessions, scope, _state, cache) = setup_cached(&fixture);
     seed_cached_vault_file(&backend, "notes.txt", b"pinned synthetic plaintext");
-    fixture.delay_get(300);
+    let gate = Arc::new(CopyPutGate::default());
+    // Release even if an assertion fails, so teardown cannot strand the server.
+    struct ReleaseOnDrop(Arc<CopyPutGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = ReleaseOnDrop(Arc::clone(&gate));
+    fixture.state.lock().unwrap().content_get_gate = Some(Arc::clone(&gate));
 
     let backend = Arc::new(backend);
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -4294,25 +4315,16 @@ fn ciphertext_epoch_change_during_pin_never_activates_the_partial_generation() {
         let result = pin_backend.pin_offline_tree(None, &pin_cancelled);
         result_sender.send(result).unwrap();
     });
-    let mut observed_content_get = false;
-    for _ in 0..500 {
-        if fixture
-            .requests()
-            .iter()
-            .any(|request| request.method == "GET" && request.target.starts_with("/dav/"))
-        {
-            observed_content_get = true;
-            break;
-        }
-        if let Ok(result) = result_receiver.try_recv() {
-            panic!("pin failed before downloading content: {result:?}");
-        }
-        thread::sleep(Duration::from_millis(2));
+    let reached_content_get = gate.wait_for_body_prefix(&pin);
+    if !reached_content_get {
+        pin.join().unwrap();
+        let outcome = result_receiver.try_recv();
+        panic!("pin did not reach gated content download: {outcome:?}");
     }
-    assert!(observed_content_get, "pin did not reach content download");
     cache
         .invalidate_ciphertext_scope(&encrypted_cache_scope(&scope))
         .unwrap();
+    gate.release();
     assert!(result_receiver.recv().unwrap().is_err());
     pin.join().unwrap();
 

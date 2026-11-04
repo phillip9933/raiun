@@ -1075,20 +1075,7 @@ async fn open_encrypted_edit_recovery_folder(
 
 #[tauri::command]
 async fn request(app: AppHandle, message: Value) -> Result<Value, String> {
-    let message = AgentRequest {
-        value: message,
-        contains_secret: true,
-    };
-    let action = message
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Request must include a string action".to_string())?
-        .to_owned();
-    if message.get("password").is_some()
-        || matches!(action.as_str(), "vault_unlock" | "vault_create")
-    {
-        return Err("Vault password requests must use the dedicated secret command".into());
-    }
+    let (message, action) = validate_agent_request(message)?;
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     let should_ensure_agent = action != "shutdown";
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -1154,6 +1141,39 @@ async fn request(app: AppHandle, message: Value) -> Result<Value, String> {
         update_tray_status(&app, false);
     }
     Ok(response.get("data").cloned().unwrap_or(Value::Null))
+}
+
+/// The regular UI request channel is secret-bearing so rejected payloads and
+/// public-link passwords use the same zeroizing buffer path. Vault secrets
+/// remain restricted to their dedicated command.
+fn validate_agent_request(message: Value) -> Result<(AgentRequest, String), String> {
+    let message = AgentRequest {
+        value: message,
+        contains_secret: true,
+    };
+    let action = message
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Request must include a string action".to_string())?
+        .to_owned();
+    let has_password = message.get("password").is_some();
+    if matches!(
+        action.as_str(),
+        "vault_unlock" | "vault_unlock_offline" | "vault_create"
+    ) || (has_password && action != "sharing_link_create")
+    {
+        return Err("Vault password requests must use the dedicated secret command".into());
+    }
+    if has_password {
+        let password = message
+            .get("password")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Public-link password must be a string".to_string())?;
+        if password.is_empty() || password.len() > 72 {
+            return Err("Public-link password is empty or too long".into());
+        }
+    }
+    Ok((message, action))
 }
 
 /// Secret-bearing vault requests use a dedicated IPC path and wipe the local
@@ -1970,18 +1990,33 @@ fn stop_tray_status_poller(app: &AppHandle) {
     }
 }
 
+fn desktop_single_instance_plugin() -> std::io::Result<tauri::plugin::TauriPlugin<tauri::Wry>> {
+    let instance = tauri_plugin_single_instance::Builder::new().callback(|app, args, _cwd| {
+        if args.iter().any(|arg| parse_unlock_intent(arg).is_some()) {
+            queue_unlock_intent(app, &args);
+        } else if !has_background_argument(&args) {
+            show_window(app);
+        }
+    });
+    #[cfg(target_os = "windows")]
+    let instance =
+        instance.windows_instance_key(raiun_control_windows::current_user_instance_scope()?);
+    Ok(instance.build())
+}
+
 fn main() {
     let launch_args = std::env::args().skip(1).collect::<Vec<_>>();
     let background_launch = has_background_argument(&launch_args);
     let initial_unlock_intent = launch_args.iter().find_map(|arg| parse_unlock_intent(arg));
+    let instance = match desktop_single_instance_plugin() {
+        Ok(instance) => instance,
+        Err(_) => {
+            eprintln!("Raiun Desktop could not verify the Windows user for startup");
+            std::process::exit(1);
+        }
+    };
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if args.iter().any(|arg| parse_unlock_intent(arg).is_some()) {
-                queue_unlock_intent(app, &args);
-            } else if !has_background_argument(&args) {
-                show_window(app);
-            }
-        }))
+        .plugin(instance)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(desktop_updates::updater_plugin())
@@ -2137,7 +2172,7 @@ mod shell_tests {
     use super::{
         DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, WindowPreferences, diagnostics_agent_data,
         parse_unlock_intent, require_owned_agent, restored_window_size,
-        sanitize_diagnostics_report, validate_protected_copy_receipt,
+        sanitize_diagnostics_report, validate_agent_request, validate_protected_copy_receipt,
         validate_protected_recovery_binding, validate_selected_profile,
         validate_vault_secret_request,
     };
@@ -2502,6 +2537,59 @@ mod shell_tests {
             format!("raiun://unlock?v=1&profile_id=default&space_id={huge}&root_resource_id=r");
         assert!(parse_unlock_intent(&uri).is_none());
         assert!(parse_unlock_intent(&format!("raiun://unlock?{}", "x".repeat(4097))).is_none());
+    }
+
+    #[test]
+    fn ordinary_requests_allow_and_wipe_password_only_for_public_link_creation() {
+        let (mut request, action) = validate_agent_request(json!({
+            "action": "sharing_link_create",
+            "password": "synthetic-link-password"
+        }))
+        .unwrap();
+        assert_eq!(action, "sharing_link_create");
+        assert!(request.contains_secret);
+        assert_eq!(
+            request.get("password").and_then(serde_json::Value::as_str),
+            Some("synthetic-link-password")
+        );
+        request.wipe_password();
+        assert_eq!(
+            request.get("password").and_then(serde_json::Value::as_str),
+            Some("")
+        );
+
+        for message in [
+            json!({"action":"sharing_link_update", "password":"secret"}),
+            json!({"action":"guest_invite", "password":"secret"}),
+            json!({"action":"vault_unlock", "password":"secret"}),
+            json!({"action":"vault_unlock_offline", "password":"secret"}),
+            json!({"action":"vault_create", "password":"secret"}),
+            json!({"action":"vault_unlock"}),
+            json!({"action":"vault_unlock_offline"}),
+            json!({"action":"vault_create"}),
+            json!({"password":"secret"}),
+            json!({"action":false}),
+        ] {
+            assert!(validate_agent_request(message).is_err());
+        }
+
+        for password in [json!(false), json!(""), json!("x".repeat(73))] {
+            assert!(
+                validate_agent_request(json!({
+                    "action":"sharing_link_create",
+                    "password":password
+                }))
+                .is_err()
+            );
+        }
+
+        let (request, action) = validate_agent_request(json!({
+            "action":"sharing_link_create"
+        }))
+        .unwrap();
+        assert_eq!(action, "sharing_link_create");
+        assert!(request.contains_secret);
+        assert!(request.get("password").is_none());
     }
 
     #[test]

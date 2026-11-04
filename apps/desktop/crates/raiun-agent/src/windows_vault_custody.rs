@@ -8,6 +8,7 @@ use super::{
     vault_edit_capture as capture, vault_edit_disposition as disposition, vault_edit_retention,
     vault_edit_upload as upload,
     windows_vault_close_worker::{FreshVaultCloseJob, VaultClosePublisher},
+    windows_vault_streamed_edit::{self as streamed, RetainedBody},
 };
 use raiun_cloudfiles_windows::vault_custody::{
     ExistingVaultEditBaseline, ExistingVaultEditPayload, VaultCatalogueEntry, VaultHydrationIntent,
@@ -36,7 +37,23 @@ fn unavailable<T>(_: T) -> BackendError {
     BackendError::Unavailable
 }
 
-trait Storage: Send + Sync {
+pub(super) trait Storage: Send + Sync {
+    fn completed_entry_deleted(&self, _scope: &Scope, _entry: &Entry) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// A trusted adapter may qualify a completed replacement's exact native
+    /// old->new file lineage; metadata discovery never authorizes a mutation.
+    fn completed_file_lineage(
+        &self,
+        _scope: &Scope,
+        _identity: [u8; 16],
+        _resource: &str,
+        old: u64,
+        new: u64,
+    ) -> Result<bool> {
+        Ok(old == new)
+    }
     fn load(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>>;
     fn cas(&self, key: &[u8], old: Option<&[u8]>, next: &[u8]) -> Result<()>;
     fn load_capture(&self, _key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -54,6 +71,28 @@ trait Storage: Send + Sync {
 }
 struct SessionStorage(Arc<dyn SessionStore>);
 impl Storage for SessionStorage {
+    fn completed_entry_deleted(&self, scope: &Scope, entry: &Entry) -> Result<bool> {
+        let store: Arc<dyn Storage> = Arc::new(SessionStorage(self.0.clone()));
+        let deleted = super::windows_vault_file_delete_custody::entry_deleted(&store, scope, entry)
+            .map_err(|_| refused())?;
+        Ok(deleted
+            || super::windows_vault_reconciled_custody::entry_deleted(&store, scope, entry)
+                .map_err(|_| refused())?)
+    }
+    fn completed_file_lineage(
+        &self,
+        scope: &Scope,
+        identity: [u8; 16],
+        resource: &str,
+        old: u64,
+        new: u64,
+    ) -> Result<bool> {
+        let store: Arc<dyn Storage> = Arc::new(SessionStorage(self.0.clone()));
+        super::windows_vault_file_replace_custody::file_lineage(
+            &store, scope, identity, resource, old, new,
+        )
+        .map_err(|_| refused())
+    }
     fn load_capture(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
         self.0.load_vault_existing_edit_capture(key)
     }
@@ -126,6 +165,53 @@ impl capture::Store for CaptureStore {
     }
 }
 
+fn read_capture_body(
+    store: &ProtectedStore,
+    scope: &Scope,
+    reference: &vault_custody::CaptureRef,
+) -> Result<RetainedBody> {
+    read_capture_body_with_cancel(store, scope, reference, &|| false)
+}
+fn read_capture_body_with_cancel(
+    store: &ProtectedStore,
+    scope: &Scope,
+    reference: &vault_custody::CaptureRef,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<RetainedBody> {
+    if cancelled() {
+        return Err(refused());
+    }
+    if reference.is_streamed() {
+        let binding = streamed::metadata_binding(scope, reference.id())?;
+        let raw = store.0.load_capture(&binding)?.ok_or_else(refused)?;
+        Ok(RetainedBody::Streamed(streamed::reopen_with_cancel(
+            &raw, scope, reference, cancelled,
+        )?))
+    } else {
+        let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
+        let retained = capture::reopen_for_recovery(&CaptureStore(store.0.clone()), scope, &id)
+            .map_err(|_| refused())?;
+        if retained.encoded_frame_ref() != reference.frame() {
+            return Err(refused());
+        }
+        Ok(RetainedBody::Legacy(retained))
+    }
+}
+fn body_descriptor(
+    scope: &Scope,
+    reference: &vault_custody::CaptureRef,
+    hydration: &vault_custody::Hydration,
+    retained: &RetainedBody,
+) -> disposition::Result<disposition::DispositionDescriptor> {
+    match retained {
+        RetainedBody::Legacy(v) => {
+            disposition::DispositionDescriptor::from_capture(scope, reference, hydration, v)
+        }
+        RetainedBody::Streamed(v) => disposition::DispositionDescriptor::from_streamed_capture(
+            scope, reference, hydration, v,
+        ),
+    }
+}
 impl super::root_manifest::Store for ProtectedStore {
     fn load(
         &self,
@@ -172,6 +258,77 @@ fn completed_segment_key(
     Ok(key)
 }
 impl vault_custody::Store for ProtectedStore {
+    fn completed_deleted_hydration(
+        &self,
+        scope: &Scope,
+        row: &vault_custody::Hydration,
+    ) -> std::result::Result<bool, vault_custody::Error> {
+        let current = self.project_rename_hydration(scope, row)?;
+        let deleted =
+            super::windows_vault_file_delete_custody::hydration_deleted(&self.0, scope, &current)
+                .map_err(|_| vault_custody::Error::Persistence)?;
+        Ok(deleted
+            || super::windows_vault_reconciled_custody::hydration_deleted(&self.0, scope, &current)
+                .map_err(|_| vault_custody::Error::Persistence)?)
+    }
+    fn verify_location_history(
+        &self,
+        scope: &Scope,
+    ) -> std::result::Result<(), vault_custody::Error> {
+        super::windows_vault_file_rename_custody::verify_no_unresolved(&self.0, scope)
+            .and_then(|()| {
+                super::windows_vault_file_replace_custody::verify_no_unresolved(&self.0, scope)
+            })
+            .and_then(|()| {
+                super::windows_vault_file_delete_custody::verify_no_unresolved(&self.0, scope)
+            })
+            .map_err(|_| vault_custody::Error::Persistence)
+    }
+    fn project_rename_entry(
+        &self,
+        scope: &Scope,
+        e: &Entry,
+    ) -> std::result::Result<Entry, vault_custody::Error> {
+        let mut current = e.clone();
+        for _ in 0..=2048 {
+            let renamed = super::windows_vault_file_rename_custody::entry(&self.0, scope, &current)
+                .map_err(|_| vault_custody::Error::Persistence)?;
+            let next = super::windows_vault_file_replace_custody::entry(&self.0, scope, &renamed)
+                .map_err(|_| vault_custody::Error::Persistence)?;
+            let next =
+                super::windows_vault_reconciled_custody::project_entry(&self.0, scope, &next)
+                    .map_err(|_| vault_custody::Error::Persistence)?;
+            if next == current {
+                return Ok(next);
+            }
+            current = next;
+        }
+        Err(vault_custody::Error::Capacity)
+    }
+    fn project_rename_hydration(
+        &self,
+        scope: &Scope,
+        h: &vault_custody::Hydration,
+    ) -> std::result::Result<vault_custody::Hydration, vault_custody::Error> {
+        let mut current = h.clone();
+        for _ in 0..=2048 {
+            let renamed =
+                super::windows_vault_file_rename_custody::hydration(&self.0, scope, &current)
+                    .map_err(|_| vault_custody::Error::Persistence)?;
+            let next =
+                super::windows_vault_file_replace_custody::hydration(&self.0, scope, &renamed)
+                    .map_err(|_| vault_custody::Error::Persistence)?;
+            let next =
+                super::windows_vault_reconciled_custody::project_hydration(&self.0, scope, &next)
+                    .map_err(|_| vault_custody::Error::Persistence)?;
+            if next == current {
+                return Ok(next);
+            }
+            current = next;
+        }
+        Err(vault_custody::Error::Capacity)
+    }
+
     fn load(
         &self,
         scope: &Scope,
@@ -214,14 +371,9 @@ impl vault_custody::Store for ProtectedStore {
         scope: &Scope,
         row: &vault_custody::completed_history::CompletedRow,
     ) -> std::result::Result<(), vault_custody::Error> {
-        let id =
-            capture::CaptureId::new(row.capture.id()).map_err(|_| vault_custody::Error::Invalid)?;
-        let retained = capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.0)), scope, &id)
+        let retained = read_capture_body(self, scope, &row.capture)
             .map_err(|_| vault_custody::Error::Persistence)?;
-        if retained.encoded_frame_ref() != row.capture.frame() {
-            return Err(vault_custody::Error::Foreign);
-        }
-        let descriptor = disposition::DispositionDescriptor::from_capture(
+        let descriptor = body_descriptor(
             scope,
             &row.capture,
             row.disposition.descriptor().hydration(),
@@ -399,6 +551,308 @@ impl WindowsVaultCustody {
                 .upgrade()
                 .is_some_and(|failed| !failed.load(std::sync::atomic::Ordering::Acquire))
     }
+    pub(super) fn cached_capture(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+        id: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(
+        Scope,
+        super::windows_vault_cached_capture::Record,
+        raiun_cloudfiles_windows::streamed_store::VerifiedPinnedSnapshot,
+    )> {
+        if owner != &self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let scope = Scope::new(
+            &self.account,
+            vault,
+            remote_root,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let binding = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(|_| refused())?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(|_| refused())?
+            .contains(&scope)
+        {
+            return Err(refused());
+        }
+        let child = self
+            .state
+            .lock()
+            .map_err(|_| refused())?
+            .children
+            .get(
+                scope
+                    .authenticated_store_binding()
+                    .map_err(|_| refused())?
+                    .as_slice(),
+            )
+            .cloned()
+            .ok_or_else(refused)?;
+        if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let (record, body) =
+            super::windows_vault_cached_capture::reopen(&self.store.0, &scope, id, cancelled)
+                .map_err(|_| refused())?;
+        manifest
+            .verify_current(&self.store)
+            .map_err(|_| refused())?;
+        if cancelled()
+            || self.failed.load(std::sync::atomic::Ordering::Acquire)
+            || child.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(refused());
+        }
+        Ok((scope, record, body))
+    }
+    /// Reopens protected local custody under the original admitted account/root.
+    /// This is an expectation for later native verification, never completion.
+    pub(super) fn cached_pending_context(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+        write_id: &str,
+        revision: u64,
+        operation: raiun_opencloud::vault_cache::VaultPendingOperationKind,
+    ) -> Result<(
+        Scope,
+        Arc<dyn Storage>,
+        raiun_cloudfiles_windows::VaultCachedNativeExpectation,
+    )> {
+        if owner != &self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let scope = Scope::new(
+            &self.account,
+            vault,
+            remote_root,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let binding = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(|_| refused())?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(|_| refused())?
+            .contains(&scope)
+        {
+            return Err(refused());
+        }
+        let key = scope.authenticated_store_binding().map_err(|_| refused())?;
+        let child = {
+            let state = self.state.lock().map_err(|_| refused())?;
+            if state.failed {
+                return Err(refused());
+            }
+            state
+                .children
+                .get(key.as_slice())
+                .cloned()
+                .ok_or_else(refused)?
+        };
+        if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let rows = super::windows_vault_namespace_queued::protected_catalogue_deltas(
+            &self.store.0,
+            &scope,
+        )
+        .map_err(|_| refused())?;
+        let row = rows
+            .iter()
+            .find(|d| d.write_id == write_id && d.revision == revision)
+            .ok_or_else(refused)?;
+        if rows
+            .iter()
+            .any(|d| d.write_id == write_id && d.revision > revision)
+            || super::windows_vault_reconciled_custody::is_reconciled(
+                &self.store.0,
+                &scope,
+                write_id,
+                revision,
+                row.identity,
+                row.file,
+            )
+            .map_err(|_| refused())?
+        {
+            return Err(refused());
+        }
+        let first = rows
+            .iter()
+            .filter(|d| d.write_id == write_id)
+            .min_by_key(|d| d.revision)
+            .ok_or_else(refused)?;
+        if first.revision != 1 {
+            return Err(refused());
+        }
+        let original = first.original.clone();
+        if original
+            .as_ref()
+            .is_some_and(|e| !capture::strong_etag(&e.etag))
+        {
+            return Err(refused());
+        }
+        let expected = raiun_cloudfiles_windows::VaultCachedNativeExpectation {
+            root: self.root,
+            operation,
+            write_id: write_id.into(),
+            revision,
+            identity: row.identity,
+            file: row.file,
+            usn: row.usn,
+            components: row.components.clone(),
+            original,
+            entry: row.entry.clone(),
+            plaintext_len: row.plaintext_len,
+            source_sha256: row.source_sha256,
+        };
+        manifest
+            .verify_current(&self.store)
+            .map_err(|_| refused())?;
+        if self.failed.load(std::sync::atomic::Ordering::Acquire)
+            || child.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(refused());
+        }
+        Ok((scope, self.store.0.clone(), expected))
+    }
+    pub(super) fn audit_cached_pending_for_disconnect(
+        &self,
+        active: &raiun_cloudfiles_windows::ConfiguredRootConnection,
+        owner: &ProviderScope,
+    ) -> Result<bool> {
+        if owner != &self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        active
+            .audit_cached_pending_for_disconnect(self, owner, &self.registration)
+            .map_err(|_| refused())
+    }
+    pub(super) fn cleanup_clean_history_preserving_cached_pending(
+        &self,
+        active: &raiun_cloudfiles_windows::ConfiguredRootConnection,
+        route: &raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute,
+        owner: &ProviderScope,
+    ) -> Result<bool> {
+        if owner != &self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        active
+            .cleanup_retired_vault_route_preserving_cached_pending(
+                route,
+                self,
+                owner,
+                &self.registration,
+            )
+            .map_err(|_| refused())
+    }
+    pub(super) fn record_reconciled_native(
+        &self,
+        scope: &Scope,
+        expected: &raiun_cloudfiles_windows::VaultCachedNativeExpectation,
+        proof: &raiun_opencloud::vault_backend::VaultReconciledPending,
+        completed: &raiun_cloudfiles_windows::VaultCachedNativeCompleted,
+    ) -> Result<()> {
+        if expected.root != self.root
+            || !scope.matches_canonical_account(&self.account)
+            || self.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(refused());
+        }
+        let key = scope.authenticated_store_binding().map_err(|_| refused())?;
+        let child = {
+            let state = self.state.lock().map_err(|_| refused())?;
+            if state.failed {
+                return Err(refused());
+            }
+            state
+                .children
+                .get(key.as_slice())
+                .cloned()
+                .ok_or_else(refused)?
+        };
+        if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        // Durable terminal proof precedes enrolling a genuine new remote entry.
+        // Original captures and pending frames are retained unchanged.
+        super::windows_vault_reconciled_custody::record(
+            &self.store.0,
+            scope,
+            expected,
+            proof,
+            completed,
+        )
+        .map_err(|_| refused())?;
+        let mut guard = child.custody.lock().map_err(|_| refused())?;
+        let mut current = Custody::reopen(&self.store, scope).map_err(|_| refused())?;
+        if let Some(entry) = completed.entry() {
+            let length = if entry.directory { 0 } else { entry.size };
+            let verified = Entry::new(
+                expected.identity,
+                &entry.id,
+                &entry.path,
+                &entry.etag,
+                entry.directory,
+                length,
+            )
+            .map_err(|_| refused())?;
+            current
+                .record_entries(&self.store, &[verified])
+                .map_err(|_| refused())?;
+            if !entry.directory {
+                current
+                    .persist_hydration_intent(
+                        &self.store,
+                        expected.identity,
+                        completed.file(),
+                        length,
+                        expected.components.clone(),
+                    )
+                    .map_err(|_| refused())?;
+            }
+        }
+        *guard = current;
+        Ok(())
+    }
+    pub(super) fn record_cached_capture_queued(
+        &self,
+        scope: &Scope,
+        record: &super::windows_vault_cached_capture::Record,
+        receipt: &raiun_cloudfiles_windows::VaultCachedQueuedCapture,
+    ) -> Result<()> {
+        if self.failed.load(std::sync::atomic::Ordering::Acquire)
+            || !scope.matches_canonical_account(&self.account)
+        {
+            return Err(refused());
+        }
+        super::windows_vault_cached_capture::mark_queued(&self.store.0, scope, record, receipt)
+            .map_err(|_| refused())
+    }
     /// Bounded historical IDs only, with no body or live authority creation.
     #[cfg(test)]
     pub(super) fn retained_capture_ids(
@@ -510,17 +964,11 @@ impl WindowsVaultCustody {
                 has_more = true;
                 break;
             }
-            let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
-            let retained =
-                capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.store.0)), &scope, &id)
-                    .map_err(|_| refused())?;
-            if retained.encoded_frame_ref() != reference.frame() {
-                return Err(refused());
-            }
+            let retained = read_capture_body(&self.store, &scope, reference)?;
             page.push(RecoveryCaptureMetadata {
                 capture_id: reference.id().to_owned(),
                 remote_path: reference.entry().root_relative_path().to_owned(),
-                body_len: retained.bytes_for_recovery().len(),
+                body_len: usize::try_from(retained.len()).map_err(|_| refused())?,
             });
         }
         self.recovery_references(owner, &scope)?;
@@ -539,7 +987,8 @@ impl WindowsVaultCustody {
         root_resource_id: &str,
         remote_root: &str,
         capture_id: &str,
-    ) -> Result<capture::RetainedEdit> {
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<RetainedBody> {
         if *owner != self.owner {
             return Err(refused());
         }
@@ -567,13 +1016,7 @@ impl WindowsVaultCustody {
         if matching.next().is_some() {
             return Err(refused());
         }
-        let id = capture::CaptureId::new(capture_id).map_err(|_| refused())?;
-        let retained =
-            capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.store.0)), &scope, &id)
-                .map_err(|_| refused())?;
-        if retained.encoded_frame_ref() != reference.frame() {
-            return Err(refused());
-        }
+        let retained = read_capture_body_with_cancel(&self.store, &scope, reference, cancelled)?;
         self.recovery_references(owner, &scope)?;
         Ok(retained)
     }
@@ -830,6 +1273,76 @@ impl WindowsVaultCustody {
 /// Reopening every document closes the previous-provider snapshot race. The
 /// resulting retained intents are evidence, not native identity/range authority.
 impl VaultPublishedHistorySource for WindowsVaultCustody {
+    fn current_native_intents(
+        &self,
+        owner: &ProviderScope,
+        root: ConfiguredRootIdentity,
+        registration: &str,
+    ) -> std::result::Result<
+        Vec<raiun_cloudfiles_windows::vault_custody::VaultPendingNativeIntent>,
+        BackendError,
+    > {
+        if owner != &self.owner
+            || root != self.root
+            || registration != self.registration
+            || self.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let binding = RootBinding::new(
+            &self.account,
+            root.volume_serial,
+            root.file_index,
+            registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(unavailable)?;
+        let scopes = manifest.scopes_for_reconciliation().map_err(unavailable)?;
+        let mut rows = Vec::new();
+        for scope in scopes {
+            let key = scope.authenticated_store_binding().map_err(unavailable)?;
+            let child = {
+                let state = self.state.lock().map_err(unavailable)?;
+                if state.failed {
+                    return Err(BackendError::Unavailable);
+                }
+                state
+                    .children
+                    .get(key.as_slice())
+                    .cloned()
+                    .ok_or(BackendError::Unavailable)?
+            };
+            if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(BackendError::Unavailable);
+            }
+            for row in
+                super::windows_vault_namespace_queued::current_native_intents(&self.store.0, scope)?
+            {
+                if rows.len() >= 100_000 {
+                    return Err(BackendError::Unavailable);
+                }
+                rows.push(
+                    raiun_cloudfiles_windows::vault_custody::VaultPendingNativeIntent {
+                        identity: row.identity,
+                        file_index: row.file,
+                        usn: row.usn,
+                        components: row.components,
+                        entry: row.entry,
+                        length: row.plaintext_len,
+                        source_sha256: row.source_sha256,
+                        terminal_verified: row.terminal_verified,
+                        write_id: row.write_id,
+                        revision: row.revision,
+                    },
+                );
+            }
+        }
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        if self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(rows)
+    }
     fn snapshot(
         &self,
         owner: &ProviderScope,
@@ -873,29 +1386,74 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                 .scopes_for_reconciliation()
                 .map_err(|_| refused())?
             {
+                super::windows_vault_child_create_custody::verify_no_unresolved(
+                    &self.store.0,
+                    scope,
+                )
+                .map_err(|_| refused())?;
+                super::windows_vault_file_replace_custody::verify_retained_bodies(
+                    &self.store.0,
+                    scope,
+                )
+                .map_err(|_| refused())?;
                 let child = Custody::reopen(&self.store, scope).map_err(|_| refused())?;
                 let history = child.publication_history().map_err(|_| refused())?;
                 // Promoted v4 history still retains every immutable capture.
                 // Authenticate each full frame sequentially before returning
                 // reconstructed intents. Missing/corrupt history is never healed.
                 for reference in child.all_captures_for_reconciliation() {
-                    let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
-                    let retained = capture::reopen_for_recovery(
-                        &CaptureStore(Arc::clone(&self.store.0)),
-                        scope,
-                        &id,
-                    )
+                    let retained = read_capture_body(&self.store, scope, &reference)?;
+                    match retained {
+                        RetainedBody::Legacy(v) => {
+                            child.validate_reconstructed_disposition(&reference, &v)
+                        }
+                        RetainedBody::Streamed(v) => {
+                            child.validate_reconstructed_streamed_disposition(&reference, &v)
+                        }
+                    }
                     .map_err(|_| refused())?;
-                    child
-                        .validate_reconstructed_disposition(&reference, &retained)
-                        .map_err(|_| refused())?;
                 }
-                for row in history {
+                // Current queued/terminal native facts use a distinct startup
+                // admission path; old immutable captures are still authenticated.
+                let current_native = super::windows_vault_namespace_queued::current_native_intents(
+                    &self.store.0,
+                    scope,
+                )
+                .map_err(|_| refused())?;
+                let current_ids = current_native
+                    .iter()
+                    .map(|row| row.identity)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let scope_intents = history
+                    .iter()
+                    .filter(|row| !current_ids.contains(&row.opaque()))
+                    .map(|row| VaultHydrationIntent {
+                        root,
+                        identity: row.opaque(),
+                        file_index: row.file_index(),
+                        length: row.length(),
+                        components: row.components().to_vec(),
+                    })
+                    .collect::<Vec<_>>();
+
+                for row in scope_intents {
+                    if super::windows_vault_file_delete_custody::intent_deleted(
+                        &self.store.0,
+                        scope,
+                        row.identity,
+                        row.file_index,
+                        row.length,
+                        &row.components,
+                    )
+                    .map_err(|_| refused())?
+                    {
+                        continue;
+                    }
                     if intents.len() == 100_000
-                        || !identities.insert(row.opaque())
-                        || !files.insert(row.file_index())
+                        || !identities.insert(row.identity)
+                        || !files.insert(row.file_index)
                         || !paths.insert(
-                            row.components()
+                            row.components
                                 .iter()
                                 .map(|c| c.to_lowercase())
                                 .collect::<Vec<_>>(),
@@ -905,10 +1463,10 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                     }
                     intents.push(VaultHydrationIntent {
                         root,
-                        identity: row.opaque(),
-                        file_index: row.file_index(),
-                        length: row.length(),
-                        components: row.components().to_vec(),
+                        identity: row.identity,
+                        file_index: row.file_index,
+                        length: row.length,
+                        components: row.components.to_vec(),
                     });
                 }
                 children.insert(
@@ -954,6 +1512,90 @@ pub(super) struct UploadLedger {
     child: Arc<Child>,
 }
 impl UploadLedger {
+    /// Local journal evidence only. The original capture remains retained and
+    /// dirty; this cannot satisfy any remote-upload or native-completion phase.
+    pub(super) fn record_cached_queue(
+        &self,
+        receipt: &raiun_cloudfiles_windows::VaultCachedQueuedEdit,
+        length: u64,
+        sha256: [u8; 32],
+    ) -> Result<()> {
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+        #[serde(deny_unknown_fields)]
+        struct Queued {
+            version: u32,
+            scope: Scope,
+            capture: vault_custody::CaptureRef,
+            write_id: String,
+            revision: u64,
+            plaintext_len: u64,
+            plaintext_sha256: [u8; 32],
+        }
+        let original = self.reference.entry();
+        if receipt.original().id != original.remote_id()
+            || receipt.original().path != original.root_relative_path()
+            || receipt.original().etag != original.etag()
+            || receipt.original().size != original.length()
+            || receipt.original().directory
+            || receipt.entry().id != original.remote_id()
+            || receipt.entry().path != original.root_relative_path()
+            || receipt.entry().directory
+            || receipt.entry().size != length
+            || receipt.plaintext_len() != length
+            || receipt.source_sha256() != sha256
+            || receipt.revision() == 0
+            || receipt.write_id().len() != 32
+            || !receipt.write_id().bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(refused());
+        }
+        self.verify_current().map_err(|_| refused())?;
+        let mut key = b"raiun-vault-local-queued-capture-v1\0".to_vec();
+        let locator = Zeroizing::new(
+            serde_json::to_vec(&(&self.scope, &self.reference)).map_err(|_| refused())?,
+        );
+        key.extend_from_slice(&Sha256::digest(&*locator));
+        let next = Queued {
+            version: 1,
+            scope: self.scope.clone(),
+            capture: self.reference.clone(),
+            write_id: receipt.write_id().into(),
+            revision: receipt.revision(),
+            plaintext_len: length,
+            plaintext_sha256: sha256,
+        };
+        let old = self.store.0.load(&key)?;
+        if let Some(raw) = &old {
+            if raw.len() > 128 * 1024 {
+                return Err(refused());
+            }
+            let previous: Queued = serde_json::from_slice(raw).map_err(|_| refused())?;
+            if previous == next {
+                return self.verify_current().map_err(|_| refused());
+            }
+            if previous.version != 1
+                || previous.scope != next.scope
+                || previous.capture != next.capture
+                || previous.write_id != next.write_id
+                || previous.revision >= next.revision
+                || previous.plaintext_len != length
+                || previous.plaintext_sha256 != sha256
+            {
+                return Err(refused());
+            }
+        }
+        let bytes = Zeroizing::new(serde_json::to_vec(&next).map_err(|_| refused())?);
+        if bytes.len() > 128 * 1024 {
+            return Err(refused());
+        }
+        self.store
+            .0
+            .cas(&key, old.as_deref().map(Vec::as_slice), &bytes)?;
+        if self.store.0.load(&key)?.as_deref().map(Vec::as_slice) != Some(bytes.as_slice()) {
+            return Err(refused());
+        }
+        self.verify_current().map_err(|_| refused())
+    }
     fn check(&self) -> std::result::Result<(), upload::Error> {
         if self.root_failed.load(std::sync::atomic::Ordering::Acquire)
             || self.child.failed.load(std::sync::atomic::Ordering::Acquire)
@@ -1010,9 +1652,19 @@ impl UploadLedger {
     pub(super) fn reference(&self) -> &vault_custody::CaptureRef {
         &self.reference
     }
-    pub(super) fn initialize_attempt(
+    pub(super) fn initialize_attempt_from_body(
         &self,
+        body: &RetainedBody,
     ) -> std::result::Result<upload::UploadAttempt, upload::Error> {
+        if self.reference.is_streamed() {
+            return upload::UploadAttempt::initialize_streamed(
+                self,
+                &self.scope,
+                &self.reference,
+                self.reference.entry(),
+                body.streamed().ok_or(upload::Error::Foreign)?,
+            );
+        }
         upload::UploadAttempt::initialize(
             self,
             &CaptureStore(Arc::clone(&self.store.0)),
@@ -1021,9 +1673,26 @@ impl UploadLedger {
             self.reference.entry(),
         )
     }
+    #[cfg(test)]
     pub(super) fn reopen_attempt(
         &self,
     ) -> std::result::Result<upload::UploadAttempt, upload::Error> {
+        let body = self.read_body()?;
+        self.reopen_attempt_from_body(&body)
+    }
+    pub(super) fn reopen_attempt_from_body(
+        &self,
+        body: &RetainedBody,
+    ) -> std::result::Result<upload::UploadAttempt, upload::Error> {
+        if self.reference.is_streamed() {
+            return upload::UploadAttempt::reopen_streamed(
+                self,
+                &self.scope,
+                &self.reference,
+                self.reference.entry(),
+                body.streamed().ok_or(upload::Error::Foreign)?,
+            );
+        }
         upload::UploadAttempt::reopen(
             self,
             &CaptureStore(Arc::clone(&self.store.0)),
@@ -1032,12 +1701,10 @@ impl UploadLedger {
             self.reference.entry(),
         )
     }
-    pub(super) fn disposition_descriptor(
+    fn disposition_descriptor_from_body(
         &self,
+        retained: &RetainedBody,
     ) -> disposition::Result<disposition::DispositionDescriptor> {
-        let retained = self
-            .read_body()
-            .map_err(|_| disposition::Error::Persistence)?;
         self.with_ledger(|_| {
             let child = Custody::reopen(&self.store, &self.scope)
                 .map_err(|_| upload::Error::Persistence)?;
@@ -1047,9 +1714,13 @@ impl UploadLedger {
                 .ok_or(upload::Error::Missing)?;
             upload::bound_readback_evidence(&raw, &self.scope, &self.reference)?
                 .ok_or(upload::Error::Missing)?;
-            child
-                .disposition_descriptor(&self.reference, &retained)
-                .map_err(|_| upload::Error::Persistence)
+            match retained {
+                RetainedBody::Legacy(v) => child.disposition_descriptor(&self.reference, v),
+                RetainedBody::Streamed(v) => {
+                    child.streamed_disposition_descriptor(&self.reference, v)
+                }
+            }
+            .map_err(|_| upload::Error::Persistence)
         })
         .map_err(|_| disposition::Error::Persistence)
     }
@@ -1100,8 +1771,11 @@ impl UploadLedger {
     }
     /// Structural target only. Parent must first compare the complete current
     /// canonical account. Native prepare/complete proofs provide live authority.
-    pub(super) fn local_completion_store(self) -> disposition::Result<LocalDisposition> {
-        let descriptor = self.disposition_descriptor()?;
+    pub(super) fn local_completion_store_from_body(
+        self,
+        retained: &RetainedBody,
+    ) -> disposition::Result<LocalDisposition> {
+        let descriptor = self.disposition_descriptor_from_body(retained)?;
         let target = raiun_cloudfiles_windows::VaultLocalCompletionTarget::new(
             descriptor.scope_binding()?,
             descriptor.reference().id().into(),
@@ -1121,21 +1795,20 @@ impl UploadLedger {
             prepared: None,
         })
     }
-    pub(super) fn read_body(&self) -> std::result::Result<capture::RetainedEdit, upload::Error> {
+    #[cfg(test)]
+    pub(super) fn read_body(&self) -> std::result::Result<RetainedBody, upload::Error> {
+        self.read_body_cancelled(&|| false)
+    }
+    pub(super) fn read_body_cancelled(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<RetainedBody, upload::Error> {
         self.with_ledger(|ledger| {
             let key = upload::locator(&self.scope, &self.reference)?;
             upload::Store::load(ledger, &key)?;
-            let id =
-                capture::CaptureId::new(self.reference.id()).map_err(|_| upload::Error::Invalid)?;
-            let retained = capture::reopen_for_recovery(
-                &CaptureStore(Arc::clone(&self.store.0)),
-                &self.scope,
-                &id,
-            )
-            .map_err(|_| upload::Error::Persistence)?;
-            if retained.encoded_frame_ref() != self.reference.frame() {
-                return Err(upload::Error::Foreign);
-            }
+            let retained =
+                read_capture_body_with_cancel(&self.store, &self.scope, &self.reference, cancelled)
+                    .map_err(|_| upload::Error::Persistence)?;
             upload::Store::load(ledger, &key)?;
             Ok(retained)
         })
@@ -1228,7 +1901,630 @@ fn deterministic_capture_id(
     capture::CaptureId::new(&format!("{:x}", hash.finalize())).map_err(unavailable)
 }
 
+fn same_catalogue_metadata(a: &RemoteEntry, b: &RemoteEntry) -> bool {
+    a.id == b.id
+        && a.path == b.path
+        && a.directory == b.directory
+        && a.size == b.size
+        && a.etag == b.etag
+}
+
 impl VaultPublicationCustody for View {
+    fn record_cached_directory_cancel_queued(
+        &self,
+        receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+        identity: [u8; 16],
+        file: u64,
+        source_usn: i64,
+    ) -> std::result::Result<(), BackendError> {
+        self.verify_context(&self.owner, receipt.scope(), self.scope.remote_root())?;
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        super::windows_vault_namespace_queued::record_directory_cancel_queued(
+            &self.store.0,
+            &self.scope,
+            receipt,
+            identity,
+            file,
+            source_usn,
+        )
+    }
+    fn record_cached_directory_cancel_native(
+        &self,
+        proof: &raiun_cloudfiles_windows::vault_custody::VaultNativeDirectoryCancellation<'_>,
+    ) -> std::result::Result<(), BackendError> {
+        let receipt = proof.receipt();
+        self.verify_context(&self.owner, receipt.scope(), self.scope.remote_root())?;
+        if proof.root() != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        super::windows_vault_namespace_queued::record_directory_cancel_native(
+            &self.store.0,
+            &self.scope,
+            proof,
+        )
+    }
+    fn prepare_cached_child_create(
+        &self,
+        d: &raiun_cloudfiles_windows::VaultCachedChildCreateDescriptor,
+        source: Option<&mut dyn std::io::Read>,
+        verify_source: &mut dyn FnMut() -> std::result::Result<(), BackendError>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<
+        Arc<dyn raiun_cloudfiles_windows::VaultCachedChildCreateRecord>,
+        BackendError,
+    > {
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let binding = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(unavailable)?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(unavailable)?
+            .contains(&self.scope)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        let record = super::windows_vault_cached_child_custody::prepare(
+            self.store.0.clone(),
+            &self.scope,
+            d,
+            source,
+            verify_source,
+            cancelled,
+        )?;
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        Ok(record)
+    }
+    fn record_cached_retarget_queued(
+        &self,
+        receipt: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+    ) -> std::result::Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::PendingRetarget(d) =
+            receipt.descriptor()
+        else {
+            return Err(BackendError::Unavailable);
+        };
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        super::windows_vault_namespace_queued::record_retarget_queued(
+            &self.store.0,
+            &self.scope,
+            receipt,
+        )
+    }
+    fn record_cached_retarget_native(
+        &self,
+        receipt: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+        nodes: &[([u8; 16], u64, i64)],
+    ) -> std::result::Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::PendingRetarget(d) =
+            receipt.descriptor()
+        else {
+            return Err(BackendError::Unavailable);
+        };
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        super::windows_vault_namespace_queued::record_retarget_native(
+            &self.store.0,
+            &self.scope,
+            receipt,
+            nodes,
+        )
+    }
+    fn retain_cached_streamed_edit(
+        &self,
+        facts: &raiun_cloudfiles_windows::CachedVaultEditBaselineFacts,
+        dispatch: FreshVaultCaptureDispatch,
+        source: &mut dyn std::io::Read,
+        verify_source: &mut dyn FnMut() -> std::result::Result<(), BackendError>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError> {
+        facts.validate(self.root)?;
+        if facts.profile_id != self.owner.profile_id()
+            || facts.account_id != self.owner.account_id()
+            || facts.server_origin != self.owner.server_origin()
+            || facts.token_generation != self.owner.token_generation()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let vault = VaultSessionScope::new(
+            &facts.profile_id,
+            &facts.server_origin,
+            &facts.space_id,
+            &facts.root_resource_id,
+        )
+        .map_err(unavailable)?;
+        self.verify_context(&self.owner, &vault, &facts.remote_root)?;
+        let root = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(unavailable)?
+            .contains(&self.scope)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        let capture_id = super::windows_vault_cached_capture::retain(
+            self.store.0.clone(),
+            &self.scope,
+            facts.clone(),
+            source,
+            verify_source,
+            cancelled,
+        )?;
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        self.verify_context(&self.owner, &vault, &facts.remote_root)?;
+        drop(_serial);
+        let Some(publisher) = &self.fresh_close_publisher else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(FreshCloseNotification {
+            publisher: publisher.clone(),
+            job: FreshVaultCloseJob {
+                origin: FreshCaptureOrigin {
+                    owner: self.owner.clone(),
+                    root: self.root,
+                    broker: Arc::downgrade(&self.root_failed),
+                },
+                vault,
+                remote_root: facts.remote_root.clone(),
+                capture_id,
+                dispatch,
+                expected_generation: publisher.generation(),
+            },
+        })))
+    }
+    fn begin_file_delete(
+        &self,
+        d: &raiun_cloudfiles_windows::vault_file_delete::VaultFileDeleteDescriptor,
+    ) -> std::result::Result<
+        Arc<dyn raiun_cloudfiles_windows::vault_file_delete::VaultFileDeleteRecord>,
+        BackendError,
+    > {
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let root = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(unavailable)?
+            .contains(&self.scope)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        let mut cached = self.child.custody.lock().map_err(unavailable)?;
+        let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+        let original = fresh
+            .entries_for_reconciliation()
+            .iter()
+            .find(|e| e.opaque() == d.original_identity)
+            .ok_or(BackendError::Unavailable)?;
+        let parent = fresh
+            .entries_for_reconciliation()
+            .iter()
+            .find(|e| e.opaque() == d.parent_identity)
+            .ok_or(BackendError::Unavailable)?;
+        if original.remote_id() != d.original.id
+            || original.root_relative_path() != d.original.path
+            || (!d.empty_directory && original.etag() != d.original.etag)
+            || original.length() != d.original.size
+            || original.is_directory() != d.empty_directory
+            || parent.remote_id() != d.parent.id
+            || parent.root_relative_path() != d.parent.path
+            || !parent.is_directory()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        if d.empty_directory {
+            for e in fresh.entries_for_reconciliation().iter().filter(|e| {
+                e.root_relative_path()
+                    .starts_with(&format!("{}/", d.original.path))
+            }) {
+                if !self
+                    .store
+                    .0
+                    .completed_entry_deleted(&self.scope, e)
+                    .map_err(unavailable)?
+                {
+                    return Err(BackendError::Unavailable);
+                }
+            }
+        }
+        for h in fresh
+            .publication_history()
+            .map_err(unavailable)?
+            .iter()
+            .filter(|h| h.opaque() == d.original_identity)
+        {
+            if h.file_index() != d.original_file.file_index
+                || h.length() != d.original.size
+                || h.components() != d.components
+            {
+                return Err(BackendError::Unavailable);
+            }
+        }
+        let record =
+            super::windows_vault_file_delete_custody::begin(self.store.0.clone(), &self.scope, d)?;
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        *cached = fresh;
+        Ok(record)
+    }
+
+    fn begin_file_replace(
+        &self,
+        d: &raiun_cloudfiles_windows::vault_file_replace::VaultFileReplaceDescriptor,
+    ) -> std::result::Result<
+        Box<dyn raiun_cloudfiles_windows::vault_file_replace::VaultFileReplaceCapture>,
+        BackendError,
+    > {
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let root = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(unavailable)?
+            .contains(&self.scope)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        let mut cached = self.child.custody.lock().map_err(unavailable)?;
+        let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+        let original = fresh
+            .entries_for_reconciliation()
+            .iter()
+            .find(|e| e.opaque() == d.original_identity)
+            .ok_or(BackendError::Unavailable)?;
+        let parent = fresh
+            .entries_for_reconciliation()
+            .iter()
+            .find(|e| e.opaque() == d.parent_identity)
+            .ok_or(BackendError::Unavailable)?;
+        if original.remote_id() != d.original.id
+            || original.root_relative_path() != d.original.path
+            || original.etag() != d.original.etag
+            || original.length() != d.original.size
+            || original.is_directory()
+            || parent.remote_id() != d.parent.id
+            || parent.root_relative_path() != d.parent.path
+            || !parent.is_directory()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        // This first replacement path uses an actual previously hydrated source.
+        // Fresh native original FI/USN proof remains with the delete owner.
+        if !fresh
+            .publication_history()
+            .map_err(unavailable)?
+            .iter()
+            .any(|h| {
+                h.opaque() == d.original_identity
+                    && h.file_index() == d.original_file.file_index
+                    && h.length() == d.original.size
+                    && h.components() == d.components
+            })
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let child = self.child.clone();
+        let store = self.store.0.clone();
+        let refresh = Arc::new(move || {
+            child
+                .custody
+                .lock()
+                .map_err(unavailable)?
+                .refresh_completed_location(&ProtectedStore(store.clone()))
+                .map_err(unavailable)
+        });
+        let capture = super::windows_vault_file_replace_custody::begin(
+            self.store.0.clone(),
+            &self.scope,
+            d,
+            refresh,
+        )?;
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        *cached = fresh;
+        Ok(capture)
+    }
+
+    fn prepare_file_rename(
+        &self,
+        d: &raiun_cloudfiles_windows::VaultFileRenameDescriptor,
+    ) -> std::result::Result<Arc<dyn raiun_cloudfiles_windows::VaultFileRenameRecord>, BackendError>
+    {
+        let result = (|| {
+            d.validate()?;
+            self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+            if d.root != self.root {
+                return Err(BackendError::Unavailable);
+            }
+            let root = RootBinding::new(
+                &self.account,
+                self.root.volume_serial,
+                self.root.file_index,
+                &self.registration,
+            )
+            .map_err(unavailable)?;
+            let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+            if !manifest
+                .scopes_for_reconciliation()
+                .map_err(unavailable)?
+                .contains(&self.scope)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            let mut cached = self.child.custody.lock().map_err(unavailable)?;
+            let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            fresh.publication_history().map_err(unavailable)?;
+            let mut entries = Vec::new();
+            for e in fresh.entries_for_reconciliation() {
+                if self
+                    .store
+                    .0
+                    .completed_entry_deleted(&self.scope, e)
+                    .map_err(unavailable)?
+                {
+                    continue;
+                }
+                entries.push(VaultCatalogueEntry {
+                    identity: e.opaque(),
+                    metadata: RemoteEntry {
+                        id: e.remote_id().into(),
+                        path: e.root_relative_path().into(),
+                        etag: e.etag().into(),
+                        directory: e.is_directory(),
+                        size: e.length(),
+                        modified_unix: 0,
+                        writable: false,
+                        encrypted: true,
+                    },
+                });
+            }
+            let f = &d.facts;
+            let source = entries
+                .iter()
+                .find(|e| e.identity == f.identity)
+                .ok_or(BackendError::Unavailable)?;
+            let parent = entries
+                .iter()
+                .find(|e| e.identity == f.parent_identity)
+                .ok_or(BackendError::Unavailable)?;
+            if source.metadata.id != f.original.id
+                || source.metadata.path != f.original.path
+                || (!source.metadata.directory && source.metadata.etag != f.original.etag)
+                || source.metadata.size != f.original.size
+                || source.metadata.directory != f.original.directory
+                || !parent.metadata.directory
+                || parent.metadata.id != f.parent.id
+                || parent.metadata.path != f.parent.path
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let history = fresh.publication_history().map_err(unavailable)?;
+            let exact_native =
+                |identity: [u8; 16], file: u64, len: u64, parts: &[String]| -> bool {
+                    history.iter().filter(|h| h.opaque() == identity).all(|h| {
+                        h.file_index() == file && h.length() == len && h.components() == parts
+                    })
+                };
+            if !f.original.directory
+                && !exact_native(f.identity, f.file, f.original.size, &f.old_components)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            if let Some(nodes) = &f.children {
+                if entries
+                    .iter()
+                    .filter(|e| {
+                        e.metadata.path == f.original.path
+                            || e.metadata
+                                .path
+                                .starts_with(&format!("{}/", f.original.path))
+                    })
+                    .count()
+                    != nodes.len() + 1
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                for n in nodes {
+                    let saved = entries
+                        .iter()
+                        .find(|e| e.identity == n.identity)
+                        .ok_or(BackendError::Unavailable)?;
+                    if saved.metadata.id != n.original.id
+                        || saved.metadata.path != n.original.path
+                        || (!saved.metadata.directory && saved.metadata.etag != n.original.etag)
+                        || saved.metadata.size != n.original.size
+                        || saved.metadata.directory != n.original.directory
+                    {
+                        return Err(BackendError::Unavailable);
+                    }
+                    if !n.original.directory {
+                        let suffix = n
+                            .original
+                            .path
+                            .strip_prefix(&format!("{}/", f.original.path))
+                            .ok_or(BackendError::Unavailable)?;
+                        let mut old = f.old_components.clone();
+                        old.extend(suffix.split('/').map(str::to_owned));
+                        if !exact_native(n.identity, n.file, n.original.size, &old) {
+                            return Err(BackendError::Unavailable);
+                        }
+                    }
+                }
+            }
+            if let Some(dp) = &f.destination_parent {
+                let target = entries
+                    .iter()
+                    .find(|e| e.identity == dp.identity)
+                    .ok_or(BackendError::Unavailable)?;
+                if !target.metadata.directory
+                    || target.metadata.id != dp.parent.id
+                    || target.metadata.path != dp.parent.path
+                {
+                    return Err(BackendError::Unavailable);
+                }
+            }
+            let child = self.child.clone();
+            let store = self.store.0.clone();
+            let refresh = Arc::new(move || {
+                child
+                    .custody
+                    .lock()
+                    .map_err(unavailable)?
+                    .refresh_completed_location(&ProtectedStore(store.clone()))
+                    .map_err(unavailable)
+            });
+            let record = super::windows_vault_file_rename_custody::prepare(
+                self.store.0.clone(),
+                &self.scope,
+                d,
+                refresh,
+            )?;
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+            *cached = fresh;
+            Ok(record)
+        })();
+        if result.is_err() {
+            self.child
+                .failed
+                .store(true, std::sync::atomic::Ordering::Release)
+        }
+        result
+    }
+
+    fn prepare_child_create(
+        &self,
+        descriptor: &raiun_cloudfiles_windows::VaultChildCreateDescriptor,
+        source: Option<&mut dyn std::io::Read>,
+        verify: &mut dyn FnMut() -> std::result::Result<(), BackendError>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<Arc<dyn raiun_cloudfiles_windows::VaultChildCreateRecord>, BackendError>
+    {
+        let result = (|| {
+            self.verify_context(
+                &descriptor.owner,
+                &descriptor.vault,
+                &descriptor.remote_root,
+            )?;
+            if descriptor.root != self.root || cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            let root = RootBinding::new(
+                &self.account,
+                self.root.volume_serial,
+                self.root.file_index,
+                &self.registration,
+            )
+            .map_err(unavailable)?;
+            let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+            if !manifest
+                .scopes_for_reconciliation()
+                .map_err(unavailable)?
+                .contains(&self.scope)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            let mut cached = self.child.custody.lock().map_err(unavailable)?;
+            self.verify_context(
+                &descriptor.owner,
+                &descriptor.vault,
+                &descriptor.remote_root,
+            )?;
+            let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            let mut parents = fresh
+                .entries_for_reconciliation()
+                .iter()
+                .filter(|e| e.opaque() == descriptor.parent_identity);
+            let parent = parents.next().ok_or(BackendError::Unavailable)?;
+            if parents.next().is_some()
+                || !parent.is_directory()
+                || parent.remote_id() != descriptor.parent.id
+                || parent.root_relative_path() != descriptor.parent.path
+            {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            let record = super::windows_vault_child_create_custody::prepare(
+                self.store.0.clone(),
+                &self.scope,
+                descriptor,
+                source,
+                verify,
+                cancelled,
+            )?;
+            if cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            self.verify_context(
+                &descriptor.owner,
+                &descriptor.vault,
+                &descriptor.remote_root,
+            )?;
+            *cached = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            Ok(record)
+        })();
+        if result.is_err() {
+            self.child
+                .failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
     fn retain_existing_edit(
         &self,
         baseline: &ExistingVaultEditBaseline,
@@ -1344,6 +2640,213 @@ impl VaultPublicationCustody for View {
         }
         result
     }
+    fn retain_existing_streamed_edit(
+        &self,
+        baseline: &ExistingVaultEditBaseline,
+        payload: raiun_cloudfiles_windows::vault_custody::ExistingVaultStreamedEditPayload,
+        dispatch: FreshVaultCaptureDispatch,
+        source: &mut dyn std::io::Read,
+        verify_source: &mut dyn FnMut() -> std::result::Result<(), BackendError>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError> {
+        let result = (|| {
+            self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+            if cancelled()
+                || baseline.root() != self.root
+                || payload.root != self.root
+                || payload.file.volume_serial != self.root.volume_serial
+                || payload.file.file_index == 0
+                || payload.length > streamed::MAX_BODY_BYTES
+                || payload.components.is_empty()
+                || payload.components.len() > 256
+                || payload.components.iter().map(String::len).sum::<usize>() > 32000
+                || baseline.metadata().writable
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let root = RootBinding::new(
+                &self.account,
+                self.root.volume_serial,
+                self.root.file_index,
+                &self.registration,
+            )
+            .map_err(unavailable)?;
+            let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+            if !manifest
+                .scopes_for_reconciliation()
+                .map_err(unavailable)?
+                .contains(&self.scope)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            let mut cached = self.child.custody.lock().map_err(unavailable)?;
+            if cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+            let mut child = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            let metadata = baseline.metadata();
+            let expected = Entry::new(
+                baseline.identity(),
+                &metadata.id,
+                &metadata.path,
+                &metadata.etag,
+                metadata.directory,
+                metadata.size,
+            )
+            .map_err(unavailable)?;
+            if !child.entries_for_reconciliation().contains(&expected) {
+                return Err(BackendError::Unavailable);
+            }
+            let original = capture::Baseline::new(
+                baseline.identity(),
+                &metadata.etag,
+                baseline.unlock_epoch(),
+                baseline.token_generation(),
+                payload.file.volume_serial,
+                payload.file.file_index,
+            )
+            .map_err(unavailable)?;
+            let capture_id = streamed::capture_id(
+                &self.scope,
+                &original,
+                &payload.components,
+                &metadata.id,
+                metadata.size,
+                payload.length,
+                payload.sha256,
+            )
+            .map_err(unavailable)?;
+            if let Some(reference) = child
+                .all_captures_for_reconciliation()
+                .into_iter()
+                .find(|r| r.id() == capture_id)
+            {
+                // Reopen only; a missing/incomplete body is never healed or queued.
+                let retained =
+                    read_capture_body_with_cancel(&self.store, &self.scope, &reference, cancelled)
+                        .map_err(unavailable)?;
+                if !reference.is_streamed()
+                    || reference.entry() != &expected
+                    || retained.len() != payload.length
+                    || retained.sha256() != payload.sha256
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                verify_source()?;
+                manifest.verify_current(&self.store).map_err(unavailable)?;
+                self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+                return Ok(None);
+            }
+            let prepared = streamed::PreparedStreamedCapture::new(
+                &self.scope,
+                original,
+                &payload.components,
+                &metadata.id,
+                metadata.size,
+                payload.length,
+                payload.sha256,
+            )
+            .map_err(unavailable)?;
+            if prepared.descriptor().id() != capture_id {
+                return Err(BackendError::Unavailable);
+            }
+            let frame = prepared.frame();
+            let ticket = match child
+                .enroll_streamed_capture(&self.store, &prepared, &payload.components)
+                .map_err(unavailable)?
+            {
+                vault_custody::CaptureEnrollment::New(ticket) => ticket,
+                vault_custody::CaptureEnrollment::Existing(_) => {
+                    return Err(BackendError::Unavailable);
+                }
+            };
+            let reference = child
+                .capture_references_for_lookup()
+                .map_err(unavailable)?
+                .into_iter()
+                .find(|r| r.id() == capture_id)
+                .ok_or(BackendError::Unavailable)?;
+            ticket
+                .consume_streamed(&self.scope, &capture_id, frame)
+                .map_err(unavailable)?;
+            let key = prepared.descriptor().binding().map_err(unavailable)?;
+            if self
+                .store
+                .0
+                .load_capture(&key)
+                .map_err(unavailable)?
+                .is_some()
+            {
+                return Err(BackendError::Unavailable);
+            }
+            self.store
+                .0
+                .put_new_capture(&key, prepared.raw())
+                .map_err(unavailable)?;
+            let raw = self
+                .store
+                .0
+                .load_capture(&key)
+                .map_err(unavailable)?
+                .ok_or(BackendError::Unavailable)?;
+            if raw.as_slice() != prepared.raw() {
+                return Err(BackendError::Unavailable);
+            }
+            streamed::validate_descriptor(&raw, &self.scope, &reference).map_err(unavailable)?;
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            *cached = child;
+            // Serialize local captures within this exact vault through the
+            // existing child guard; no HTTP or backend/session re-entry occurs.
+            // Metadata/index ACK is retention only. Original native postproof
+            // precedes the existing snapshot's durable manifest/readback commit.
+            prepared
+                .commit(source, verify_source, cancelled)
+                .map_err(unavailable)?;
+            if cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+            let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            if !fresh
+                .capture_references_for_lookup()
+                .map_err(unavailable)?
+                .contains(&reference)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            *cached = fresh;
+            drop(cached);
+            let Some(publisher) = self.fresh_close_publisher.as_ref() else {
+                return Ok(None);
+            };
+            let job = FreshVaultCloseJob {
+                origin: FreshCaptureOrigin {
+                    owner: self.owner.clone(),
+                    root: self.root,
+                    broker: Arc::downgrade(&self.root_failed),
+                },
+                vault: baseline.vault().clone(),
+                remote_root: baseline.remote_root().to_owned(),
+                capture_id,
+                dispatch,
+                expected_generation: publisher.generation(),
+            };
+            Ok(Some(Box::new(FreshCloseNotification {
+                publisher: publisher.clone(),
+                job,
+            })
+                as Box<dyn DeferredVaultCaptureNotification>))
+        })();
+        if result.is_err() {
+            self.child
+                .failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
     fn root_identity(&self) -> ConfiguredRootIdentity {
         self.root
     }
@@ -1386,9 +2889,22 @@ impl VaultPublicationCustody for View {
         {
             return Err(BackendError::Unavailable);
         }
-        Ok(child
-            .entries_for_reconciliation()
-            .iter()
+        let mut current = Vec::new();
+        for entry in child.entries_for_reconciliation() {
+            if !super::windows_vault_file_delete_custody::entry_deleted(
+                &self.store.0,
+                &self.scope,
+                entry,
+            )? && !super::windows_vault_reconciled_custody::entry_deleted(
+                &self.store.0,
+                &self.scope,
+                entry,
+            )? {
+                current.push(entry);
+            }
+        }
+        let rows = current
+            .into_iter()
             .map(|entry| VaultCatalogueEntry {
                 identity: entry.opaque(),
                 metadata: RemoteEntry {
@@ -1402,7 +2918,16 @@ impl VaultPublicationCustody for View {
                     encrypted: true,
                 },
             })
-            .collect())
+            .collect::<Vec<_>>();
+
+        let extra =
+            super::windows_vault_cached_capture::catalogue_updates(&self.store.0, &self.scope)?;
+        super::windows_vault_namespace_queued::current_catalogue(
+            &self.store.0,
+            &self.scope,
+            &rows,
+            &extra,
+        )
     }
     fn persist_catalogue(
         &self,
@@ -1419,8 +2944,41 @@ impl VaultPublicationCustody for View {
                 .store(true, std::sync::atomic::Ordering::Release);
             return Err(BackendError::Unavailable);
         }
-        let entries = entries
+        // Pending/current presentations are derived from authenticated custody,
+        // never enrolled as a new immutable remote baseline.
+        let deltas = super::windows_vault_namespace_queued::protected_catalogue_deltas(
+            &self.store.0,
+            &self.scope,
+        )?;
+        let terminal =
+            super::windows_vault_reconciled_custody::catalogue_updates(&self.store.0, &self.scope)?;
+        let protected = deltas
             .iter()
+            .chain(terminal.iter())
+            .map(|d| d.identity)
+            .collect::<std::collections::BTreeSet<_>>();
+        let current = self.catalogue_snapshot()?;
+        let mut ordinary = Vec::new();
+        for row in entries {
+            if protected.contains(&row.identity) {
+                let known = current
+                    .iter()
+                    .find(|e| e.identity == row.identity)
+                    .ok_or(BackendError::Unavailable)?;
+                if !same_catalogue_metadata(&known.metadata, &row.metadata) {
+                    return Err(BackendError::Unavailable);
+                }
+            } else {
+                if !capture::strong_etag(&row.metadata.etag)
+                    || row.metadata.id.starts_with("raiun-pending-")
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                ordinary.push(row);
+            }
+        }
+        let entries = ordinary
+            .into_iter()
             .map(|entry| {
                 Entry::new(
                     entry.identity,
@@ -1471,6 +3029,39 @@ impl VaultPublicationCustody for View {
                 .failed
                 .store(true, std::sync::atomic::Ordering::Release);
             return Err(BackendError::Unavailable);
+        }
+        let mut deltas = super::windows_vault_namespace_queued::protected_catalogue_deltas(
+            &self.store.0,
+            &self.scope,
+        )?;
+        deltas.extend(super::windows_vault_reconciled_custody::catalogue_updates(
+            &self.store.0,
+            &self.scope,
+        )?);
+        if deltas.iter().any(|d| d.identity == intent.identity) {
+            // Native queued mappings already have their own protected receipt.
+            // A hydration may confirm that exact mapping, never replace it.
+            let current = self.catalogue_snapshot()?;
+            let row = current
+                .iter()
+                .find(|e| e.identity == intent.identity)
+                .ok_or(BackendError::Unavailable)?;
+            if row.metadata.directory || row.metadata.size != intent.length {
+                return Err(BackendError::Unavailable);
+            }
+            let latest = deltas
+                .iter()
+                .filter(|d| d.identity == intent.identity)
+                .find(|d| {
+                    d.entry
+                        .as_ref()
+                        .is_some_and(|e| same_catalogue_metadata(e, &row.metadata))
+                })
+                .ok_or(BackendError::Unavailable)?;
+            if latest.file != intent.file_index || latest.components != intent.components {
+                return Err(BackendError::Unavailable);
+            }
+            return Ok(());
         }
         let mut child = self.child.custody.lock().map_err(unavailable)?;
         if self.root_failed.load(std::sync::atomic::Ordering::Acquire)

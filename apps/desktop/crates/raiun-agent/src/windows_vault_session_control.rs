@@ -26,6 +26,14 @@ impl Drop for PreparedWindowsVaultUnlock {
 }
 impl WindowsAgent {
     fn inspect_windows_vault(&self, request: &Value) -> Result<Value, String> {
+        if self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?
+            .offline_cached
+        {
+            return self.inspect_windows_cached_vault(request);
+        }
         // Disabled preparation adds no credential I/O or session observation.
         if !WINDOWS_VAULT_SESSIONS_ENABLED {
             return self.folder_request(request);
@@ -224,6 +232,23 @@ impl WindowsAgent {
         inspected["vault_mount_ready"] = json!(readiness.is_some());
         inspected["vault_mount_writable"] = json!(false);
         inspected["vault_mount_existing_file_in_place"] = json!(existing_file_in_place);
+        inspected["vault_native_operations"] = if existing_file_in_place {
+            json!([
+                "create_file",
+                "create_folder",
+                "save_in_place",
+                "replace_file",
+                "rename_file",
+                "move_file",
+                "rename_folder",
+                "move_folder",
+                "delete_file",
+                "delete_empty_folder"
+            ])
+        } else {
+            json!([])
+        };
+
         inspected["vault_access_mode"] = json!(if existing_file_in_place {
             "native_existing_file_in_place"
         } else {
@@ -499,6 +524,8 @@ impl WindowsAgent {
             &target.root_resource_id,
         )
         .map_err(|_| "The vault scope is invalid")?;
+        // Cancel and drain before credential removal, without a session/token fence.
+        self.vault_copy_jobs.cancel_scope_and_wait(&vault)?;
         let scope = windows_vault_credentials::Scope::from_trusted_account(
             &self.profile_scope,
             account.bytes(),
@@ -596,6 +623,11 @@ impl WindowsAgent {
             target.root_path.trim_end_matches('/')
         }
         .to_owned();
+        // The broker/credential operation gate excludes new admissions. Publish
+        // cancellation and join before native/key revocation takes its fences.
+        self.vault_copy_jobs.cancel_scope_and_wait(&scope)?;
+        self.vault_copy_serialization
+            .cancel_scope_and_wait(&scope)?;
         let cleanup = self.provider.begin_lock_vault_route(
             binding.clone(),
             target.space_id.clone(),
@@ -624,31 +656,16 @@ impl WindowsAgent {
         )
     }
     fn check_vault_preparation(&self, prepared: &PreparedWindowsVaultUnlock) -> Result<(), String> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| "Account state is unavailable")?;
-        if self.generation.load(Ordering::Acquire) != prepared.generation
-            || state.active_generation != prepared.generation
-            || !state.online_authenticated
-            || state.logout_pending
-            || state.authenticating
-            || state.refreshing
-            || state.needs_refresh
-            || state.session_cleanup_uncertain
-            || state.root_configuration.as_ref() != Some(&prepared.configuration)
-            || state.session.as_ref().is_none_or(|session| {
-                session.server != prepared.session.server
-                    || session.client_id != prepared.session.client_id
-                    || session.expected_issuer != prepared.session.expected_issuer
-                    || session.access_token != prepared.session.access_token
-            })
-            || prepared.backend.is_revoked()
-            || prepared.session.expires_at <= unix_time_now().saturating_add(30)
-            || (prepared.existing_file_in_place_admitted
-                && !prepared.adapter.existing_file_saves_active())
+        self.check_windows_vault_authority(
+            &prepared.session,
+            prepared.generation,
+            &prepared.configuration,
+            &prepared.backend,
+        )?;
+        if prepared.existing_file_in_place_admitted
+            && !prepared.adapter.existing_file_saves_active()
         {
-            return Err("The account changed during vault preparation".into());
+            return Err("The vault save route changed during preparation".into());
         }
         Ok(())
     }
@@ -657,86 +674,62 @@ impl WindowsAgent {
         target: &windows_vault_requests::session_requests::VaultTarget,
         credential: &mut windows_vault_requests::session_requests::VaultUnlockCredential,
     ) -> Result<PreparedWindowsVaultUnlock, String> {
+        self.prepare_windows_vault_session(target, credential, None)
+    }
+    fn prepare_windows_vault_session(
+        &self,
+        target: &windows_vault_requests::session_requests::VaultTarget,
+        credential: &mut windows_vault_requests::session_requests::VaultUnlockCredential,
+        creation: Option<(&str, u64)>,
+    ) -> Result<PreparedWindowsVaultUnlock, String> {
         use raiun_opencloud::vault::VaultMetadataClient;
         use sha2::Digest;
-        if target
-            .profile_id
-            .as_ref()
-            .is_some_and(|id| id != &self.profile_scope)
-        {
-            return Err("Select the current Windows account".into());
-        }
-        let (session, generation, configuration) = {
-            let state = self
-                .state
-                .lock()
-                .map_err(|_| "Account state is unavailable")?;
-            if !state.online_authenticated
-                || state.logout_pending
-                || state.authenticating
-                || state.refreshing
-                || state.needs_refresh
-                || state.session_cleanup_uncertain
-            {
-                return Err("Connect this account before unlocking a vault".into());
-            }
-            (
-                state.session.clone().ok_or("Connect this account")?,
-                state.active_generation,
-                state
-                    .root_configuration
-                    .clone()
-                    .ok_or("Connect the Windows drive first")?,
-            )
-        };
-        let owner = configuration
-            .registration_ownership
-            .as_ref()
-            .ok_or("The drive has no verified owner")?;
-        if generation == 0
-            || generation != self.generation.load(Ordering::Acquire)
-            || !configuration.valid
-            || configuration.profile_scope != self.profile_scope
-            || configuration.server != session.server
-            || configuration.client_id != session.client_id
-            || owner.state != "registered"
-        {
-            return Err("The Windows drive is not ready for vault access".into());
-        }
-        let identity = raiun_cloudfiles_windows::ConfiguredRootIdentity {
-            volume_serial: configuration.volume_serial,
-            file_index: configuration.file_index,
-        };
-        let root_lease = pin_registered_configured_root(Path::new(&configuration.path), identity)
-            .map_err(root_error_text)?;
-        let active = ActiveProviderBinding {
+        let WindowsVaultContext {
+            session,
             generation,
-            path: PathBuf::from(&configuration.path),
+            configuration,
             identity,
-            personal_space_id: owner.personal_drive_id.clone(),
-            personal_root_resource_id: owner
-                .personal_root_resource_id
-                .clone()
-                .ok_or("The drive root is unverified")?,
-        };
-        let verified = self.provider.verified_vault_backend(active.clone())?;
+            root_lease,
+            active,
+            verified,
+        } = self.capture_windows_vault_context(
+            target.profile_id.as_deref(),
+            creation.map(|(_, generation)| generation),
+        )?;
         let backend = verified.backend;
         let custody = verified.custody;
         let (client, trusted) = backend
             .vault_read_context(identity)
             .map_err(|_| "The connected drive changed")?;
-        if trusted.profile_id() != self.profile_scope || trusted.account_id() != owner.account_id {
-            return Err("The connected drive belongs to another account".into());
-        }
-        if backend
-            .has_vault_root(&target.space_id, &target.root_resource_id)
-            .map_err(|_| "Could not inspect the current vault routes")?
+        if creation.is_none()
+            && backend
+                .has_vault_root(&target.space_id, &target.root_resource_id)
+                .map_err(|_| "Could not inspect the current vault routes")?
         {
             return Err("This vault already has an active route".into());
         }
-        let listing = VaultMetadataClient::new(client.as_ref())
-            .inspect_vault(&target.space_id, &target.root_path)
-            .map_err(|_| "Could not inspect the selected vault")?;
+        self.check_windows_vault_authority(&session, generation, &configuration, &backend)?;
+        let remote = creation
+            .map(|(name, _)| {
+                raiun_opencloud::vault_create::create_folder_vault_with_parent_identity(
+                    client.as_ref(),
+                    &target.space_id,
+                    &target.root_path,
+                    name,
+                    &target.root_resource_id,
+                )
+                .map_err(|_| {
+                    "Could not create the encrypted folder; any created folder was retained"
+                        .to_owned()
+                })
+            })
+            .transpose()?;
+        let listing = match remote.as_ref() {
+            Some(remote) => remote.root().clone(),
+            None => VaultMetadataClient::new(client.as_ref())
+                .inspect_vault(&target.space_id, &target.root_path)
+                .map_err(|_| "Could not inspect the selected vault")?,
+        };
         let root_path = if listing.root_path == "/" {
             "/"
         } else {
@@ -749,9 +742,9 @@ impl WindowsAgent {
             target.root_path.trim_end_matches('/')
         };
         if listing.space_id != target.space_id
-            || listing.root.id != target.root_resource_id
             || !listing.root.directory
-            || root_path != requested
+            || (creation.is_none()
+                && (listing.root.id != target.root_resource_id || root_path != requested))
         {
             return Err("The selected vault root changed; select it again".into());
         }
@@ -787,10 +780,6 @@ impl WindowsAgent {
             listing.root.id.clone(),
             root_path.clone(),
         )?;
-        let token = listing
-            .integrity_token
-            .as_deref()
-            .ok_or("The selected vault is not initialized")?;
         // Reuse the exact canonical account identity used for the reservation.
         // Reconstructing from raw session URLs can disagree on an origin's
         // optional slash, even though the authenticated identity is unchanged.
@@ -838,28 +827,95 @@ impl WindowsAgent {
                     .as_mut_slice()
             }
         };
-        self.vault_sessions
-            .unlock(&scope, material, token)
-            .map_err(|_| "Could not verify the vault password")?;
+        self.check_windows_vault_authority(&session, generation, &configuration, &backend)?;
+        if let Some(remote) = remote {
+            let pending = self
+                .vault_sessions
+                .begin_create(&scope, material)
+                .map_err(|_| "Could not initialize the new vault password")?;
+            let readback = remote
+                .initialize(pending.integrity_token())
+                .map_err(|_| "Could not verify the new vault proof; the folder was retained")?;
+            self.check_windows_vault_authority(&session, generation, &configuration, &backend)?;
+            self.vault_sessions
+                .finish_create(
+                    pending,
+                    readback
+                        .integrity_token
+                        .as_deref()
+                        .ok_or("The new vault proof is missing; the folder was retained")?,
+                )
+                .map_err(|_| "Could not verify the new vault proof; the folder was retained")?;
+        } else {
+            self.vault_sessions
+                .unlock(
+                    &scope,
+                    material,
+                    listing
+                        .integrity_token
+                        .as_deref()
+                        .ok_or("The selected vault is not initialized")?,
+                )
+                .map_err(|_| "Could not verify the vault password")?;
+        }
         let mut existing_file_in_place_admitted = false;
         // Every failure after verified insertion must clear this new session.
         let result = (|| {
             let custody_view = custody.view(&trusted, &scope, &root_path)?;
+            // The online route must carry the same protected journal as the
+            // cached route. A cache-free read binding cannot mint a guarded
+            // reconciliation proof for its pending revisions.
+            let storage = DpapiSessionStore::current_user()
+                .map_err(|_| "Private Windows storage is unavailable")?;
+            let parent = raiun_control_windows::PinnedDirectory::open(
+                storage.local_edit_state_directory(),
+            )
+            .map_err(|_| "Private Windows storage could not be admitted")?;
+            let cache_name = format!("vault-offline-{digest}");
+            let cache_pin = {
+                let mut pins = self
+                    .vault_offline_storage
+                    .lock()
+                    .map_err(|_| "Encrypted cache ownership is unavailable")?;
+                if let Some(pin) = pins.get(&cache_name) {
+                    pin.clone()
+                } else {
+                    let pin = Arc::new(
+                        raiun_control_windows::PrivateDirectory::create_or_open_under(
+                            &parent,
+                            std::ffi::OsStr::new(&cache_name),
+                        )
+                        .map_err(|_| "Private encrypted cache is unavailable")?,
+                    );
+                    pins.insert(cache_name, pin.clone());
+                    pin
+                }
+            };
+            cache_pin
+                .verify_path()
+                .map_err(|_| "Private encrypted cache changed")?;
+            let cache = raiun_cache::Cache::open(cache_pin.path(), 1 << 30)
+                .map_err(|_| "Could not open the encrypted offline cache")?;
+            cache_pin
+                .verify_path()
+                .map_err(|_| "Private encrypted cache changed")?;
+            let offline = raiun_opencloud::vault_cache::VaultOfflineCache::new(
+                cache,
+                scope.clone(),
+                root_path.clone(),
+            )
+            .map_err(|_| "The encrypted edit journal is unavailable")?;
             let binding = Arc::new(
-                raiun_cloudfiles_windows::vault_read::WindowsVaultReadBinding::new_online(
+                raiun_cloudfiles_windows::vault_read::WindowsVaultReadBinding::new_online_with_offline_cache(
                     trusted,
                     client,
                     self.vault_sessions.clone(),
                     scope.clone(),
                     root_path.clone(),
+                    offline,
                 )
                 .map_err(|_| "Could not bind the verified vault read route")?,
             );
-            let storage = DpapiSessionStore::current_user()
-                .map_err(|_| "Private Windows storage is unavailable")?;
-            let parent =
-                raiun_control_windows::PinnedDirectory::open(storage.local_edit_state_directory())
-                    .map_err(|_| "Private Windows storage could not be admitted")?;
             let staging_scope =
                 serde_json::to_vec(&(digest.as_str(), scope.space_id(), scope.resource_id()))
                     .map_err(|_| "Could not bind private vault staging")?;
@@ -1035,6 +1091,7 @@ impl WindowsAgent {
             "root_resource_id":prepared.scope.resource_id(),"vault_mount_ready":true,
             "vault_mount_writable":false,"vault_mount_existing_file_overwrite":false,
             "vault_mount_existing_file_in_place":existing_file_in_place,
+            "vault_native_operations":if existing_file_in_place {json!(["create_file","create_folder","save_in_place","replace_file","rename_file","move_file","rename_folder","move_folder","delete_file","delete_empty_folder"])}else{json!([])},
             "vault_access_mode":if existing_file_in_place {"native_existing_file_in_place"} else {"native_read_only"},
             "vault_mount_write_unavailable_reason":"route_read_only",
             "remembered":remembered,"remembered_status":remembered_status}))

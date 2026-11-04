@@ -6,7 +6,7 @@ import ts from 'typescript';
 
 const source = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
 const tree = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const wanted = new Set(['confirmAccountAction', 'isCurrentAccount', 'vaultPinContextCurrent', 'handleAction', 'run', 'removeVaultOfflinePin', 'lockVault', 'removePair', 'resolveConflict', 'disconnectSpaceFolderSync', 'nativeVaultAccess', 'vaultAppFeaturesAvailable', 'removeSelectedAccount', 'restoreRemovedAccount']);
+const wanted = new Set(['clearVaultBrowse', 'confirmAccountAction', 'isCurrentAccount', 'vaultPinContextCurrent', 'handleAction', 'run', 'removeVaultOfflinePin', 'lockVault', 'removePair', 'resolveConflict', 'disconnectSpaceFolderSync', 'nativeVaultAccess', 'vaultAppFeaturesAvailable', 'removeSelectedAccount', 'restoreRemovedAccount']);
 const functions = new Map(tree.statements.filter(n => ts.isFunctionDeclaration(n) && n.name && wanted.has(n.name.text)).map(n => [n.name.text, n.getText(tree)]));
 assert.equal(functions.size, wanted.size, 'exercise actual production declarations');
 const compiled = ts.transpileModule(`${[...functions.values()].join('\n')}\nglobalThis.actions = { ${[...wanted].join(',')} };`, {
@@ -24,7 +24,7 @@ function harness() {
     spaceActionBusy: {}, pairs: [{ id: 'alpha-one', space_id: 'space-a' }, { id: 'alpha-two', space_id: 'space-a' }, { id: 'beta-one', space_id: 'space-b' }],
     error: '', message: '', resolvingConflict: false, conflicts: {}, page: 'folders', vaultGeneration: 11,
     vaultDialog: { generation: 11, pinGeneration: 12, accountEpoch: 7, spaceId: 'space-a', rootPath: '/Synthetic.vault', rootResourceId: 'root-a',
-      pins: [{ id: 'pin-a' }], pinBusy: false, pinJob: null, loading: false, unlocked: true, statusUnknown: false, editRetryBusy: false, editRetryJob: null, entries: [] }
+      pins: [{ id: 'pin-a' }], pinBusy: false, pinJob: null, loading: false, unlocked: true, statusUnknown: false, editRetryBusy: false, editRetryJob: null, entries: [], directoryBindings: new Map(), currentDirectoryBinding: null }
   };
   const map = () => new Map();
   const context = {

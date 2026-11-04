@@ -2,6 +2,10 @@
 //! optional remembered passwords are kept only in the OS credential store.
 use super::*;
 use crate::vault_edit_jobs::{CopyVerifyReviewReason, VaultEditFailureClass};
+use crate::vault_operation_wire::{
+    vault_pending_operation_attention_reason, vault_pending_operation_name,
+    vault_pending_operation_state_name,
+};
 use crate::vault_secrets::{
     RememberedStatus, SecretServiceVaultCredentialStore, VaultCredentialStore,
     begin_credential_operation, record_status, remembered_status,
@@ -1259,7 +1263,8 @@ impl Runtime {
                 "truncated":has_more,
             }));
         }
-        if action == "vault_copy_start" {
+        if matches!(action, "vault_copy_start" | "vault_move_start") {
+            let moving = action == "vault_move_start";
             let expected_generation = request
                 .get("expected_generation")
                 .and_then(Value::as_u64)
@@ -1325,7 +1330,7 @@ impl Runtime {
             // Admit under the runtime gate so a lock/logout cannot miss this
             // job. Its worker waits before serialization or backend work until
             // the gate is dropped; releasing it never needs the runtime gate.
-            let job = crate::vault_edit_jobs::VaultEditReconcileJobs::start_copy_producer(
+            let job = crate::vault_edit_jobs::VaultEditReconcileJobs::start_file_transfer_producer(
                 &self.vault_edit_reconcile_jobs,
                 crate::vault_edit_jobs::CopyProducerJobSpec {
                     destination: &destination_scope,
@@ -1335,6 +1340,7 @@ impl Runtime {
                     pin_jobs: Arc::clone(&self.vault_pin_jobs),
                     start_gate,
                 },
+                moving,
                 move |cancelled, progress, publish_binding| {
                     let invalidated = || {
                         cancelled.load(Ordering::Acquire)
@@ -1366,24 +1372,49 @@ impl Runtime {
                     let destination = backend(worker_destination, destination_path)?;
                     progress(0, 0, 0, 1);
                     let mut publication_error = None;
-                    let outcome = source.copy_file_to_cancellable_with_binding(
-                        &destination,
-                        &copy_request,
-                        &invalidated,
-                        |id, revision| {
-                            if let Err(error) = publish_binding(id, revision) {
-                                publication_error = Some(error);
-                                // A durable row already exists. Stop before
-                                // attempt admission if status publication fails.
-                                cancelled.store(true, Ordering::Release);
-                            }
-                        },
-                    );
+                    let mut binding_published = false;
+                    let mut on_binding = |id: &str, revision: u64| {
+                        binding_published = true;
+                        if let Err(error) = publish_binding(id, revision) {
+                            publication_error = Some(error);
+                            // A durable row already exists. Stop before
+                            // attempt admission if status publication fails.
+                            cancelled.store(true, Ordering::Release);
+                        }
+                    };
+                    let transfer = if moving {
+                        source
+                            .move_file_to_cancellable_with_binding(
+                                &destination,
+                                &copy_request,
+                                &invalidated,
+                                &mut on_binding,
+                            )
+                            .map(|outcome| match outcome {
+                                raiun_opencloud::vault_backend::VaultMoveOutcome::Moved {
+                                    copy,
+                                } => Some(copy),
+                                _ => None,
+                            })
+                    } else {
+                        source
+                            .copy_file_to_cancellable_with_binding(
+                                &destination,
+                                &copy_request,
+                                &invalidated,
+                                &mut on_binding,
+                            )
+                            .map(Some)
+                    };
+                    drop(on_binding);
+                    let outcome = transfer;
                     if let Some(error) = publication_error {
                         return Err(error);
                     }
                     match outcome {
-                        Ok(raiun_opencloud::vault_backend::VaultCopyOutcome::Copied { .. }) => {
+                        Ok(Some(raiun_opencloud::vault_backend::VaultCopyOutcome::Copied {
+                            ..
+                        })) => {
                             progress(1, 1, 0, 0);
                             Ok(crate::vault_edit_jobs::VaultEditReconcileReport {
                                 processed: 1,
@@ -1392,14 +1423,23 @@ impl Runtime {
                                 remaining: 0,
                             })
                         }
-                        Ok(
+                        Ok(None)
+                        | Ok(Some(
                             raiun_opencloud::vault_backend::VaultCopyOutcome::NeedsReconciliation {
                                 ..
                             },
-                        ) => {
+                        )) => {
                             progress(1, 0, 0, 1);
                             Err(crate::vault_edit_jobs::VaultEditJobFailure::classified(
                                 "copy requires review",
+                                VaultEditFailureClass::CopyNeedsReview(
+                                    CopyVerifyReviewReason::VerificationUnavailable,
+                                ),
+                            ))
+                        }
+                        Err(_) if binding_published => {
+                            Err(crate::vault_edit_jobs::VaultEditJobFailure::classified(
+                                "File operation requires review",
                                 VaultEditFailureClass::CopyNeedsReview(
                                     CopyVerifyReviewReason::VerificationUnavailable,
                                 ),
@@ -1434,7 +1474,10 @@ impl Runtime {
             let current = self
                 .vault_edit_reconcile_jobs
                 .status(&scope, job_id, generation)?;
-            if current.operation.as_deref() != Some("copy_file") {
+            if !matches!(
+                current.operation.as_deref(),
+                Some("copy_file" | "move_file")
+            ) {
                 return Err("Copy job was not found".into());
             }
             let status = if action == "vault_copy_cancel" {
@@ -2844,7 +2887,11 @@ fn copy_producer_job_status(
     let state = match status.state.as_str() {
         "queued" => "queued",
         "running" => "running",
+        "complete" if binding_valid && status.operation.as_deref() == Some("move_file") => "moved",
         "complete" if binding_valid => "copied",
+        "cancelled" if binding_valid && status.operation.as_deref() == Some("move_file") => {
+            "needs_review"
+        }
         "cancelled" => "cancelled",
         "failed"
             if matches!(
@@ -2900,33 +2947,6 @@ fn copy_verify_job_status(
     value
 }
 
-fn vault_pending_operation_name(operation: VaultPendingOperationKind) -> &'static str {
-    match operation {
-        VaultPendingOperationKind::Overwrite => "overwrite",
-        VaultPendingOperationKind::CreateFile => "create_file",
-        VaultPendingOperationKind::RenameFile => "rename_file",
-        VaultPendingOperationKind::DeleteFile => "delete_file",
-        VaultPendingOperationKind::CreateDirectory => "create_directory",
-        VaultPendingOperationKind::CopyFile => "copy_file",
-    }
-}
-
-fn vault_pending_operation_state_name(state: raiun_cache::CiphertextWriteState) -> &'static str {
-    match state {
-        raiun_cache::CiphertextWriteState::Building => "building",
-        raiun_cache::CiphertextWriteState::Pending => "pending",
-        raiun_cache::CiphertextWriteState::NeverAttempted => "queued",
-        raiun_cache::CiphertextWriteState::Attempting => "uncertain",
-        raiun_cache::CiphertextWriteState::RecoveryAttempting
-        | raiun_cache::CiphertextWriteState::RecoveryRetrying => "uncertain",
-        raiun_cache::CiphertextWriteState::Uncertain => "uncertain",
-        raiun_cache::CiphertextWriteState::Conflict => "conflict",
-        raiun_cache::CiphertextWriteState::CommittedReceipt
-        | raiun_cache::CiphertextWriteState::CancelledReceipt
-        | raiun_cache::CiphertextWriteState::AcknowledgedReceipt => "internal",
-    }
-}
-
 fn vault_retry_state_from_name(value: &str) -> Option<raiun_cache::CiphertextWriteState> {
     match value {
         "attempting" => Some(raiun_cache::CiphertextWriteState::Attempting),
@@ -2942,38 +2962,6 @@ fn vault_retry_state_name(state: raiun_cache::CiphertextWriteState) -> &'static 
         raiun_cache::CiphertextWriteState::RecoveryAttempting => "recovery_attempting",
         raiun_cache::CiphertextWriteState::RecoveryRetrying => "recovery_retrying",
         _ => "",
-    }
-}
-
-fn vault_pending_operation_attention_reason(
-    operation: VaultPendingOperationKind,
-    state: raiun_cache::CiphertextWriteState,
-) -> Option<&'static str> {
-    match (operation, state) {
-        (
-            VaultPendingOperationKind::CopyFile,
-            raiun_cache::CiphertextWriteState::Building
-            | raiun_cache::CiphertextWriteState::Pending
-            | raiun_cache::CiphertextWriteState::NeverAttempted
-            | raiun_cache::CiphertextWriteState::Attempting
-            | raiun_cache::CiphertextWriteState::RecoveryAttempting
-            | raiun_cache::CiphertextWriteState::RecoveryRetrying
-            | raiun_cache::CiphertextWriteState::Uncertain
-            | raiun_cache::CiphertextWriteState::Conflict,
-        ) => Some("copy_file_requires_review"),
-        (
-            VaultPendingOperationKind::CreateDirectory,
-            raiun_cache::CiphertextWriteState::Attempting,
-        ) => Some("directory_create_attempt_interrupted"),
-        (VaultPendingOperationKind::CreateFile, raiun_cache::CiphertextWriteState::Attempting) => {
-            Some("file_create_attempt_interrupted")
-        }
-        (
-            VaultPendingOperationKind::CreateFile,
-            raiun_cache::CiphertextWriteState::RecoveryAttempting
-            | raiun_cache::CiphertextWriteState::RecoveryRetrying,
-        ) => Some("file_create_recovery_interrupted"),
-        _ => None,
     }
 }
 
@@ -4155,6 +4143,8 @@ mod tests {
         let server = "https://cloud.example.test".to_owned();
         let client = OpenCloudClient::new(&server, "synthetic-token".into()).unwrap();
         Runtime {
+            mode: super::super::RuntimeMode::Desktop,
+            headless_config: None,
             dir: dir.clone(),
             transfer_budget: Mutex::new(None),
             settings: Mutex::new(Settings {
@@ -4184,6 +4174,7 @@ mod tests {
                     server: server.clone(),
                     client_id: "test-client".into(),
                     access_token: "synthetic-token".into(),
+                    app_token_username: None,
                     refresh_token: None,
                     expires_at: u64::MAX,
                     token_endpoint: format!("{server}/token"),
@@ -5027,6 +5018,7 @@ mod tests {
                 server: server.origin.clone(),
                 client_id: "test-client".into(),
                 access_token: "synthetic-token".into(),
+                app_token_username: None,
                 refresh_token: None,
                 expires_at: u64::MAX,
                 token_endpoint: format!("{}/token", server.origin),
@@ -5115,6 +5107,7 @@ mod tests {
                 server: server.origin.clone(),
                 client_id: "test-client".into(),
                 access_token: "synthetic-token".into(),
+                app_token_username: None,
                 refresh_token: None,
                 expires_at: u64::MAX,
                 token_endpoint: format!("{}/token", server.origin),

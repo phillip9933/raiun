@@ -25,6 +25,8 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
         && version != 4
         && version != 5
         && version != 6
+        && version != 9
+        && version != 8
         && version != 7
         && version != CACHE_VERSION as i64
     {
@@ -77,7 +79,10 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
     // discards a tombstone merely to admit another operation. Schema v6 makes
     // older binaries refuse this database rather than bypass these fences.
     db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS scopes(
+        "CREATE TABLE IF NOT EXISTS cache_settings(
+           setting TEXT PRIMARY KEY, value INTEGER NOT NULL CHECK(value>=0)
+         );
+         CREATE TABLE IF NOT EXISTS scopes(
            scope_key TEXT PRIMARY KEY, origin TEXT NOT NULL, account_id TEXT NOT NULL,
            space_id TEXT NOT NULL, root_resource_id TEXT NOT NULL,
            protection INTEGER NOT NULL
@@ -325,6 +330,55 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
         // automatically current.
         db.execute("UPDATE policies SET target_state=1 WHERE policy=1", [])
             .map_err(db_error)?;
+    }
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ordinary_create_handoffs (
+        write_id INTEGER PRIMARY KEY REFERENCES writes(id),
+        scope_key TEXT NOT NULL REFERENCES scopes(scope_key),
+        handoff_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        content_key TEXT NOT NULL,
+        state INTEGER NOT NULL CHECK(state BETWEEN 0 AND 5),
+        claim_id TEXT NOT NULL DEFAULT '',
+        remote_id TEXT,
+        remote_etag TEXT,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(scope_key,handoff_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS ordinary_create_active_path
+      ON ordinary_create_handoffs(scope_key,path) WHERE state IN (0,1,2,3,4);
+    CREATE INDEX IF NOT EXISTS ordinary_create_ready
+      ON ordinary_create_handoffs(scope_key,state,write_id);",
+    )
+    .map_err(db_error)?;
+    ensure_column(
+        db,
+        "ordinary_create_handoffs",
+        "body_len",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        db,
+        "ordinary_create_handoffs",
+        "body_sha256",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        db,
+        "ordinary_create_handoffs",
+        "local_handoff_ack",
+        "INTEGER NOT NULL DEFAULT 0 CHECK(local_handoff_ack IN (0,1))",
+    )?;
+    ensure_column(
+        db,
+        "ordinary_create_handoffs",
+        "body_state",
+        "INTEGER NOT NULL DEFAULT 0 CHECK(body_state IN (0,1,2))",
+    )?;
+    db.execute("CREATE INDEX IF NOT EXISTS ordinary_create_body_cleanup ON ordinary_create_handoffs(scope_key,body_state,write_id)",[]).map_err(db_error)?;
+    if version < 10 {
+        db.execute("UPDATE ordinary_create_handoffs SET local_handoff_ack=0,body_state=0,body_len=(SELECT c.byte_len FROM contents c WHERE c.content_key=ordinary_create_handoffs.content_key AND c.scope_key=ordinary_create_handoffs.scope_key),body_sha256=(SELECT c.sha256 FROM contents c WHERE c.content_key=ordinary_create_handoffs.content_key AND c.scope_key=ordinary_create_handoffs.scope_key)",[]).map_err(db_error)?;
+        super::ordinary_create::validate_migration(db)?;
     }
     db.pragma_update(None, "user_version", CACHE_VERSION)
         .map_err(db_error)?;

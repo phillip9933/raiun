@@ -886,3 +886,236 @@ pure original Weak identity rather than reacquiring keys or requiring a retired
 publication revision to remain current. Missing/recovered provenance fails
 closed. Synthetic markers expose only enrollment/acknowledgement stage names;
 actual Windows full-read/re-unlock/Lock qualification remains a separate gate.
+
+
+## R37 explicit ordinary-file rename completion
+
+The production adapter retains the exact registered connection, backend and
+recovery binding; no-follow ancestor, parent and destination handles; the
+expected root, parent and file IDs; the old opaque identity; and an exclusive
+ProtectedCompletionFile reference. A fresh source content capability is minted
+only after the existing SDK verifies a full If-Match source GET against the
+protected local digest. Destination publication requires a second full GET at
+the coordinator's new reported revision matching the same source bytes. Both
+network reads finish before the publication callback and its locks.
+
+The callback may use native queries and the supplied durable journal closure;
+it must not enter backend, token or HTTP APIs. It performs at most one
+synchronous identity-only CfUpdatePlaceholder with exact16-byte identity, null
+metadata/ranges/USN/OVERLAPPED, zero range count and flags0. Input identity bytes
+and the Cloud Files protected handle remain live through the call. It preserves
+pending PLACEHOLDER state rather than marking in sync. Full-body equivalence,
+zero modified ranges, root/file/parent/path continuity, unchanged creation,
+access and write times, and nondecreasing positive ChangeTime/USN qualify local
+completion. Pins survive both final journal appends. Pre-native rejection is
+unavailable; any failed call or post-native proof is uncertain. Store errors
+keep their exact typed value and durable factual prefix. There is no retry,
+cleanup, unregister, user-byte mutation or replay authority on failure.
+
+This explicit producer is not attached to the automatic observer/operation loop.
+R36 is separate native primitive evidence. R37 source/compilation or loopback
+mock completion tests do not establish execution of this native adapter,
+mounted acceptance, large-file acceptance or crash recovery.
+
+
+### GUI shared-source composition boundary
+
+The GUI crate now compiles the explicit R37 executor and its session, content, native pin and durable-store dependency closure. No GUI caller, observation loop, candidate collection or automatic rename scheduling is enabled by this composition. Directory creation helpers compile as dependencies; no automatic create path is enabled. The shared authenticated quota and scope inventory accounts for snapshots, directory creates, file creates and renames, including retained history. Existing GUI streamed retention, device-cache quota, saved-session/legacy-root compatibility, registration identity, existing-save completion and explicit Retry remain unchanged. Source and synthetic unit checks do not establish native runtime acceptance.
+
+## GUI admitted rename storage and conservative health (R44/R45)
+
+PreparedEditRecovery offers optional Windows rename storage, defaulting to None.
+The durable factory checks the exact profile, origin, account, physical root,
+token generation and nonzero agent generation before opening a requested scope.
+It retains the admitted state, protector and shared quota context; a store Arc
+confers no native, remote or replay authority. GUI compatibility uses the existing
+metadata root and strict modern v2 child. Namespace setup is explicit and last:
+repeated setup, policy mismatch and later streamed reconfiguration fail closed.
+An existing streamed context shares its exact state/admission Arcs; namespace-only
+setup never enables streamed capture. Namespace-off GUI factories, saved sessions,
+registration identity and native completion behavior remain unchanged.
+
+Provider and retained prepared-owner health queries use the same bounded,
+read-only namespace metadata reader. It authenticates actual scope catalogs and
+record/event chains for the exact profile/origin/account/physical root under one
+existing quota lease and one aggregate scan budget. Completed rename histories
+are resolved; unfinished histories remain unresolved; corrupt, incomplete or
+budget-exhausted evidence remains Unavailable. Directory/file-create namespace
+formats remain unknown. The reader creates no root, catalog, lock, writer or
+publication receipt and opens no snapshot content bodies. It grants no dispatch
+or replay authority. Cached pending getters remain unknown with namespace setup
+and perform no disk I/O.
+
+Startup preparation also checks retained evidence without namespace opt-in at the
+exact existing protector state path. Matching rename evidence, even completed,
+requires explicit namespace context; unsupported startup cannot silently report
+healthy zero. An absent/empty legacy state remains compatible. Metadata-only
+compatibility attestation does not enable writers, change ACLs or search defaults.
+Catalog/v1 admission reuses namespace admission when streamed storage is absent,
+preserving shared accounting. Conservative native cleanup/eviction/unregister
+consumers retain their unwrap_or(true) behavior.
+
+R44's six and R45's two historical guarded Windows DPAPI controls remain scoped
+to their frozen source and fresh owned storage fixtures. New qualified-reader
+controls are separate ignored Windows metadata tests, not native execution here.
+Pure host controls verify aggregate bounds, exact scope selection, malformed
+history and body-read refusal. These checks do not establish installed GUI
+legacy-state, cold-root, mounted/native package or automatic operation acceptance.
+No observer, candidate builder, runtime opt-in or caller is activated.
+
+## Retained connected rename storage accessor
+
+The explicit connected accessor uses the recovery Arc already retained by the
+connection. Connected/ready state, exact backend Arc, current composite-root
+ownership, revocation, registered pinned physical root and provider/account/root/
+token scope are checked before delegation. It never prepares another provider or
+reconstructs default state; no backend metadata lease spans storage admission.
+Absent/unsupported storage remains None. A nonzero captured agent generation is
+not current live owner authority. Existing native/session/owner fences remain
+required. Helper controls and cross-target compilation do not prove the connected
+registration wrapper executed. No automatic caller is enabled.
+
+## Partial rename binding candidate
+
+A typed same-batch rename hint pair can select an already loaded source and
+parent by their known opaque identities. Exact old path, Personal route, current
+provider/account/root scope, captured authorization, strong source revision and
+current-owner checks qualify only a partial binding snapshot. Metadata leases
+and mutexes are released before the final owner callback and return. Assembly
+sends no request, writes no catalog/journal and performs no native mutation.
+
+Directory bindings contain no current parent ETag, native parent identity or
+authenticated ancestry classification. The candidate creates neither
+NamespaceParent nor NamespaceIntent. Its local identity and notification names
+remain hints. Fresh parent/native/session/content proof is required by a later
+producer before dispatch; private fields and redacted Debug preserve this
+boundary. Synthetic setup HTTP is separate from the asserted zero assembler
+HTTP/catalog/MOVE delta. No automatic operation is enabled by this helper.
+
+## Explicit connected-root observer lifecycle
+
+The connected observer is opt-in on the native owner thread. Its weak backend
+binding and observation envelope bind the existing composite identity, current
+provider scope, registered pinned root and unique instance. READY/token/backend/
+root/recovery checks surround attach, waits and rearm. Returned names remain
+untrusted and inventory_unknown is always true. No production caller attaches
+or polls this API in this source checkpoint.
+
+The owned observer is published into the connection before arming. Retirement
+closes observation admission and physical stop/drain remains available after
+authentication revocation. finish closes callback readiness and drains before
+CfDisconnectSyncRoot. A drain failure retains the same complete aggregate. Drop
+closes admission and preserves pending observer, root, callback state, binding
+and registry/connection keys; it never frees live kernel buffers or implicitly
+blocks on an observer already known to be draining. Ordinary unregister and
+unresolved-data guards remain unchanged. Future production callers must use
+zero wait; the API caps waits at 250 ms.
+
+The imported headless fixture is preserved in output evidence and is not valid
+for GUI execution. Its GUI replacement has a distinct selector/owner marker and
+uses a fresh pinned private synthetic state directory, an explicitly admitted
+DPAPI protector and provider constructor. It never selects default current-user
+state or derives a profile from the terminal recovery protector. Compilation
+does not qualify native execution; a separate fresh GUI fixture cohort is
+required. No saved-session, default state or registration policy is imported.
+
+## Explicit fresh-parent rename entry
+
+The partial candidate can enter an explicit connection-owned fresh-parent path.
+Before HTTP it verifies READY state, exact backend/composite/registered physical
+root, retained prepared recovery scope, captured authorization and owner. Fresh
+ancestor/parent metadata may refresh directory bindings, but original source ID,
+ETag and size are checked before and after; the source is never silently rebased.
+The local callback pins actual parent ancestry and the renamed destination,
+checks its original opaque identity, actual FileID, one link, managed clean state,
+zero modified ranges and old-source absence. No native ID comes from a hint alone.
+
+The metadata session ends before opening the connection's retained store. The
+existing producer repeats current session, native, owner and full content proof
+before fresh publication and one-send dispatch. No production observer/rename
+caller is enabled. A shared unfinished-content/capture exclusion remains a
+prerequisite for runtime wiring: scheduler booleans, an empty handoff queue,
+read-only metadata leases and an unknown cached count do not supply that fence.
+Durable evidence and native protected-reference checks must remain intact.
+
+The corrected R49 Windows controls qualify fresh parent selection and refusal
+stages only. Original R48 failures remain failed; neither that cohort nor R49
+establishes connected native entry or mounted GUI/CLI acceptance. Diagnostic
+report-writer files absent from GUI are retained as Windows evidence rather than
+imported as unrelated dependencies.
+
+R51 adds a foundation for that guard, without changing the connected rename
+producer. Close-only admission starts before callback parameter/native validation,
+stays active through protected capture and durable handoff, and advances an epoch
+before known dirty body capture. Positively clean closes do not advance the epoch.
+Unclassified/error paths, bookkeeping failure and overflow leave sticky unknown;
+capture continues even when admission bookkeeping fails. Short bookkeeping mutexes
+are never held through storage, native or network I/O. Tickets and dispatch claims
+are local ordering evidence only and do not make a remote request atomic.
+
+The separate retained-owner content-health query is read-only and defaults to
+unavailable for unsupported providers. It must not use the legacy method named
+metadata recovery: that format seals metadata together with body bytes, and its
+decoder decrypts the body. Retained legacy content is therefore conservatively
+nonclean, including completed retained legacy records. V2 content classification
+uses an existing quota lease; absent/incomplete or inaccessible evidence is not
+repaired. Namespace history does not itself count as content recovery. This
+foundation does not yet join tickets, durable content health and native proofs at
+the two producer entries. That integration, the final pre-send ordering point,
+late-capture uncertainty, and a new connected workflow remain separate required
+work. No R51 result can qualify automatic caller activation or the expanded MVP.
+
+R51's six pure tracker controls passed, while its three filesystem controls
+failed before the intended content-health assertions. The fixtures omitted
+authenticated legacy scope registration and used a synthetic protector with no
+directory-protection policy. The original source, binary, state and failures
+remain retained. R52 changes those test fixtures only: distinct guarded selectors
+and fresh private state, registered scopes, and a counting wrapper that delegates
+protection and directory policy to the exact fixture's current-user DPAPI owner.
+The counter detects opening a body-inclusive legacy record during the health
+query. R52 does not change production readers, admission accounting or the
+connected producer. The admitted R52 cohort passed all three metadata DPAPI
+controls (PID 540); the original R51 filesystem failures remain failed. These
+passes do not qualify connected guard wiring or native workflow acceptance.
+
+R53 adds a separately named owner-thread compatibility query for retained legacy
+history. The lightweight content query keeps its no-body-decryption semantics.
+The compatibility query explicitly allows bounded full legacy authentication:
+open and decode each selected protected record, verify its scope, body length and
+hash, zeroize plaintext, and authenticate the recovery event chain before treating
+LocallyAcknowledged history as resolved. Remote verification alone stays pending.
+One remaining work allowance spans the existing quota lease, V2 metadata, legacy
+catalog/directory validation and selected journals; errors and exhaustion remain
+unavailable without a partial clean answer. This query must run outside callbacks,
+backend leases and HTTP. It changes no record, schema, cleanup or replay policy.
+It does not itself wire either connected rename entry or qualify native workflow
+acceptance. Synthetic typed readback/acknowledgment fixtures represent history
+classification only and are not actual native completion evidence.
+
+### R54 legacy compatibility fixture quota correction
+
+R53's three guarded controls failed at the first coordinated legacy append, before any compatibility-reader assertion. Its original source, logs, binary and failed 0/3 receipt remain retained. Static inspection identifies an impossible fixture quota: append_edit reserves MAX_SEALED_BYTES (16 MiB body + 256 KiB metadata + 64 KiB overhead = 17,104,896 bytes), exceeding R53's entire 16 MiB state allowance. The exact first internal failure was not instrumented.
+
+R54 uses separately named selectors and fresh retained DPAPI cases with a 64 MiB state allowance, plus an explicit reservation/headroom assertion before fixture construction. Production admission, compatibility API, strict no-body reader, decoder, native producer and quota rules are unchanged. The admitted R54 cohort passed all three bounded authenticated legacy-reader controls (PID 18068), with zero failures. The original R53 three-control failure remains failed and preserved. The typed readback/local-ack fixtures qualify history classification only; they are not actual native completion or connected guard acceptance. No rename-entry guard or caller is wired here; expanded MVP acceptance remains open and sync remains deferred.
+
+### R55 explicit save/rename admission integration (component validation only)
+
+Both explicit file-rename entries now retain one close-capture ticket before parent/session HTTP and share one private admitted core. The direct entry validates its supplied store against the retained factory's exact scope, protector, policy and persistent quota-file identity. Bounded authenticated recovery probes run outside backend leases and callbacks, before publication and after pin waits. After own Pending publication, only content recovery is queried, so the attempt cannot self-block on its namespace row. Early no-publication deferral is distinct from post-publication retained admission failure.
+
+Remote and native-local adapters check the same ticket around long waits. The live remote adapter rechecks current owner/cancel/location authority and consumes one send claim inside the SDK hook after its final proofs and request construction, immediately before execute. Unsupported adapters refuse guarded sends without falling back to an earlier legacy send boundary. Capture is never disabled and no tracker mutex spans disk or HTTP.
+
+Completion has a separate one-use short-lock ordering claim immediately before the real durable journal callback. A close admitted before that claim prevents local acknowledgment and retains RemoteVerifiedLocalPending; native identity update may already have occurred, so this does not mean no native side effects. A close admitted after the claim is ordered after that completion attempt and continues capture; later uncertainty never erases factual durable events. These are local ordering points, not remote atomicity, replay or rollback authority.
+
+Fresh component and loopback controls are separate from historical runs. They qualify guard helpers and SDK boundaries only; neither real ConfiguredRootConnection public entry nor mounted native completion has been executed by these controls. Existing native proofs, recovery safeguards, runtime caller/lifecycle activation, packages, expanded MVP and sync remain separate gates. The initial prefreeze fixture compile errors are retained; no original failure is relabeled.
+
+### R56 final-proof fixture correction
+
+The original frozen R55 cohort remains 12 passed / 1 failed: ten guard/live-adapter controls and two SDK send-boundary controls passed, while the combined negative-proof test failed at its first root-counter assumption before reaching its source subcase. Its exact source, binary and failure packet are retained. Root request 6 is a missing-destination fallback permission check; request 7 is the actual final configured-root identity validation. Request counts and callback/MOVE assertions after the failed assertion were not captured by that test.
+
+R56 replaces that failed test in current source with two separately named independent controls, targeting final root check 7 and source check 3 and asserting their proof counts, conflict refusal, no send claim and no MOVE. Production guard, SDK, native/coordinator/tracker and Cargo.lock are unchanged from frozen R55. The two distinct R56 SDK controls passed in the admitted cohort (PID 15832, 2 passed / 0 failed), targeting the final root check 7 and source check 3. The twelve scoped R55 passes are retained without rerun, while its original failed combined proof control remains failed. These are component controls: actual public native-entry executions remain zero, and no Cloud Files registration or real server test occurred. Mounted public-entry/native acceptance, held-dispatch interoperability, caller/lifecycle activation, MVP and sync remain pending.
+
+### R57 held-dispatch health fixture scope
+
+The admitted R57 cohort passed both fresh guarded DPAPI controls (PID 4704, 2 passed / 0 failed, 0.53 seconds) using the real retained prepared provider, its namespace-rename factory and an actual live FileRenameLease. No rerun occurred during source integration. They compare two factory bindings and keep the exclusive dispatch lease alive across whole-history and authenticated content-only health reads. The completed-legacy case requires own Pending namespace to keep whole history unresolved while full body authentication reports content clean. The pending-content case must remain nonclean. Both preserved the checked protected entry set, lengths and bytes and the pristine Pending record; timestamps were not asserted. Typed legacy ACK is authenticated synthetic history, not native completion.
+
+Production provider, guard, SDK, native code and Cargo.lock are unchanged. Original R51/R53/R55 failures and later scoped R56 passes remain separate. R57 does not register Cloud Files, contact a server, execute either ConfiguredRootConnection public entry or activate runtime callers. Actual public-entry fixtures require the retained namespace factory and real capture owner; historical arbitrary-store/streamed-only native fixtures cannot be rerun unchanged to establish acceptance. A separate output receipt records exact readiness requirements.

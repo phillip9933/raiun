@@ -23,6 +23,8 @@ use std::{
 use zeroize::Zeroizing;
 
 pub struct WindowsVaultReadBinding {
+    #[cfg(windows)]
+    cache_pin: Option<Arc<raiun_control_windows::PrivateDirectory>>,
     trusted: ProviderScope,
     client: Arc<OpenCloudClient>,
     sessions: Arc<VaultSessionCoordinator>,
@@ -126,6 +128,8 @@ impl WindowsVaultReadBinding {
             root_path.clone(),
         )?;
         let binding = Self {
+            #[cfg(windows)]
+            cache_pin: None,
             trusted,
             client,
             sessions,
@@ -140,6 +144,575 @@ impl WindowsVaultReadBinding {
         };
         binding.check_current()?;
         Ok(binding)
+    }
+    /// Online route with the same exact-scope sealed journal used by cached
+    /// sessions. Reconnection can reconcile the original queued revision only
+    /// through this constructor; the browse-only constructor stays cache-free.
+    #[cfg(windows)]
+    pub fn new_online_with_offline_cache(
+        trusted: ProviderScope,
+        client: Arc<OpenCloudClient>,
+        sessions: Arc<VaultSessionCoordinator>,
+        scope: VaultSessionScope,
+        root_path: String,
+        cache: raiun_opencloud::vault_cache::VaultOfflineCache,
+    ) -> Result<Self, CloudError> {
+        check_context(&trusted, &client, &scope)?;
+        if root_path.len() > 4096 || validate_remote_path(&root_path).is_err() {
+            return Err(refused());
+        }
+        let root_path = normalized_inspected_path(&root_path).to_owned();
+        let epoch = sessions
+            .capture_session_epoch(&scope)
+            .map_err(|_| refused())?;
+        let listing =
+            VaultMetadataClient::new(&client).inspect_vault(scope.space_id(), &root_path)?;
+        check_context(&trusted, &client, &scope)?;
+        if listing.space_id != scope.space_id()
+            || !listing.root.directory
+            || listing.root.id != scope.resource_id()
+            || normalized_inspected_path(&listing.root_path) != root_path
+            || normalized_inspected_path(&listing.root.path) != root_path
+        {
+            return Err(refused());
+        }
+        let backend = VaultBackend::new_with_offline_cache(
+            (*client).clone(),
+            sessions.clone(),
+            scope.clone(),
+            root_path.clone(),
+            cache,
+        )?;
+        let binding = Self {
+            cache_pin: None,
+            trusted,
+            client,
+            sessions,
+            scope,
+            backend,
+            root_path,
+            epoch,
+            identity: Arc::new(()),
+            revoked: AtomicBool::new(false),
+            publication_gate: RwLock::new(()),
+            publication_revision: AtomicU64::new(1),
+        };
+        binding.check_current()?;
+        Ok(binding)
+    }
+    /// Credential-free cached reads retain both the authenticated sealed root
+    /// and the exact private cache directory for the entire route lifetime.
+    #[cfg(windows)]
+    pub fn new_offline(
+        trusted: ProviderScope,
+        client: Arc<OpenCloudClient>,
+        sessions: Arc<VaultSessionCoordinator>,
+        scope: VaultSessionScope,
+        cache: raiun_opencloud::vault_cache::VaultOfflineCache,
+        snapshot: raiun_vault::sealed_cache::SealedVaultSnapshot,
+        cache_pin: Arc<raiun_control_windows::PrivateDirectory>,
+    ) -> Result<Self, CloudError> {
+        if !client.is_offline() {
+            return Err(refused());
+        }
+        check_context(&trusted, &client, &scope)?;
+        cache_pin.verify_path().map_err(|_| refused())?;
+        let root_path = snapshot.root_path.clone();
+        let epoch = sessions
+            .capture_session_epoch(&scope)
+            .map_err(|_| refused())?;
+        let backend = VaultBackend::new_from_cached_root(
+            (*client).clone(),
+            sessions.clone(),
+            scope.clone(),
+            root_path.clone(),
+            cache,
+            snapshot,
+        )?;
+        let binding = Self {
+            trusted,
+            client,
+            sessions,
+            scope,
+            backend,
+            root_path,
+            epoch,
+            cache_pin: Some(cache_pin),
+            identity: Arc::new(()),
+            revoked: AtomicBool::new(false),
+            publication_gate: RwLock::new(()),
+            publication_revision: AtomicU64::new(1),
+        };
+        binding.check_current()?;
+        Ok(binding)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn prepare_child_directory_create(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+    ) -> Result<raiun_opencloud::vault_backend::VaultChildDirectoryCreateTarget, CloudError> {
+        self.check_current()?;
+        if !parent.directory
+            || path
+                .rsplit_once('/')
+                .map(|(p, _)| if p.is_empty() { "/" } else { p })
+                != Some(parent.path.as_str())
+        {
+            return Err(refused());
+        }
+        let stop = || self.is_revoked() || cancellation.is_cancelled();
+        let request = raiun_opencloud::vault_backend::VaultChildDirectoryCreateRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: path,
+            parent_resource_id: &parent.id,
+            parent_etag: &parent.etag,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: cancellation.generation.clone(),
+            expected_provider_generation: cancellation.expected,
+            context,
+            cancelled: &stop,
+        };
+        let target = self
+            .backend
+            .prepare_child_directory_create_guarded(&request)?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(target)
+    }
+    #[cfg(windows)]
+    pub(crate) fn send_child_directory_create(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        target: raiun_opencloud::vault_backend::VaultChildDirectoryCreateTarget,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+        before_send: &mut dyn FnMut() -> Result<(), CloudError>,
+        context: raiun_opencloud::RangeReadContext,
+    ) -> Result<raiun_opencloud::vault_backend::VaultChildDirectoryCreateOutcome, CloudError> {
+        use raiun_opencloud::vault_backend::{
+            VaultChildDirectoryCreateOutcome, VaultChildDirectoryCreateRequest,
+        };
+        self.check_current()?;
+        if !parent.directory
+            || path
+                .rsplit_once('/')
+                .map(|(p, _)| if p.is_empty() { "/" } else { p })
+                != Some(parent.path.as_str())
+        {
+            return Err(refused());
+        }
+        let stop = || self.is_revoked() || cancellation.is_cancelled();
+        let request = VaultChildDirectoryCreateRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: path,
+            parent_resource_id: &parent.id,
+            parent_etag: &parent.etag,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: cancellation.generation.clone(),
+            expected_provider_generation: cancellation.expected,
+            context,
+            cancelled: &stop,
+        };
+        match self
+            .backend
+            .create_child_directory_guarded(&request, target, before_send)?
+        {
+            VaultChildDirectoryCreateOutcome::Verified(_)
+                if stop() || self.check_current().is_err() =>
+            {
+                Ok(VaultChildDirectoryCreateOutcome::NeedsReconciliation {
+                    reason: ErrorKind::Forbidden,
+                })
+            }
+            other => Ok(other),
+        }
+    }
+    /// Pure immutable comparison only; original exclusive route/auth/epoch
+    /// fences are held by the child publication owner. Never acquire them here.
+    #[cfg(windows)]
+    pub(crate) fn child_directory_proof_matches(
+        &self,
+        proof: &raiun_opencloud::vault_backend::VaultVerifiedChildDirectory,
+    ) -> bool {
+        proof.scope() == &self.scope
+            && proof.matches_epoch(&self.epoch)
+            && proof.root_path() == self.root_path
+            && proof.token_generation() == self.trusted.token_generation()
+    }
+    #[cfg(windows)]
+    pub(crate) fn fresh_child_create_parent(
+        &self,
+        parent: &RemoteEntry,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<RemoteEntry, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancellation.is_cancelled() || cancellation.is_expired();
+        if stop() {
+            return Err(refused());
+        }
+        if self.client.is_offline() {
+            let actual = self.backend.stat(self.scope.space_id(), &parent.path)?;
+            self.backend
+                .parent_ref_for_directory(&parent.path, &parent.id, &parent.etag)?;
+            self.check_current()?;
+            if stop()
+                || !actual.directory
+                || actual.id != parent.id
+                || actual.path != parent.path
+                || actual.etag != parent.etag
+            {
+                return Err(refused());
+            }
+            return Ok(actual);
+        }
+        let entry = self.backend.child_create_parent_at_epoch_with_context(
+            &self.scope,
+            &self.epoch,
+            parent,
+            raiun_opencloud::RangeReadContext {
+                deadline: cancellation.deadline(),
+                token_generation: self.trusted.token_generation(),
+            },
+            &stop,
+        )?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(entry)
+    }
+    #[cfg(windows)]
+    pub(crate) fn child_create_descriptor(
+        &self,
+        root: crate::ConfiguredRootIdentity,
+        parent_opaque: &[u8; 16],
+        parent: &RemoteEntry,
+        source: crate::VaultChildCreateSource,
+        encoded: &str,
+        integrity: &str,
+    ) -> Result<crate::VaultChildCreateDescriptor, BackendError> {
+        self.with_publication(|| {
+            let leaf = source.components.last().ok_or_else(refused)?;
+            let descriptor = crate::VaultChildCreateDescriptor {
+                owner: self.trusted.clone(),
+                vault: self.scope.clone(),
+                remote_root: self.root_path.clone(),
+                root,
+                parent_identity: *parent_opaque,
+                parent: parent.clone(),
+                logical_path: format!("{}/{}", parent.path.trim_end_matches('/'), leaf),
+                encoded_target: encoded.into(),
+                integrity_token: integrity.into(),
+                historical_unlock_epoch: self.epoch.historical_generation(),
+                source,
+            };
+            descriptor.validate().map_err(|_| refused())?;
+            Ok(descriptor)
+        })
+        .map_err(|_| BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_child_create_descriptor(
+        &self,
+        root: crate::ConfiguredRootIdentity,
+        parent_opaque: &[u8; 16],
+        parent: &RemoteEntry,
+        source: crate::VaultChildCreateSource,
+        encoded: &str,
+        integrity: &str,
+    ) -> Result<crate::VaultCachedChildCreateDescriptor, BackendError> {
+        self.check_current()
+            .map_err(|_| BackendError::Unavailable)?;
+        let parent_ref = self
+            .cached_parent_ref(parent, &|| false)
+            .map_err(|_| BackendError::Unavailable)?;
+        let leaf = source.components.last().ok_or(BackendError::Unavailable)?;
+        let d = crate::VaultCachedChildCreateDescriptor {
+            owner: self.trusted.clone(),
+            vault: self.scope.clone(),
+            remote_root: self.root_path.clone(),
+            root,
+            parent_identity: *parent_opaque,
+            parent: parent.clone(),
+            parent_ref,
+            logical_path: format!("{}/{}", parent.path.trim_end_matches('/'), leaf),
+            encoded_target: encoded.into(),
+            integrity_token: integrity.into(),
+            historical_unlock_epoch: self.epoch.historical_generation(),
+            source,
+        };
+        d.validate()?;
+        Ok(d)
+    }
+    #[cfg(windows)]
+    pub(crate) fn rename_descriptor(
+        &self,
+        root: crate::ConfiguredRootIdentity,
+        facts: crate::VaultFileRenameFacts,
+    ) -> Result<crate::VaultFileRenameDescriptor, BackendError> {
+        self.with_publication(|| {
+            let mut facts = facts;
+            facts.historical_epoch = self.epoch.historical_generation();
+            let d = crate::VaultFileRenameDescriptor {
+                owner: self.trusted.clone(),
+                vault: self.scope.clone(),
+                remote_root: self.root_path.clone(),
+                root,
+                facts,
+            };
+            d.validate().map_err(|_| refused())?;
+            Ok(d)
+        })
+        .map_err(|_| BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    pub(crate) fn prepare_directory_rename(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        parent: &RemoteEntry,
+        destination_parent: &RemoteEntry,
+        expected: &[RemoteEntry],
+        cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+    ) -> Result<raiun_opencloud::vault_backend::VaultDirectoryRenameTarget, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancel.is_cancelled();
+        let r = raiun_opencloud::vault_backend::VaultFileRenameRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            source: original,
+            destination,
+            parent,
+            destination_parent: Some(destination_parent),
+            context,
+            provider_generation: cancel.generation.clone(),
+            expected_provider_generation: cancel.expected,
+            cancelled: &stop,
+        };
+        let target = self
+            .backend
+            .prepare_directory_rename_guarded(&r, expected)?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(target)
+    }
+    #[cfg(windows)]
+    pub(crate) fn send_directory_rename(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        parent: &RemoteEntry,
+        destination_parent: &RemoteEntry,
+        target: raiun_opencloud::vault_backend::VaultDirectoryRenameTarget,
+        cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+        before: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultDirectoryRenameOutcome, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancel.is_cancelled();
+        let r = raiun_opencloud::vault_backend::VaultFileRenameRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            source: original,
+            destination,
+            parent,
+            destination_parent: Some(destination_parent),
+            context,
+            provider_generation: cancel.generation.clone(),
+            expected_provider_generation: cancel.expected,
+            cancelled: &stop,
+        };
+        let result = self.backend.rename_directory_guarded(&r, target, before)?;
+        if stop() || self.check_current().is_err() {
+            return Ok(
+                raiun_opencloud::vault_backend::VaultDirectoryRenameOutcome::NeedsReconciliation,
+            );
+        }
+        Ok(result)
+    }
+    #[cfg(windows)]
+    pub(crate) fn prepare_file_rename(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        parent: &RemoteEntry,
+        destination_parent: &RemoteEntry,
+        cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+    ) -> Result<raiun_opencloud::vault_backend::VaultFileRenameTarget, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancel.is_cancelled();
+        let r = raiun_opencloud::vault_backend::VaultFileRenameRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            source: original,
+            destination,
+            parent,
+            destination_parent: Some(destination_parent),
+            context,
+            provider_generation: cancel.generation.clone(),
+            expected_provider_generation: cancel.expected,
+            cancelled: &stop,
+        };
+        let target = self.backend.prepare_file_rename_guarded(&r)?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(target)
+    }
+    #[cfg(windows)]
+    pub(crate) fn send_file_rename(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        parent: &RemoteEntry,
+        destination_parent: &RemoteEntry,
+        target: raiun_opencloud::vault_backend::VaultFileRenameTarget,
+        cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+        before: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultFileRenameOutcome, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancel.is_cancelled();
+        let r = raiun_opencloud::vault_backend::VaultFileRenameRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            source: original,
+            destination,
+            parent,
+            destination_parent: Some(destination_parent),
+            context,
+            provider_generation: cancel.generation.clone(),
+            expected_provider_generation: cancel.expected,
+            cancelled: &stop,
+        };
+        let result = self.backend.rename_file_guarded(&r, target, before)?;
+        if stop() || self.check_current().is_err() {
+            return Ok(raiun_opencloud::vault_backend::VaultFileRenameOutcome::NeedsReconciliation);
+        }
+        Ok(result)
+    }
+    #[cfg(windows)]
+    pub(crate) fn file_rename_proof_matches(
+        &self,
+        p: &raiun_opencloud::vault_backend::VaultVerifiedFileRename,
+    ) -> bool {
+        p.scope() == &self.scope
+            && p.matches_epoch(&self.epoch)
+            && p.root_path() == self.root_path
+            && p.token_generation() == self.trusted.token_generation()
+    }
+    #[cfg(windows)]
+    pub(crate) fn prepare_child_file_create(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        len: u64,
+        sha: [u8; 32],
+        deadline: std::time::Instant,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultChildFileCreateTarget, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancellation.is_cancelled();
+        let request = raiun_opencloud::vault_backend::VaultChildFileCreateRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: path,
+            parent_resource_id: &parent.id,
+            parent_etag: &parent.etag,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: cancellation.generation.clone(),
+            expected_provider_generation: cancellation.expected,
+            deadline,
+            cancelled: &stop,
+        };
+        let target = self
+            .backend
+            .prepare_child_file_create_guarded(&request, len, sha)?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(target)
+    }
+    #[cfg(windows)]
+    pub(crate) fn send_child_file_create<R: Read>(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        target: raiun_opencloud::vault_backend::VaultChildFileCreateTarget,
+        source: &mut R,
+        private: &raiun_control_windows::PrivateDirectory,
+        deadline: std::time::Instant,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+        before: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultChildFileCreateOutcome, CloudError> {
+        use raiun_opencloud::vault_backend::{
+            VaultChildFileCreateOutcome, VaultChildFileCreateRequest,
+        };
+        self.check_current()?;
+        private.verify_path().map_err(|_| refused())?;
+        // Pure atomics/job only: this predicate also runs UNDER local crypto.
+        let stop = || self.is_revoked() || cancellation.is_cancelled();
+        let request = VaultChildFileCreateRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: path,
+            parent_resource_id: &parent.id,
+            parent_etag: &parent.etag,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: cancellation.generation.clone(),
+            expected_provider_generation: cancellation.expected,
+            deadline,
+            cancelled: &stop,
+        };
+        let result = self.backend.create_child_file_guarded(
+            &request,
+            target,
+            source,
+            private.path(),
+            before,
+        )?;
+        match result {
+            VaultChildFileCreateOutcome::Verified(_)
+                if stop() || self.check_current().is_err() || private.verify_path().is_err() =>
+            {
+                Ok(VaultChildFileCreateOutcome::NeedsReconciliation {
+                    reason: ErrorKind::Forbidden,
+                })
+            }
+            other => Ok(other),
+        }
+    }
+    #[cfg(windows)]
+    pub(crate) fn child_file_proof_matches(
+        &self,
+        proof: &raiun_opencloud::vault_backend::VaultVerifiedChildFile,
+    ) -> bool {
+        proof.scope() == &self.scope
+            && proof.matches_epoch(&self.epoch)
+            && proof.root_path() == self.root_path
+            && proof.token_generation() == self.trusted.token_generation()
     }
     /// Pure immutable comparison; caller already holds publication fences.
     pub(crate) fn validate_upload_target(
@@ -233,6 +806,556 @@ impl WindowsVaultReadBinding {
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn upload_existing_streamed_capture<R: Read>(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        edited_len: u64,
+        expected_sha: [u8; 32],
+        private: &raiun_control_windows::PrivateDirectory,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome, CloudError> {
+        use raiun_core::backend::WriteCondition;
+        use raiun_opencloud::vault_backend::{
+            VaultExistingOverwriteOutcome, VaultExistingOverwriteRequest,
+        };
+        self.validate_upload_target(target)?;
+        self.check_current()?;
+        if cancellation.is_cancelled() {
+            return Err(refused());
+        }
+        private.verify_path().map_err(|_| refused())?;
+        // No registry/auth/publication lease is retained over either HTTP call.
+        // This is a fresh-admission ciphertext locator, never a captured one.
+        let original = target.original();
+        let encoded = self.backend.prepare_write_target(
+            &original.path,
+            &WriteCondition::Match(original.etag.clone()),
+        )?;
+        self.check_current()?;
+        let stop = || self.revoked.load(Ordering::Acquire) || cancellation.is_cancelled();
+        let request = VaultExistingOverwriteRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: &original.path,
+            original_resource_id: &original.id,
+            original_etag: &original.etag,
+            encoded_target: &encoded,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: Arc::clone(&cancellation.generation),
+            expected_provider_generation: cancellation.expected,
+            cancelled: &stop,
+        };
+        let result = self.backend.overwrite_existing_streamed_reader_guarded(
+            &request,
+            source,
+            edited_len,
+            expected_sha,
+            private.path(),
+        );
+        match result {
+            Ok(VaultExistingOverwriteOutcome::Verified(_))
+                if stop() || self.check_current().is_err() || private.verify_path().is_err() =>
+            {
+                Ok(VaultExistingOverwriteOutcome::NeedsReconciliation {
+                    reason: ErrorKind::Forbidden,
+                })
+            }
+            other => other,
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn cached_edit_facts(
+        &self,
+        identity: [u8; 16],
+        root: crate::ConfiguredRootIdentity,
+        current: &RemoteEntry,
+    ) -> Result<crate::vault_cached_edit::CachedVaultEditBaselineFacts, CloudError> {
+        use crate::vault_cached_edit::*;
+        self.check_current()?;
+        let target = self
+            .backend
+            .prepare_cached_edit_capture(current, &self.epoch, &|| self.is_revoked())?;
+        let pending = target
+            .pending()
+            .map(|p| {
+                let operation = match p.operation {
+                    raiun_opencloud::vault_cache::VaultPendingOperationKind::Overwrite => {
+                        Ok(CachedVaultEditOperation::Overwrite)
+                    }
+                    raiun_opencloud::vault_cache::VaultPendingOperationKind::CreateFile => {
+                        Ok(CachedVaultEditOperation::CreateFile)
+                    }
+                    _ => Err(refused()),
+                }?;
+                Ok(CachedVaultEditPending {
+                    write_id: p.id.clone(),
+                    revision: p.revision,
+                    operation,
+                })
+            })
+            .transpose()?;
+        let mut original = target.original_base().cloned();
+        if let Some(base) = &mut original {
+            base.writable = false;
+        }
+        self.check_current()?;
+        Ok(CachedVaultEditBaselineFacts {
+            profile_id: self.trusted.profile_id().into(),
+            account_id: self.trusted.account_id().into(),
+            server_origin: self.trusted.server_origin().into(),
+            space_id: self.scope.space_id().into(),
+            root_resource_id: self.scope.resource_id().into(),
+            remote_root: self.root_path.clone(),
+            root: crate::LocalFileIdentity {
+                volume_serial: root.volume_serial,
+                file_index: root.file_index,
+            },
+            token_generation: self.trusted.token_generation(),
+            historical_unlock_epoch: self.epoch.historical_generation(),
+            identity,
+            current: current.clone(),
+            original_base: original,
+            pending,
+            file: crate::LocalFileIdentity {
+                volume_serial: 0,
+                file_index: 0,
+            },
+            usn: 0,
+            components: Vec::new(),
+            plaintext_len: 0,
+            plaintext_sha256: [0; 32],
+        })
+    }
+    #[cfg(windows)]
+    pub(crate) fn validate_cached_capture(
+        &self,
+        facts: &crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+        dispatch: &crate::FreshVaultCaptureDispatch,
+    ) -> Result<(), CloudError> {
+        let root = crate::ConfiguredRootIdentity {
+            volume_serial: facts.root.volume_serial,
+            file_index: facts.root.file_index,
+        };
+        facts.validate(root).map_err(|_| refused())?;
+        if !self.matches_cleanup_dispatch(dispatch) {
+            return Err(refused());
+        }
+        let template = self.cached_edit_facts(facts.identity, root, &facts.current)?;
+        let mut expected = facts.clone();
+        expected.file = template.file;
+        expected.usn = 0;
+        expected.components.clear();
+        expected.plaintext_len = 0;
+        expected.plaintext_sha256 = [0; 32];
+        if template != expected {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    pub(crate) fn queue_cached_capture<R: Read>(
+        &self,
+        facts: &crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+        dispatch: &crate::FreshVaultCaptureDispatch,
+        source: &mut R,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultUploadOutcome, CloudError> {
+        self.validate_cached_capture(facts, dispatch)?;
+        let target =
+            self.backend
+                .prepare_cached_edit_capture(&facts.current, &self.epoch, cancelled)?;
+        let result = self.backend.queue_cached_capture_reader(
+            target,
+            source,
+            facts.plaintext_len,
+            facts.plaintext_sha256,
+            &self.epoch,
+            cancelled,
+        )?;
+        self.check_current()?;
+        if cancelled() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn validate_cached_child_descriptor(
+        &self,
+        d: &crate::VaultChildCreateDescriptor,
+    ) -> Result<(), CloudError> {
+        d.validate().map_err(|_| refused())?;
+        if !self.client.is_offline()
+            || d.owner != self.trusted
+            || d.vault != self.scope
+            || d.remote_root != self.root_path
+            || d.historical_unlock_epoch != self.epoch.historical_generation()
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn is_cached_only(&self) -> bool {
+        self.client.is_offline()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn prepare_cached_child_create(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        directory: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultCachedChildTarget, CloudError> {
+        self.check_current()?;
+        self.backend
+            .prepare_cached_child_create(path, parent, directory, &self.epoch, cancelled)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_cached_child_create<R: Read>(
+        &self,
+        target: raiun_opencloud::vault_backend::VaultCachedChildTarget,
+        source: &mut R,
+        length: u64,
+        sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultUploadOutcome, CloudError> {
+        self.check_current()?;
+        let result = self.backend.queue_cached_child_create(
+            target,
+            source,
+            length,
+            sha,
+            &self.epoch,
+            cancelled,
+        )?;
+        self.check_current()?;
+        if cancelled() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_cached_file_rename(
+        &self,
+        from: &str,
+        to: &str,
+        original: &RemoteEntry,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultRenameOutcome, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        let result = self.backend.queue_cached_file_rename(
+            from,
+            to,
+            &original.id,
+            &original.etag,
+            &self.epoch,
+            &stop,
+        )?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_cached_file_delete(
+        &self,
+        original: &RemoteEntry,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultDeleteOutcome, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        let result = self.backend.queue_cached_file_delete(
+            &original.path,
+            &original.id,
+            &original.etag,
+            &self.epoch,
+            &stop,
+        )?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn cached_pending_operation(
+        &self,
+        id: &str,
+        revision: u64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_cache::VaultPendingEditMetadata, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend
+            .cached_pending_operation(id, revision, &self.epoch, &stop)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn cancel_cached_directory_create(
+        &self,
+        original: &raiun_core::backend::RemoteEntry,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultCancelledPendingDirectory, CloudError> {
+        self.check_current()?;
+        let id = original
+            .id
+            .strip_prefix("raiun-pending-directory:")
+            .ok_or_else(|| refused())?;
+        let revision = original
+            .etag
+            .strip_prefix(&format!("raiun-pending-v1:{id}:"))
+            .and_then(|text| text.parse::<u64>().ok())
+            .filter(|revision| *revision != 0)
+            .ok_or_else(|| refused())?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend
+            .cancel_never_attempted_directory_create_retained(
+                &original.path,
+                id,
+                revision,
+                &original.id,
+                &original.etag,
+                &self.epoch,
+                &stop,
+            )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn acknowledge_cancelled_cached_directory(
+        &self,
+        receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend
+            .acknowledge_cancelled_directory_create_retained(receipt, &stop)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn matches_cached_directory_cancel(
+        &self,
+        receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+    ) -> bool {
+        self.is_cached_only()
+            && receipt.matches_scope(&self.scope)
+            && receipt.matches_epoch(&self.epoch)
+            && self.check_current().is_ok()
+    }
+    #[cfg(windows)]
+    pub(crate) fn matches_cached_directory_cancel_held(
+        &self,
+        receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+    ) -> bool {
+        self.client.is_offline()
+            && !self.is_revoked()
+            && receipt.matches_scope(&self.scope)
+            && receipt.matches_epoch(&self.epoch)
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_pending_body_sha256(
+        &self,
+        id: &str,
+        revision: u64,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<String, CloudError> {
+        self.check_current()?;
+        let original = cancelled.clone();
+        let stop: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || original());
+        self.backend
+            .cached_pending_body_sha256(id, revision, &self.epoch, stop)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn cached_parent_ref(
+        &self,
+        parent: &RemoteEntry,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_cache::VaultPendingParentRef, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend.cached_parent_ref(parent, &self.epoch, &stop)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn cached_namespace_descriptor_current(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+        historical_epoch: u64,
+    ) -> bool {
+        self.cached_namespace_descriptor_matches(owner, vault, remote_root, historical_epoch)
+            && self.check_current().is_ok()
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_namespace_descriptor_matches(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+        historical_epoch: u64,
+    ) -> bool {
+        owner == &self.trusted
+            && vault == &self.scope
+            && remote_root == self.root_path
+            && historical_epoch == self.epoch.historical_generation()
+            && self.client.is_offline()
+            && !self.is_revoked()
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_vault_scope(&self) -> VaultSessionScope {
+        self.scope.clone()
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_provider_scope(&self) -> ProviderScope {
+        self.trusted.clone()
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_remote_root(&self) -> String {
+        self.root_path.clone()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn reconcile_cached_pending_guarded(
+        &self,
+        id: &str,
+        revision: u64,
+        provider: Arc<AtomicU64>,
+        expected_generation: u64,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultPendingReconcileOutcome, CloudError> {
+        self.check_current()?;
+        if self.client.is_offline() {
+            return Err(refused());
+        }
+        self.backend.reconcile_pending_operation_guarded(
+            id,
+            revision,
+            &self.epoch,
+            provider,
+            expected_generation,
+            cancelled,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn matches_cached_reconciliation(
+        &self,
+        proof: &raiun_opencloud::vault_backend::VaultReconciledPending,
+        provider: &Arc<AtomicU64>,
+        generation: u64,
+    ) -> bool {
+        self.matches_cached_reconciliation_held(proof, provider, generation)
+            && self.check_current().is_ok()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn matches_cached_reconciliation_held(
+        &self,
+        proof: &raiun_opencloud::vault_backend::VaultReconciledPending,
+        provider: &Arc<AtomicU64>,
+        generation: u64,
+    ) -> bool {
+        proof.scope() == &self.scope
+            && proof.matches_epoch(&self.epoch)
+            && proof.matches_client(&self.client)
+            && proof.matches_provider(provider, generation)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn historical_unlock_epoch(&self) -> u64 {
+        self.epoch.historical_generation()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn retarget_cached_file_create(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        destination_parent_ref: &raiun_opencloud::vault_cache::VaultPendingParentRef,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_cache::VaultPendingEditMetadata, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend.retarget_cached_file_create(
+            &original.path,
+            destination,
+            &original.id,
+            &original.etag,
+            destination_parent_ref,
+            &self.epoch,
+            &stop,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn retarget_cached_directory_subtree(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        destination_parent_ref: &raiun_opencloud::vault_cache::VaultPendingParentRef,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_cache::VaultPendingDirectorySubtreeRetarget, CloudError>
+    {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend.retarget_cached_directory_subtree(
+            &original.path,
+            destination,
+            &original.id,
+            &original.etag,
+            destination_parent_ref,
+            &self.epoch,
+            &stop,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_cached_existing_capture<R: Read>(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        length: u64,
+        sha256: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultUploadOutcome, CloudError> {
+        self.check_current()?;
+        self.validate_upload_target(target)?;
+        if !self.client.is_offline() || cancelled() || target.dispatch().is_none() {
+            return Err(refused());
+        }
+        let result = self.backend.queue_existing_cached_reader(
+            target.original(),
+            source,
+            length,
+            sha256,
+            None,
+            &self.epoch,
+            cancelled,
+        )?;
+        // Failure after publication retains the journal and original capture.
+        // It grants neither a receipt nor remote/native completion authority.
+        self.check_current()?;
+        if cancelled() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+
     /// Complete a verified online read into an admitted private immutable file.
     /// The result stays opaque/unpublished until parent integration obtains the
     /// required provider/root/session publication lease and lock lifecycle.
@@ -298,7 +1421,7 @@ impl WindowsVaultReadBinding {
                 )
             })
         })?;
-        let full_sha256 = if expected.size <= crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+        let full_sha256 = if expected.size <= crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES {
             reader.verify().map_err(|_| refused())?;
             if reader.metadata().map_err(|_| refused())?.len() != expected.size {
                 return Err(refused());
@@ -356,6 +1479,21 @@ impl WindowsVaultReadBinding {
         )
     }
 
+    /// Pure join to this immutable original owner. Works after revocation/key
+    /// clear and grants no live route, bearer, unlock or mutation capability.
+    pub(crate) fn matches_cleanup_route(
+        &self,
+        owner: &ProviderScope,
+        space: &str,
+        root_id: &str,
+        path: &str,
+    ) -> bool {
+        owner == &self.trusted
+            && self.scope.space_id() == space
+            && self.scope.resource_id() == root_id
+            && self.root_path == path
+    }
+
     pub(crate) fn route_location(
         &self,
         owner: &ProviderScope,
@@ -373,6 +1511,10 @@ impl WindowsVaultReadBinding {
     }
 
     fn check_current(&self) -> Result<(), CloudError> {
+        #[cfg(windows)]
+        if let Some(pin) = &self.cache_pin {
+            pin.verify_path().map_err(|_| refused())?;
+        }
         if self.revoked.load(Ordering::Acquire) {
             return Err(refused());
         }
@@ -590,6 +1732,9 @@ impl WindowsVaultReadBinding {
         Ok(entries)
     }
 }
+#[cfg(windows)]
+include!("vault_read_delete.rs");
+
 #[cfg(test)]
 mod tests {
     use super::*;

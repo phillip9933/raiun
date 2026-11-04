@@ -64,6 +64,18 @@ impl VaultDirtyFiles {
         }
         self.files.get(identity).cloned().ok_or(())
     }
+    pub fn snapshot_optional(&self, identity: &[u8; 16]) -> Result<Option<Observation>, ()> {
+        if self.unknown {
+            return Err(());
+        }
+        Ok(self.files.get(identity).cloned())
+    }
+    pub fn snapshot_all(&self) -> Result<Vec<Observation>, ()> {
+        if self.unknown {
+            return Err(());
+        }
+        Ok(self.files.values().cloned().collect())
+    }
     pub fn resolve(&mut self, observation: &Observation) -> Result<(), ()> {
         if self.unknown || self.files.get(&observation.identity) != Some(observation) {
             return Err(());

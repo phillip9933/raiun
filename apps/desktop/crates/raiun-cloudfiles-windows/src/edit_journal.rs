@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(windows)]
+use std::sync::Arc;
+
 const JOURNAL_DIR: &str = "cloud-files-edit-journal-v1";
 const RECORD_MAGIC: &[u8; 8] = b"RAIUNED1";
 const MAX_RECORDS: usize = 10_000;
@@ -244,6 +247,21 @@ pub struct DpapiEditRecordProtector {
 
 #[cfg(windows)]
 impl DpapiEditRecordProtector {
+    /// Use current-user DPAPI with an already-opened private directory.
+    /// Unlike `current_user`, this constructor has no environment/default-path
+    /// lookup and cannot create or repair the directory.
+    #[cfg(windows)]
+    pub fn from_existing_private_directory(
+        directory: Arc<raiun_control_windows::PrivateDirectory>,
+    ) -> Result<Self, JournalError> {
+        let store =
+            raiun_control_windows::DpapiSessionStore::from_existing_private_directory(directory)
+                .map_err(|_| JournalError::ProtectionFailed)?;
+        Ok(Self { store })
+    }
+
+    /// Inherit the session store's validated runtime state root, including an
+    /// explicitly selected headless root. Never reconstruct a Desktop path here.
     pub fn current_user() -> Result<Self, JournalError> {
         let store = raiun_control_windows::DpapiSessionStore::current_user()
             .map_err(|_| JournalError::ProtectionFailed)?;
@@ -321,6 +339,8 @@ pub struct EditJournal {
     _directory_guards: Vec<JournalDirectoryGuard>,
     scope: EditJournalScope,
     protector: Box<dyn EditRecordProtector>,
+    #[cfg(windows)]
+    admission: Option<Arc<crate::recovery_admission::RecoveryAdmission>>,
 }
 
 /// RAII ownership of one record's recovery-dispatch lock. This type is not
@@ -355,6 +375,8 @@ impl EditJournal {
         if !valid_record_id(record_id) {
             return Err(JournalError::InvalidEdit);
         }
+        #[cfg(windows)]
+        let admission = self.reserve_write(0, 1)?;
         trace_journal_stage(
             "lease_verify_before_open",
             self.directory_guard.verify_path(),
@@ -388,6 +410,9 @@ impl EditJournal {
         if metadata.len() != 0 {
             return Err(JournalError::CorruptRecord);
         }
+        // Never retain the state lock while acquiring a per-record lock.
+        #[cfg(windows)]
+        drop(admission);
         trace_journal_stage(
             "lease_lock_exclusive",
             file.try_lock_exclusive().map_err(|error| {
@@ -440,6 +465,8 @@ impl EditJournal {
             _directory_guards: vec![state_guard, root_guard],
             scope,
             protector: Box::new(protector),
+            #[cfg(windows)]
+            admission: None,
         })
     }
 
@@ -463,7 +490,41 @@ impl EditJournal {
             _directory_guards: vec![state_guard, root_guard],
             scope,
             protector: Box::new(protector),
+            #[cfg(windows)]
+            admission: None,
         })
+    }
+
+    /// Join cooperating Windows v1/v2 writers without changing legacy format.
+    /// A coordinator for a different physical state root cannot be attached.
+    #[cfg(windows)]
+    pub(crate) fn with_admission(
+        mut self,
+        admission: Arc<crate::recovery_admission::RecoveryAdmission>,
+    ) -> Result<Self, JournalError> {
+        let state = self._directory_guards.first().ok_or(JournalError::Io)?;
+        state.verify_path()?;
+        if state.pinned.identity() != admission.state_identity() {
+            return Err(JournalError::ScopeMismatch);
+        }
+        self.admission = Some(admission);
+        Ok(self)
+    }
+
+    #[cfg(windows)]
+    fn reserve_write(
+        &self,
+        bytes: u64,
+        entries: usize,
+    ) -> Result<Option<crate::recovery_admission::RecoveryAdmissionLease>, JournalError> {
+        self.admission
+            .as_ref()
+            .map(|admission| {
+                admission
+                    .try_reserve(&self.scope, bytes, entries)
+                    .map_err(admission_error)
+            })
+            .transpose()
     }
 
     /// Durably append a complete file snapshot. The temporary file is synced,
@@ -477,14 +538,6 @@ impl EditJournal {
         remote: Option<RemoteEditBaseline>,
         content: &[u8],
     ) -> Result<LocalEditMetadata, JournalError> {
-        // The agent is the sole writer for a selected profile. Serialize
-        // journal appends process-wide so concurrent close callbacks cannot
-        // each pass a stale quota scan and overrun the recovery bound.
-        static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _append_guard = APPEND_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .map_err(|_| JournalError::Io)?;
         validate_edit(
             &self.scope,
             generation,
@@ -493,6 +546,15 @@ impl EditJournal {
             &remote,
             content,
         )?;
+        // Coordinated writers retain state admission before the append mutex.
+        // Legacy-only callers keep the existing per-process serialization.
+        #[cfg(windows)]
+        let _admission = self.reserve_write(MAX_SEALED_BYTES as u64, 2)?;
+        static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _append_guard = APPEND_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| JournalError::Io)?;
         let existing = self.recover_all()?;
         if existing.incomplete_staging_files != 0 {
             // We do not know whether a crashed staging file contains the
@@ -1032,6 +1094,8 @@ impl EditJournal {
     }
 
     fn append_recovery_event(&self, event: RecoveryEvent) -> Result<(), JournalError> {
+        #[cfg(windows)]
+        let _admission = self.reserve_write(MAX_RECOVERY_EVENT_BYTES as u64, 2)?;
         let body =
             Zeroizing::new(serde_json::to_vec(&event).map_err(|_| JournalError::InvalidEdit)?);
         if body.len() > MAX_RECOVERY_EVENT_BYTES {
@@ -1121,6 +1185,19 @@ impl EditJournal {
             return Err(JournalError::LimitExceeded);
         }
         Ok((sealed, associated_data(&self.scope, record_id)?))
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn admission_error(error: crate::streamed_store::StoreError) -> JournalError {
+    use crate::streamed_store::StoreError;
+    match error {
+        StoreError::Quota => JournalError::LimitExceeded,
+        StoreError::ScanLimit => JournalError::ScanLimit,
+        StoreError::Busy => JournalError::InvalidState,
+        StoreError::CorruptEvidence | StoreError::IncompleteEvidence => JournalError::CorruptRecord,
+        StoreError::Invalid => JournalError::InvalidScope,
+        _ => JournalError::Io,
     }
 }
 
@@ -2695,9 +2772,34 @@ mod tests {
         assert!(!replacement.exists());
     }
 
+    struct ReparseFixture(Option<tempfile::TempDir>);
+    impl ReparseFixture {
+        fn new(prefix: &str) -> Self {
+            let temp = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self(Some(temp))
+        }
+        fn path(&self) -> &std::path::Path {
+            self.0.as_ref().unwrap().path()
+        }
+    }
+    impl Drop for ReparseFixture {
+        fn drop(&mut self) {
+            if std::thread::panicking()
+                && let Some(temp) = self.0.take()
+            {
+                let _ = temp.keep();
+                eprintln!("journal_reparse_fixture=RETAINED_AFTER_FAILURE");
+            }
+        }
+    }
     #[test]
     fn recovery_rejects_a_reparse_record_instead_of_reading_its_target() {
-        let temp = private_tempdir();
+        let temp = ReparseFixture::new("raiun-journal-reparse-record-");
         let journal = EditJournal::open(temp.path(), scope(), TestProtector::new()).unwrap();
         let record = journal
             .append_edit(
@@ -2731,19 +2833,38 @@ mod tests {
                     if matches!(
                         error.kind(),
                         std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
-                    ) =>
+                    ) || error.raw_os_error() == Some(1314) =>
                 {
-                    println!("journal_reparse_record_test=SKIPPED_OS_LINK_CAPABILITY_UNAVAILABLE");
+                    println!(
+                        "journal_reparse_record_test=SKIPPED_OS_LINK_CAPABILITY_UNAVAILABLE kind={:?} native={:?}",
+                        error.kind(),
+                        error.raw_os_error()
+                    );
                     return;
                 }
-                Err(error) => panic!("create synthetic reparse record: {error}"),
+                Err(error) => panic!(
+                    "stage=create_file_link kind={:?} native={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                ),
             }
         }
         #[cfg(any(unix, windows))]
         println!("journal_reparse_record_test=CREATED");
 
-        let reopened = EditJournal::open(temp.path(), scope(), TestProtector::new()).unwrap();
-        assert_eq!(reopened.recover_all(), Err(JournalError::CorruptRecord));
+        let reopened = EditJournal::open(temp.path(), scope(), TestProtector::new())
+            .expect("stage=reopen_journal_after_file_link");
+        let recovery = reopened.recover_all();
+        println!(
+            "journal_reparse_record_test=recovery_error:{:?}",
+            recovery.as_ref().err()
+        );
+        let rejected = matches!(recovery, Err(JournalError::CorruptRecord));
+        println!("journal_reparse_record_test=recovery_rejected:{rejected}");
+        assert!(
+            rejected,
+            "stage=recover_record must refuse reparse evidence"
+        );
         assert_eq!(
             fs::read(&external_target).unwrap(),
             b"must never be opened through a reparse point"
@@ -2778,7 +2899,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn opening_a_reparse_private_state_directory_fails_closed() {
-        let temp = private_tempdir();
+        let temp = ReparseFixture::new("raiun-journal-reparse-directory-");
         let target = temp.path().join("ordinary-target");
         fs::create_dir(&target).unwrap();
         let link = temp.path().join("state-link");
@@ -2788,13 +2909,32 @@ mod tests {
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
-                ) =>
+                ) || error.raw_os_error() == Some(1314) =>
             {
+                println!(
+                    "journal_reparse_directory_test=SKIPPED_OS_LINK_CAPABILITY_UNAVAILABLE kind={:?} native={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                );
                 return;
             }
-            Err(error) => panic!("create synthetic reparse directory: {error}"),
+            Err(error) => panic!(
+                "stage=create_directory_link kind={:?} native={:?}",
+                error.kind(),
+                error.raw_os_error()
+            ),
         }
-        assert!(EditJournal::open(&link, scope(), TestProtector::new()).is_err());
+        let opened = EditJournal::open(&link, scope(), TestProtector::new());
+        println!(
+            "journal_reparse_directory_test=open_error:{:?}",
+            opened.as_ref().err()
+        );
+        let rejected = opened.is_err();
+        println!("journal_reparse_directory_test=directory_rejected:{rejected}");
+        assert!(
+            rejected,
+            "stage=open_linked_directory must refuse reparse state"
+        );
         assert!(fs::read_dir(&target).unwrap().next().is_none());
     }
 }

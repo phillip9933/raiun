@@ -845,3 +845,34 @@ fn pending_offline_status_matches_only_current_path_and_version_after_cache_reop
     assert_eq!(fixture.catalog.upserts.load(Ordering::Relaxed), 0);
     assert!(cache.content_record(&scope, &version).is_ok());
 }
+
+#[test]
+fn device_quota_updates_persist_and_revoked_backends_cannot_change_them() {
+    let f = fixture(true);
+    let old = f.backend.device_cache_usage().unwrap().quota_bytes;
+    assert!(f.backend.set_device_cache_quota(0).is_err());
+    assert_eq!(f.backend.device_cache_usage().unwrap().quota_bytes, old);
+    f.backend
+        .set_device_cache_quota(5 * 1024 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(
+        f.backend.device_cache_usage().unwrap().quota_bytes,
+        5 * 1024 * 1024 * 1024
+    );
+    f.backend.revoke();
+    assert!(
+        f.backend
+            .set_device_cache_quota(1024 * 1024 * 1024)
+            .is_err()
+    );
+    assert_eq!(
+        f.backend
+            .cache
+            .as_ref()
+            .unwrap()
+            .usage()
+            .unwrap()
+            .quota_bytes,
+        5 * 1024 * 1024 * 1024
+    );
+}

@@ -8,7 +8,7 @@ Android source, Gradle configuration, dependency locks, tests and scripts live i
 
 Desktop source, Cargo/npm locks, Linux/Windows packaging and app-specific docs live in `apps/desktop`. Run Rust and desktop commands from that directory; its Tauri UI has its own `desktop-shell` project. Start with the [desktop setup](apps/desktop/README.md). Linux and Windows x86_64 are the released Beta platforms; portable tests on other systems do not imply a released macOS app. The [monorepo guide](docs/MONOREPO.md) describes platform boundaries.
 
-Shared branding and product design references live in `design/`. Keep native UI code, dependencies and platform behavior inside the app that uses them. Introduce shared source packages only when actual consumers need them.
+Shared branding and product design references live in `design/`. Use the [Raiun design reference](design/raiun/DESIGN-SYSTEM.md), [component catalog](design/raiun/reference.html) and evidence-based scorecard for UI reviews. Desktop consumes the canonical palette through generated CSS; run `python3 apps/desktop/scripts/design-tokens.py --check` after visual changes. Regenerate consumers with `--write` after deliberate token edits. Grade Linux, Windows and Android separately; unverified states do not count as passes. Keep native UI code, dependencies and platform behavior inside the app that uses them. Introduce shared source packages only when actual consumers need them.
 
 ## Change expectations
 
@@ -17,6 +17,20 @@ Prioritize data safety, security, correctness and privacy, then usability and ma
 Run checks appropriate to the change. Review visual diffs deliberately, preserve translations and document checks that could not run. Platform workflows live in `.github/workflows` at the root; commands and artifact paths must point to the correct app. See [Releasing](docs/RELEASING.md).
 
 Keep credentials, private signing material, local account data, build products and recovery records out of Git. Tests use synthetic files and accounts. See [Privacy](PRIVACY.md).
+
+## Commit and pull request titles
+
+Use Conventional Commits: `type(scope): summary`. Use a lowercase type such as
+`feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci` or `chore`, with
+a useful scope such as `android`, `desktop`, `windows`, `linux` or `shared`.
+Write a short imperative summary describing the actual change, without a final
+period. For example: `fix(windows): restore saved sign-in after restart`.
+Use `!` and a `BREAKING CHANGE:` explanation only for an actual breaking change.
+
+Apply the same format to PR titles so squash commits remain consistent. Use the
+correct GitHub-linked author identity; naming does not replace attribution.
+Correct unpublished local messages before pushing when safe, preserving source
+and validation provenance. Do not rewrite published history solely for naming.
 
 ## Reports and AI usage
 

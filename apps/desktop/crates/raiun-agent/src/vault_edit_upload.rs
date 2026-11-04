@@ -67,7 +67,7 @@ impl Binding {
             || entry.is_directory()
             || entry.root_relative_path() == "/"
             || !capture::strong_etag(entry.etag())
-            || self.body_len > capture::MAX_BODY_BYTES
+            || self.body_len as u64 > self.capture.body_limit()
             || self.body_sha256 == [0; 32]
         {
             return Err(Error::Invalid);
@@ -80,6 +80,9 @@ impl Binding {
         reference: &CaptureRef,
         original: &Entry,
     ) -> Result<Self> {
+        if reference.is_streamed() {
+            return Err(Error::Foreign);
+        }
         let id = CaptureId::new(reference.id()).map_err(|_| Error::Invalid)?;
         let retained =
             capture::reopen_for_recovery(body_store, scope, &id).map_err(|error| match error {
@@ -97,6 +100,33 @@ impl Binding {
             original: original.clone(),
             body_len: retained.bytes_for_recovery().len(),
             body_sha256: Sha256::digest(retained.bytes_for_recovery()).into(),
+        };
+        binding.validate()?;
+        Ok(binding)
+    }
+    #[cfg(windows)]
+    fn from_streamed(
+        scope: &Scope,
+        reference: &CaptureRef,
+        original: &Entry,
+        retained: &super::windows_vault_streamed_edit::AuthenticatedStreamedCapture,
+    ) -> Result<Self> {
+        let descriptor = retained.descriptor();
+        if !reference.is_streamed()
+            || descriptor.scope() != scope
+            || descriptor.id() != reference.id()
+            || retained.frame() != reference.frame()
+            || descriptor.baseline().opaque_file() != original.opaque()
+            || descriptor.baseline().strong_etag() != original.etag()
+        {
+            return Err(Error::Foreign);
+        }
+        let binding = Self {
+            scope: scope.clone(),
+            capture: reference.clone(),
+            original: original.clone(),
+            body_len: usize::try_from(descriptor.len()).map_err(|_| Error::Invalid)?,
+            body_sha256: descriptor.sha256(),
         };
         binding.validate()?;
         Ok(binding)
@@ -458,6 +488,66 @@ impl UploadAttempt {
             failed: false,
         })
     }
+    #[cfg(windows)]
+    pub(crate) fn initialize_streamed(
+        store: &impl Store,
+        scope: &Scope,
+        reference: &CaptureRef,
+        original: &Entry,
+        retained: &super::windows_vault_streamed_edit::AuthenticatedStreamedCapture,
+    ) -> Result<Self> {
+        let binding = Binding::from_streamed(scope, reference, original, retained)?;
+        let document = Document {
+            version: VERSION,
+            revision: 1,
+            binding,
+            state: State::NeverAttempted {},
+        };
+        let raw = encode(&document)?;
+        let key = document.binding.locator()?;
+        store
+            .compare_exchange(&key, None, &raw)
+            .map_err(|_| Error::Persistence)?;
+        if store
+            .load(&key)
+            .map_err(|_| Error::Persistence)?
+            .as_deref()
+            .map(Vec::as_slice)
+            != Some(raw.as_slice())
+        {
+            return Err(Error::Persistence);
+        }
+        Ok(Self {
+            document,
+            raw,
+            failed: false,
+        })
+    }
+    #[cfg(windows)]
+    pub(crate) fn reopen_streamed(
+        store: &impl Store,
+        scope: &Scope,
+        reference: &CaptureRef,
+        original: &Entry,
+        retained: &super::windows_vault_streamed_edit::AuthenticatedStreamedCapture,
+    ) -> Result<Self> {
+        let binding = Binding::from_streamed(scope, reference, original, retained)?;
+        let raw = store
+            .load(&binding.locator()?)
+            .map_err(|_| Error::Persistence)?
+            .ok_or(Error::Missing)?;
+        let document = decode(&raw, &binding)?;
+        let interrupted = document.state == (State::Attempting {});
+        let mut value = Self {
+            document,
+            raw,
+            failed: false,
+        };
+        if interrupted {
+            value.commit(store, State::Uncertain {})?;
+        }
+        Ok(value)
+    }
     /// An interrupted attempt is durably uncertain before returning; it can
     /// never mint a fresh attempt ticket or silently replay an HTTP mutation.
     pub(crate) fn reopen(
@@ -583,6 +673,37 @@ impl UploadAttempt {
             etag: readback_etag.into(),
             body_len: body.len(),
             body_sha256: Sha256::digest(body).into(),
+        };
+        validate_evidence(&self.document.binding, &evidence)?;
+        self.commit(store, State::ReadbackRecorded { evidence })
+    }
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_streamed_readback_evidence(
+        &mut self,
+        store: &impl Store,
+        ticket: FreshAttempt,
+        resource_id: &str,
+        put_etag: &str,
+        readback_etag: &str,
+        length: u64,
+        sha256: [u8; 32],
+    ) -> Result<()> {
+        self.consume(ticket)?;
+        if !self.document.binding.capture.is_streamed()
+            || resource_id != self.document.binding.original.remote_id()
+            || put_etag != readback_etag
+            || !capture::strong_etag(readback_etag)
+            || readback_etag == self.document.binding.original.etag()
+            || length != self.document.binding.body_len as u64
+        {
+            return Err(Error::Conflict);
+        }
+        let evidence = HistoricalReadbackEvidence {
+            resource_id: resource_id.into(),
+            etag: readback_etag.into(),
+            body_len: usize::try_from(length).map_err(|_| Error::Invalid)?,
+            body_sha256: sha256,
         };
         validate_evidence(&self.document.binding, &evidence)?;
         self.commit(store, State::ReadbackRecorded { evidence })

@@ -1,0 +1,31 @@
+{
+  "github_license_sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+  "nuget_nupkg_bytes": 8973762,
+  "nuget_nupkg_sha256": "56c9f26bdd07916a2d1949fb58a5c7e434dfa1173577dca879206050c4e718db",
+  "nuget_package": "Microsoft.Web.WebView2",
+  "nuget_version": "1.0.3800.47",
+  "official_license_page": "https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3800.47/License",
+  "official_package_url": "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.3800.47",
+  "rust_crates": {
+    "webview2-com": {
+      "crate_sha256": "3f89fca7a704cee10dcb3654c1dbb8941d1783132f1917358af75bec37a7d7e6",
+      "source_url": "https://github.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+      "vcs_commit": "edc2caf886175ccaebe86078c9cfe1ae2a187328",
+      "version": "0.39.1"
+    },
+    "webview2-com-macros": {
+      "crate_sha256": "67a921c1b6914c367b2b823cd4cde6f96beec77d30a939c8199bb377cf9b9b54",
+      "source_url": "https://github.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+      "vcs_commit": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+      "version": "0.8.1"
+    },
+    "webview2-com-sys": {
+      "crate_sha256": "b3a07132775117d6065853d9d1178157b8c90e228de47129d6bce2c7edebedfb",
+      "source_url": "https://github.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+      "vcs_commit": "edc2caf886175ccaebe86078c9cfe1ae2a187328",
+      "version": "0.39.1"
+    }
+  },
+  "verified_nupkg_loader_sha256": "86545b66cdb0603bc26b626fb9ad610cb6e71f28d468f5ea66df23b03dda96d5",
+  "x64_loader_sha256": "86545b66cdb0603bc26b626fb9ad610cb6e71f28d468f5ea66df23b03dda96d5"
+}

@@ -90,3 +90,63 @@ test('saved-edit pages bind export admission to account scope and auth generatio
   for (const value of [-1, 1.5, '0']) assert.throws(() => pendingWritePageIsValid({ items: [], pending_count: 0, conflict_count: 0, auth_generation: value }));
   for (const value of ['a'.repeat(63), 'A'.repeat(64), 'x'.repeat(64), 7]) assert.throws(() => pendingWritePageIsValid({ items: [], pending_count: 0, conflict_count: 0, account_scope: value }));
 });
+
+const { pendingWritePresentation, canRetryLegacyPendingWrites } = await import(
+  `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
+);
+const pendingItem = { space_id: 'space-a', root_resource_id: 'root-one', write_id: '1', path: '/file', state: 'pending', bytes: 4, created_at_unix: 1 };
+const pendingPage = items => ({ items, pending_count: items.filter(item => item.state === 'pending').length, conflict_count: items.filter(item => item.state === 'conflict').length });
+
+test('new-create states retain distinct local and uncertain labels without claiming completion', () => {
+  const states = { staged: 'Saved locally', ready: 'Queued for upload', claimed: 'Uploading', uncertain: 'Outcome uncertain', conflict: 'Needs review' };
+  for (const [create_state, label] of Object.entries(states)) {
+    const state = ['uncertain', 'conflict'].includes(create_state) ? 'conflict' : 'pending';
+    const local_handoff_acknowledged = create_state !== 'staged';
+    const page = pendingWritePageIsValid(pendingPage([{ ...pendingItem, state, create_state, local_handoff_acknowledged }]));
+    assert.equal(page.items[0].create_state, create_state);
+    assert.equal(page.items[0].local_handoff_acknowledged, local_handoff_acknowledged);
+    const presentation = pendingWritePresentation(page.items[0]);
+    assert.equal(presentation.label, label);
+    assert.doesNotMatch(presentation.label, /complete|synced|delivered|uploaded/i);
+    if (create_state === 'uncertain') assert.match(presentation.help, /may have reached the cloud.*not be retried automatically/i);
+  }
+  const unacknowledged = pendingWritePresentation({ ...pendingItem, create_state: 'claimed', local_handoff_acknowledged: false });
+  assert.equal(unacknowledged.label, 'Uploading');
+  assert.match(unacknowledged.help, /acceptance has not been confirmed/i);
+});
+
+test('optional create fields are paired, typed and consistent or reject the whole page', () => {
+  const invalid = [
+    { create_state: 'ready' }, { local_handoff_acknowledged: false },
+    { create_state: null, local_handoff_acknowledged: false },
+    { create_state: 'verified', local_handoff_acknowledged: true },
+    { create_state: 'future', local_handoff_acknowledged: true },
+    { create_state: 1, local_handoff_acknowledged: true },
+    { create_state: 'ready', local_handoff_acknowledged: 'false' },
+    { create_state: 'ready', local_handoff_acknowledged: null },
+    { create_state: 'staged', local_handoff_acknowledged: true },
+    { create_state: 'uncertain', local_handoff_acknowledged: true },
+    { state: 'conflict', create_state: 'claimed', local_handoff_acknowledged: false },
+  ];
+  for (const fields of invalid) assert.throws(() => pendingWritePageIsValid(pendingPage([pendingItem, { ...pendingItem, ...fields }])), /invalid saved-edit entry/i, JSON.stringify(fields));
+});
+
+test('any visible create suppresses legacy Space retry across mixed roots and Spaces', () => {
+  assert.equal(canRetryLegacyPendingWrites([pendingItem], 'space-a'), true);
+  assert.equal(canRetryLegacyPendingWrites([{ ...pendingItem, state: 'conflict' }], 'space-a'), false);
+  assert.equal(canRetryLegacyPendingWrites([pendingItem], 'other'), false);
+  for (const create_state of ['staged', 'ready', 'claimed', 'uncertain', 'conflict']) {
+    const create = { ...pendingItem, space_id: 'another-space', root_resource_id: 'root-two', create_state, local_handoff_acknowledged: false };
+    assert.equal(canRetryLegacyPendingWrites([pendingItem, create], 'space-a'), false);
+    assert.equal(canRetryLegacyPendingWrites([create], 'another-space'), false);
+  }
+});
+
+test('legacy Windows pages without new fields retain existing labels and retry eligibility', () => {
+  const page = pendingWritePageIsValid(pendingPage([pendingItem, { ...pendingItem, write_id: '2', state: 'conflict' }]));
+  assert.equal(page.items[0].create_state, undefined);
+  assert.equal(page.items[0].local_handoff_acknowledged, undefined);
+  assert.equal(pendingWritePresentation(page.items[0]).label, 'Waiting to upload');
+  assert.equal(pendingWritePresentation(page.items[1]).label, 'Needs review');
+  assert.equal(canRetryLegacyPendingWrites(page.items, 'space-a'), true);
+});

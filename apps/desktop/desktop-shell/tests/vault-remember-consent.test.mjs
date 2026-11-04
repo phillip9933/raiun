@@ -17,7 +17,7 @@ const cleanup = await import(`data:text/javascript;base64,${Buffer.from(ts.trans
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
 }).outputText).toString('base64')}`);
 const sourceFile = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const wanted = new Set(['confirmAccountAction', 'forgetSavedVault', 'lockVault', 'unlockVault', 'nativeVaultAccess', 'nativeVaultLockIncomplete', 'nativeVaultLockScope', 'updateNativeVaultLockCleanup', 'reconcileVaultLockStatus', 'checkVaultLockStatus', 'vaultDialog', 'nativeVaultDrivePanel']);
+const wanted = new Set(['vaultDirectoryRows', 'clearVaultBrowse', 'nativeVaultBrowseAvailable', 'confirmAccountAction', 'forgetSavedVault', 'lockVault', 'unlockVault', 'nativeVaultAccess', 'nativeVaultLockIncomplete', 'nativeVaultLockScope', 'updateNativeVaultLockCleanup', 'reconcileVaultLockStatus', 'checkVaultLockStatus', 'vaultDialog', 'nativeVaultDrivePanel']);
 const functions = new Map();
 for (const statement of sourceFile.statements) {
   if (ts.isFunctionDeclaration(statement) && statement.name && wanted.has(statement.name.text)) {
@@ -42,7 +42,7 @@ function makeHarness({ nativeMode = false, requestImpl = async () => ({}), unloc
       intent: 'manage', spaceId: 'space-a', rootPath: '/Private.vault', rootResourceId: 'root-a',
       initialized: true, unlocked: true, statusUnknown: false, loading: false,
       rememberOnDevice: true, rememberedStatus: 'known_saved', entries: [{ path: '/secret' }],
-      path: '/secret', vaultMountReady: true, editRetryBusy: false, editRetryJob: null,
+      path: '/secret', directoryBindings: new Map(), currentDirectoryBinding: null, vaultMountReady: true, editRetryBusy: false, editRetryJob: null,
       pinBusy: false, pinJob: null, generation: 11, accountEpoch: 7
     }
   };

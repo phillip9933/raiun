@@ -54,14 +54,21 @@ mod pin_snapshot_tests;
 #[cfg(test)]
 mod policy_intent_revision_tests;
 #[cfg(test)]
+mod quota_settings_tests;
+#[cfg(test)]
 mod recent_budget_tests;
 #[cfg(any(windows, test))]
 mod stage_name;
 pub use content_reader::CacheContentReader;
 mod db_owner;
 mod listing_publication;
+mod ordinary_create;
 mod schema;
 use db_owner::DbOwner;
+pub use ordinary_create::{
+    OrdinaryCreateClaim, OrdinaryCreateCounts, OrdinaryCreatePage, OrdinaryCreateReceipt,
+    OrdinaryCreateRequest, OrdinaryCreateState,
+};
 
 // This is an opt-in Windows storage adapter test fixture only. The production
 // cache remains unavailable on non-Unix until all cache object paths have a
@@ -92,7 +99,7 @@ pub use windows_download_stage::{
     VerifiedPlaintextDownload,
 };
 
-const CACHE_VERSION: u32 = 8;
+const CACHE_VERSION: u32 = 10;
 const MAX_SCOPE_FIELD: usize = 1024;
 const MAX_PATH_BYTES: usize = 32 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 4096;
@@ -105,6 +112,8 @@ const MAX_CONTENT_RECORDS: usize = 1_000_000;
 const MAX_PIN_RECORDS: usize = 10_000;
 const MAX_TOTAL_PIN_ITEMS: usize = 1_000_000;
 const MAX_CONTENT_BYTES: u64 = 1 << 40;
+/// User-configurable automatic-cache allowance minimum (256 MiB).
+pub const MIN_CACHE_QUOTA_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_CIPHERTEXT_PINS: usize = 10_000;
 const MAX_CIPHERTEXT_PIN_GENERATIONS: usize = 100_000;
 const MAX_CIPHERTEXT_PIN_ITEMS: usize = 1_000_000;
@@ -613,6 +622,15 @@ pub struct PendingWriteItem {
     pub state: WriteState,
     pub bytes: u64,
     pub created_at_unix: i64,
+    /// Local durable-create lifecycle, not remote completion. Legacy writes
+    /// have no handoff and retain their existing recovery workflow.
+    pub create_handoff: Option<PendingCreateLifecycle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingCreateLifecycle {
+    pub state: OrdinaryCreateState,
+    pub local_handoff_acknowledged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -644,6 +662,8 @@ pub struct EvictionReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CacheUsage {
     pub quota_bytes: u64,
+    /// Logical content/inventory bytes, not filesystem allocated blocks or a
+    /// Windows device-wide Cloud Files snapshot.
     pub used_bytes: u64,
     pub pinned_bytes: u64,
     pub protected_bytes: u64,
@@ -710,7 +730,7 @@ struct Inner {
     root: PathBuf,
     content_dir: PathBuf,
     db: Mutex<DbOwner>,
-    quota_bytes: u64,
+    quota_bytes: AtomicU64,
     #[cfg(windows)]
     windows_content: windows_blob::WindowsBlobStore,
     #[cfg(windows)]
@@ -758,12 +778,13 @@ impl Cache {
             prepare_db_file(&db_path)?;
             let db = Connection::open(&db_path).map_err(db_error)?;
             schema::initialize(&db, schema::JournalMode::Wal)?;
+            let quota_bytes = load_or_seed_quota(&db, quota_bytes)?;
             let cache = Self {
                 inner: Arc::new(Inner {
                     root,
                     content_dir,
                     db: Mutex::new(DbOwner::Portable(db)),
-                    quota_bytes,
+                    quota_bytes: AtomicU64::new(quota_bytes),
                 }),
             };
             cache.remove_unindexed_content()?;
@@ -1321,6 +1342,39 @@ impl Cache {
         expected_revision: u64,
         encrypted_target: &str,
     ) -> Result<CiphertextWriteBuild, CacheError> {
+        self.begin_ciphertext_cancel_ack_compaction_for(
+            scope,
+            id,
+            expected_revision,
+            encrypted_target,
+            CiphertextWriteOperation::CreateFile,
+        )
+    }
+
+    pub fn begin_ciphertext_directory_cancel_ack_compaction(
+        &self,
+        scope: &CacheScope,
+        id: &str,
+        expected_revision: u64,
+        encrypted_target: &str,
+    ) -> Result<CiphertextWriteBuild, CacheError> {
+        self.begin_ciphertext_cancel_ack_compaction_for(
+            scope,
+            id,
+            expected_revision,
+            encrypted_target,
+            CiphertextWriteOperation::CreateDirectory,
+        )
+    }
+
+    fn begin_ciphertext_cancel_ack_compaction_for(
+        &self,
+        scope: &CacheScope,
+        id: &str,
+        expected_revision: u64,
+        encrypted_target: &str,
+        selected_operation: CiphertextWriteOperation,
+    ) -> Result<CiphertextWriteBuild, CacheError> {
         require_ciphertext_scope(scope)?;
         validate_ciphertext_write_id(id)?;
         if expected_revision == 0 || expected_revision >= i64::MAX as u64 {
@@ -1351,7 +1405,7 @@ impl Cache {
         };
         if revision != i64_from_u64(expected_revision)?
             || current_target != target_key
-            || decode_ciphertext_write_operation(operation)? != CiphertextWriteOperation::CreateFile
+            || decode_ciphertext_write_operation(operation)? != selected_operation
             || decode_ciphertext_write_state(state)? != CiphertextWriteState::CancelledReceipt
         {
             return Err(CacheError::Conflict);
@@ -1367,7 +1421,7 @@ impl Cache {
             expected_revision: Some(expected_revision),
             target_key: current_target.clone(),
             plaintext_len: 0,
-            operation: CiphertextWriteOperation::CreateFile,
+            operation: selected_operation,
             publish_state: CiphertextWriteState::AcknowledgedReceipt,
             parent_key,
             parent_operation_key,
@@ -2773,8 +2827,80 @@ impl Cache {
         }
         tx.commit().map_err(db_error)?;
         drop(db);
-        let _ = self.evict_recent(self.quota_bytes());
+        let _ = self.evict_to_quota();
         Ok(())
+    }
+
+    /// Retain the exact queued directory as a cancellation receipt instead of
+    /// deleting its only restart witness. The same transaction excludes a
+    /// concurrent dispatch or child registration. The receipt is not clean or
+    /// acknowledged until native absence and separate custody are durable.
+    pub fn begin_ciphertext_directory_cancel_receipt(
+        &self,
+        scope: &CacheScope,
+        id: &str,
+        revision: u64,
+        encrypted_target: &str,
+    ) -> Result<(), CacheError> {
+        require_ciphertext_scope(scope)?;
+        validate_ciphertext_write_id(id)?;
+        if revision == 0 {
+            return Err(CacheError::Conflict);
+        }
+        let target_key = ciphertext_target_key(encrypted_target)?;
+        // A queued directory retains its original dependency identity across
+        // local subtree retarget revisions. Children bind to that identity.
+        let dependency_key = ciphertext_operation_key(id, 1)?;
+        let mut db = self.lock_db()?;
+        validate_registered_scope(&db, scope)?;
+        let tx = db.transaction().map_err(db_error)?;
+        let state: Option<i64> = tx
+            .query_row(
+                "SELECT state FROM ciphertext_writes WHERE scope_key=?1 AND write_id=?2 AND revision=?3 AND operation=?4 AND target_key=?5 AND plaintext_len=0 AND dependency_key=?6",
+                params![scope.key, id, i64_from_u64(revision)?, CiphertextWriteOperation::CreateDirectory as i64, target_key, dependency_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let state = state.ok_or(CacheError::Conflict)?;
+        if !matches!(
+            decode_ciphertext_write_state(state)?,
+            CiphertextWriteState::NeverAttempted | CiphertextWriteState::CancelledReceipt
+        ) {
+            return Err(CacheError::Conflict);
+        }
+        let dependents: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ciphertext_writes WHERE scope_key=?1 AND parent_operation_key=?2)",
+                params![scope.key, dependency_key],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if dependents {
+            return Err(CacheError::Conflict);
+        }
+        if state == CiphertextWriteState::NeverAttempted as i64 {
+            let receipts: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM ciphertext_writes WHERE scope_key=?1 AND state IN (?2,?3)",
+                    params![scope.key, CiphertextWriteState::CancelledReceipt as i64, CiphertextWriteState::AcknowledgedReceipt as i64],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            if receipts < 0 || receipts as usize >= MAX_CANCEL_ACK_RECEIPTS_PER_SCOPE {
+                return Err(CacheError::LimitExceeded);
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE ciphertext_writes SET state=?7 WHERE scope_key=?1 AND write_id=?2 AND revision=?3 AND operation=?4 AND state=?5 AND target_key=?6",
+                    params![scope.key, id, i64_from_u64(revision)?, CiphertextWriteOperation::CreateDirectory as i64, CiphertextWriteState::NeverAttempted as i64, target_key, CiphertextWriteState::CancelledReceipt as i64],
+                )
+                .map_err(db_error)?;
+            if changed != 1 {
+                return Err(CacheError::Conflict);
+            }
+        }
+        tx.commit().map_err(db_error)
     }
 
     /// Atomically claim one explicit retry of a crash-left file create. The
@@ -3231,7 +3357,7 @@ impl Cache {
             });
         }
         drop(db);
-        let _ = self.evict_recent(self.quota_bytes());
+        let _ = self.evict_to_quota();
         Ok(())
     }
 
@@ -3274,7 +3400,7 @@ impl Cache {
         }
         tx.commit().map_err(db_error)?;
         drop(db);
-        let _ = self.evict_recent(self.quota_bytes());
+        let _ = self.evict_to_quota();
         Ok(())
     }
 
@@ -3325,7 +3451,7 @@ impl Cache {
         }
         tx.commit().map_err(db_error)?;
         drop(db);
-        let _ = self.evict_recent(self.quota_bytes());
+        let _ = self.evict_to_quota();
         Ok(())
     }
 
@@ -3963,7 +4089,40 @@ impl Cache {
     }
 
     pub fn quota_bytes(&self) -> u64 {
-        self.inner.quota_bytes
+        self.try_quota_bytes()
+            .unwrap_or_else(|_| self.inner.quota_bytes.load(Ordering::Acquire))
+    }
+
+    /// Read the durable configured quota, propagating database failures.
+    /// Use this fallible form for admission, eviction planning, or decisions
+    /// that can alter cache contents; `quota_bytes` is retained for displays.
+    pub fn try_quota_bytes(&self) -> Result<u64, CacheError> {
+        let db = self.lock_db()?;
+        let quota_bytes = configured_quota_bytes(&db)?;
+        self.inner.quota_bytes.store(quota_bytes, Ordering::Release);
+        Ok(quota_bytes)
+    }
+
+    /// Persist a configurable automatic-cache admission allowance. Saving a
+    /// limit never evicts immediately; call `evict_to_quota` separately and
+    /// report its outcome independently. Existing handles read the shared DB
+    /// setting on every getter/admission/usage operation.
+    pub fn set_quota_bytes(&self, quota_bytes: u64) -> Result<(), CacheError> {
+        if !(MIN_CACHE_QUOTA_BYTES..=MAX_CONTENT_BYTES).contains(&quota_bytes) {
+            return Err(CacheError::LimitExceeded);
+        }
+        #[cfg(windows)]
+        let _lease = self.inner.windows_content.publication_lease()?;
+        #[cfg(not(windows))]
+        let _lease = self.lock_content_deletion()?;
+        let db = self.lock_db()?;
+        db.execute(
+            "INSERT INTO cache_settings(setting,value) VALUES('quota_bytes',?1) ON CONFLICT(setting) DO UPDATE SET value=excluded.value",
+            params![i64_from_u64(quota_bytes)?],
+        )
+        .map_err(db_error)?;
+        self.inner.quota_bytes.store(quota_bytes, Ordering::Release);
+        Ok(())
     }
 
     /// Read-only usage accounting. This does not trigger eviction or remove
@@ -3992,12 +4151,14 @@ impl Cache {
             }
             _ => (used_bytes, protected_bytes),
         };
+        let quota_bytes = configured_quota_bytes(&db)?;
+        self.inner.quota_bytes.store(quota_bytes, Ordering::Release);
         Ok(CacheUsage {
-            quota_bytes: self.inner.quota_bytes,
+            quota_bytes,
             used_bytes,
             pinned_bytes,
             protected_bytes,
-            over_quota: used_bytes > self.inner.quota_bytes,
+            over_quota: used_bytes > quota_bytes,
         })
     }
 
@@ -4823,10 +4984,12 @@ impl Cache {
                 };
                 // Reusing an indexed immutable version allocates no new bytes.
                 // Existing Dirty/Recovery content may legitimately exceed quota.
+                let quota_bytes = configured_quota_bytes(&db)?;
+                self.inner.quota_bytes.store(quota_bytes, Ordering::Release);
                 if !existing
                     && used
                         .checked_add(expected_len)
-                        .is_none_or(|total| total > self.inner.quota_bytes)
+                        .is_none_or(|total| total > quota_bytes)
                 {
                     return Err(CacheError::InsufficientSpace);
                 }
@@ -5185,7 +5348,7 @@ impl Cache {
         if max_candidates == 0 || max_candidates > 64 {
             return Err(CacheError::LimitExceeded);
         }
-        self.evict_recent_with_limits(target_quota, max_candidates, || {})
+        self.evict_recent_with_limits(Some(target_quota), max_candidates, || {})
     }
 
     fn evict_recent_with_hook(
@@ -5193,12 +5356,20 @@ impl Cache {
         target_quota: u64,
         after_commit: impl FnMut(),
     ) -> Result<EvictionReport, CacheError> {
-        self.evict_recent_with_limits(target_quota, MAX_CONTENT_RECORDS, after_commit)
+        self.evict_recent_with_limits(Some(target_quota), MAX_CONTENT_RECORDS, after_commit)
+    }
+
+    fn evict_recent_configured_with_limits(
+        &self,
+        max_candidates: usize,
+        after_commit: impl FnMut(),
+    ) -> Result<EvictionReport, CacheError> {
+        self.evict_recent_with_limits(None, max_candidates, after_commit)
     }
 
     fn evict_recent_with_limits(
         &self,
-        target_quota: u64,
+        target_quota: Option<u64>,
         max_candidates: usize,
         mut after_commit: impl FnMut(),
     ) -> Result<EvictionReport, CacheError> {
@@ -5217,6 +5388,13 @@ impl Cache {
         #[cfg(not(windows))]
         let _deletion_lease = self.lock_content_deletion()?;
         let mut db = self.lock_db()?;
+        let target_quota = match target_quota {
+            Some(target) => target,
+            None => configured_quota_bytes(&db)?,
+        };
+        self.inner
+            .quota_bytes
+            .store(target_quota, Ordering::Release);
         let mut used = total_content_bytes(&db)?;
         #[cfg(windows)]
         if let (Some(store), Some(lease)) = (windows_store, windows_lease.as_ref()) {
@@ -5331,7 +5509,7 @@ impl Cache {
     }
 
     pub fn evict_to_quota(&self) -> Result<EvictionReport, CacheError> {
-        self.evict_recent(self.inner.quota_bytes)
+        self.evict_recent_configured_with_limits(MAX_CONTENT_RECORDS, || {})
     }
 
     /// Pin a complete recursive metadata manifest. Every directory snapshot in
@@ -5718,8 +5896,8 @@ impl Cache {
             .map_err(db_error)?;
         let same_target_pending: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM writes WHERE scope_key=?1 AND parent_id=?2 AND name=?3 AND state IN (0,1))",
-                params![scope.key, parent_resource_id, name],
+                "SELECT EXISTS(SELECT 1 FROM writes WHERE scope_key=?1 AND state IN (0,1) AND ((parent_id=?2 AND name=?3) OR path=?4))",
+                params![scope.key, parent_resource_id, name, logical_path],
                 |row| row.get(0),
             )
             .map_err(db_error)?;
@@ -5786,8 +5964,8 @@ impl Cache {
             .map_err(db_error)?;
         let same_target_pending: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM writes WHERE scope_key=?1 AND parent_id=?2 AND name=?3 AND state IN (0,1))",
-                params![scope.key, parent_resource_id, name],
+                "SELECT EXISTS(SELECT 1 FROM writes WHERE scope_key=?1 AND state IN (0,1) AND ((parent_id=?2 AND name=?3) OR path=?4))",
+                params![scope.key, parent_resource_id, name, logical_path],
                 |row| row.get(0),
             )
             .map_err(db_error)?;
@@ -5858,6 +6036,10 @@ impl Cache {
         for row in rows {
             let (id, parent, name, path, resource, base_kind, base_etag, key, state, created) =
                 row.map_err(db_error)?;
+            if let Some(receipt) = ordinary_create::load(&db, scope, id)? {
+                out.push(receipt.write);
+                continue;
+            }
             let (resource_id, etag, protection): (String, String, i64) = db
                 .query_row(
                     "SELECT resource_id,etag,protection FROM contents WHERE content_key=?1",
@@ -5959,6 +6141,7 @@ impl Cache {
                 .ok_or(CacheError::NotFound)?;
             let (id, base_kind, base_etag, old_resource, state, old_content_key, created_at_unix) =
                 existing;
+            ordinary_create::refuse_ledger_write(&db, id)?;
             let base_matches = match (&base, base_kind) {
                 (WriteCondition::Absent, 0) => base_etag.is_empty(),
                 (WriteCondition::Match(expected), 1) => expected == &base_etag,
@@ -6207,12 +6390,13 @@ impl Cache {
         }.map_err(db_error)?;
         let mut statement = match origin {
             Some(_) => db.prepare(
-                "SELECT s.space_id,s.root_resource_id,w.id,w.path,w.state,c.byte_len,w.created_at FROM writes w JOIN scopes s ON s.scope_key=w.scope_key JOIN contents c ON c.content_key=w.content_key AND c.scope_key=w.scope_key WHERE s.origin=?1 AND s.account_id=?2 AND s.protection=?3 AND w.state IN (0,1) AND w.id>?4 ORDER BY w.id LIMIT ?5",
+                "SELECT s.space_id,s.root_resource_id,w.id,w.path,w.state,c.byte_len,w.created_at,s.origin,s.account_id FROM writes w JOIN scopes s ON s.scope_key=w.scope_key JOIN contents c ON c.content_key=w.content_key AND c.scope_key=w.scope_key WHERE s.origin=?1 AND s.account_id=?2 AND s.protection=?3 AND w.state IN (0,1) AND w.id>?4 ORDER BY w.id LIMIT ?5",
             ),
             None => db.prepare(
-                "SELECT s.space_id,s.root_resource_id,w.id,w.path,w.state,c.byte_len,w.created_at FROM writes w JOIN scopes s ON s.scope_key=w.scope_key JOIN contents c ON c.content_key=w.content_key AND c.scope_key=w.scope_key WHERE s.account_id=?1 AND s.protection=?2 AND w.state IN (0,1) AND w.id>?3 ORDER BY w.id LIMIT ?4",
+                "SELECT s.space_id,s.root_resource_id,w.id,w.path,w.state,c.byte_len,w.created_at,s.origin,s.account_id FROM writes w JOIN scopes s ON s.scope_key=w.scope_key JOIN contents c ON c.content_key=w.content_key AND c.scope_key=w.scope_key WHERE s.account_id=?1 AND s.protection=?2 AND w.state IN (0,1) AND w.id>?3 ORDER BY w.id LIMIT ?4",
             ),
         }.map_err(db_error)?;
+        let with_lifecycle = |row: &rusqlite::Row<'_>| pending_write_lifecycle_from_row(&db, row);
         let rows = match origin {
             Some(origin) => statement.query_map(
                 params![
@@ -6222,7 +6406,7 @@ impl Cache {
                     after,
                     (limit + 1) as i64
                 ],
-                pending_write_item_from_row,
+                with_lifecycle,
             ),
             None => statement.query_map(
                 params![
@@ -6231,7 +6415,7 @@ impl Cache {
                     after,
                     (limit + 1) as i64
                 ],
-                pending_write_item_from_row,
+                with_lifecycle,
             ),
         }
         .map_err(db_error)?;
@@ -6416,6 +6600,7 @@ impl Cache {
             path,
             state: write_state,
             bytes: copied,
+            create_handoff: None,
             created_at_unix: {
                 let db = self.lock_db()?;
                 db.query_row(
@@ -6449,6 +6634,7 @@ impl Cache {
     ) -> Result<(), CacheError> {
         let db = self.lock_db()?;
         validate_registered_scope(&db, scope)?;
+        ordinary_create::refuse_ledger_write(&db, id)?;
         let changed = db
             .execute(
                 "UPDATE writes SET state=?3 WHERE scope_key=?1 AND id=?2",
@@ -8017,7 +8203,44 @@ fn pending_write_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pend
         state: decode_write_state(state).map_err(|_| rusqlite::Error::InvalidQuery)?,
         bytes: bytes.max(0) as u64,
         created_at_unix: row.get(6)?,
+        create_handoff: None,
     })
+}
+fn pending_write_lifecycle_from_row(
+    db: &Connection,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PendingWriteItem> {
+    let mut item = pending_write_item_from_row(row)?;
+    let invalid = || rusqlite::Error::InvalidQuery;
+    let origin: String = row.get(7)?;
+    let account: String = row.get(8)?;
+    let scope = CacheScope::new(
+        &origin,
+        &account,
+        &item.space_id,
+        &item.root_resource_id,
+        ScopeProtection::PlaintextAllowed,
+    )
+    .map_err(|_| invalid())?;
+    // The outer pending SELECT and this exact-scope receipt read share the
+    // same connection/snapshot; a worker cannot produce a contradictory UI
+    // lifecycle by completing between two independently opened caches.
+    if let Some(receipt) =
+        ordinary_create::load(db, &scope, item.write_id).map_err(|_| invalid())?
+    {
+        if receipt.write.logical_path != item.path
+            || receipt.write.state != item.state
+            || receipt.byte_len != item.bytes
+            || receipt.state == OrdinaryCreateState::Verified
+        {
+            return Err(invalid());
+        }
+        item.create_handoff = Some(PendingCreateLifecycle {
+            state: receipt.state,
+            local_handoff_acknowledged: receipt.local_handoff_acknowledged,
+        });
+    }
+    Ok(item)
 }
 fn i64_from_u64(value: u64) -> Result<i64, CacheError> {
     i64::try_from(value).map_err(|_| CacheError::LimitExceeded)
@@ -8030,6 +8253,33 @@ fn now_unix() -> i64 {
 }
 fn db_error(error: rusqlite::Error) -> CacheError {
     CacheError::Database(error.to_string())
+}
+
+pub(crate) fn load_or_seed_quota(db: &Connection, default_bytes: u64) -> Result<u64, CacheError> {
+    if default_bytes > MAX_CONTENT_BYTES {
+        return Err(CacheError::LimitExceeded);
+    }
+    db.execute(
+        "INSERT OR IGNORE INTO cache_settings(setting,value) VALUES('quota_bytes',?1)",
+        params![i64_from_u64(default_bytes)?],
+    )
+    .map_err(db_error)?;
+    configured_quota_bytes(db)
+}
+
+pub(crate) fn configured_quota_bytes(db: &Connection) -> Result<u64, CacheError> {
+    let value: i64 = db
+        .query_row(
+            "SELECT value FROM cache_settings WHERE setting='quota_bytes'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let value = u64::try_from(value).map_err(|_| CacheError::Corrupt)?;
+    if value > MAX_CONTENT_BYTES {
+        return Err(CacheError::Corrupt);
+    }
+    Ok(value)
 }
 fn io_error(error: io::Error) -> CacheError {
     CacheError::Io(error.to_string())
@@ -9374,6 +9624,75 @@ mod tests {
     }
 
     #[test]
+    fn pending_write_view_preserves_durable_create_lifecycle_and_local_ack() {
+        let (_temp, cache) = cache();
+        let scope = scope(ScopeProtection::PlaintextAllowed);
+        let staged = cache
+            .stage_ordinary_create(
+                &scope,
+                OrdinaryCreateRequest {
+                    max_pending_bytes: 1024,
+                    handoff_id: "1234567890abcdef1234567890abcdef".into(),
+                    parent_resource_id: "root-a".into(),
+                    name: "new.txt".into(),
+                    logical_path: "/new.txt".into(),
+                    expected_len: 4,
+                    expected_sha256: format!("{:x}", Sha256::digest(b"body")),
+                },
+                &mut Cursor::new(b"body"),
+            )
+            .unwrap();
+        let check = |state, acknowledged, write_state| {
+            for page in [
+                cache
+                    .pending_write_page_for_account("account-a", None, 10)
+                    .unwrap(),
+                cache
+                    .pending_write_page("https://cloud.example.test/", "account-a", None, 10)
+                    .unwrap(),
+            ] {
+                assert_eq!(page.items.len(), 1);
+                assert_eq!(page.items[0].state, write_state);
+                assert_eq!(
+                    page.items[0].create_handoff,
+                    Some(PendingCreateLifecycle {
+                        state,
+                        local_handoff_acknowledged: acknowledged,
+                    })
+                );
+            }
+        };
+        check(OrdinaryCreateState::Staged, false, WriteState::Pending);
+        let ready = cache.admit_ordinary_create(&scope, &staged).unwrap();
+        check(OrdinaryCreateState::Ready, false, WriteState::Pending);
+        let ready = cache
+            .acknowledge_ordinary_create_handoff(&scope, &ready)
+            .unwrap();
+        let claim = cache
+            .claim_ordinary_create(&scope, &ready)
+            .unwrap()
+            .unwrap();
+        check(OrdinaryCreateState::Claimed, true, WriteState::Pending);
+        cache.mark_ordinary_create_uncertain(&scope, claim).unwrap();
+        check(OrdinaryCreateState::Uncertain, true, WriteState::Conflict);
+        // A corrupt lifecycle must fail the entire view, not become a legacy
+        // retry button which appears to authorize another send.
+        cache
+            .lock_db()
+            .unwrap()
+            .execute(
+                "UPDATE ordinary_create_handoffs SET state=1 WHERE write_id=?1",
+                params![ready.write.id],
+            )
+            .unwrap();
+        assert!(
+            cache
+                .pending_write_page_for_account("account-a", None, 10)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn pending_write_page_is_account_scoped_bounded_and_offline_safe() {
         let (_temp, cache) = cache();
         let scope = scope(ScopeProtection::PlaintextAllowed);
@@ -9402,6 +9721,7 @@ mod tests {
         assert_eq!(first.pending_count, 2);
         assert_eq!(first.conflict_count, 0);
         assert_eq!(first.items.len(), 1);
+        assert!(first.items[0].create_handoff.is_none());
         assert!(first.truncated);
         let cursor = first.next_after.as_deref().unwrap();
         let second = cache

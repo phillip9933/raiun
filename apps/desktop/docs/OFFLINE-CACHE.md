@@ -1,5 +1,41 @@
 # Offline files and pending edits
 
+
+The Desktop **Offline files** workspace separates **Files & folders** from
+**Storage & help**. File/folder lists show a concise keep-offline action and
+verified/stale/unavailable status; advanced cache policy controls are under
+native **Options** disclosures. Saved-folder removal explicitly affects local
+availability and preserves cloud files. Storage guidance and policy explanations
+are disclosed separately, while active or uncertain downloads and failed or
+unavailable saved copies retain visible notices. Windows lets users choose the
+Files or Folders list and labels storage as shared by all accounts on the device;
+Linux reports the selected account cache. The UI does not expose a complete
+per-file local-cache inventory; browser sizes describe cloud file sizes.
+
+## Local candidate: configurable allowance and stationary options
+
+File and folder Options controls stay in their original header cells; their
+panels expand below the full row. The Storage & help view now includes an
+explicit Save limit control with IEC units and a 256 MiB–1 TiB range. Linux
+changes the current account's allowance; Windows changes the device Cache
+shared by accounts. The value is persisted in the existing private cache DB,
+observed by existing handles, and retained across reopen. The default remains
+1 GiB. Saving a limit does not evict anything; later ordinary cache admission
+and eligible Recent cleanup use the persisted value. Dirty/recovery content,
+explicitly kept copies and cloud files are never deleted by this setting.
+Windows also checks this allowance during new explicit download admission;
+it is not presented as a strict cap on all stored files. Protected usage can
+exceed it. Configured eviction reads the current durable setting under its
+existing deletion lease and fails closed when the setting cannot be read.
+
+Usage totals are indexed content accounting (with Windows inventory checks),
+not a complete filesystem allocated-byte or per-file storage inventory.
+Linux needs an initialized account cache/Engine, including a retained offline
+Engine, to change its limit; Windows requires the current verified drive.
+A missing live scope is an explicit unavailable state, not permission to edit
+another cache. Candidate source and common UI checks do not imply exact-package
+Windows acceptance or a new published version.
+
 The agent can retain verified, ordinary OpenCloud file versions for browsing
 and reading when the network is unavailable. Cache storage is private and
 separate for each authenticated account. Cache scope is bound to the normalized

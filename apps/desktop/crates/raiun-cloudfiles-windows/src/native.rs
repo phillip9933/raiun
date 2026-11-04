@@ -7,6 +7,7 @@
 
 #[cfg(test)]
 use crate::PreparedFetchSession;
+use crate::close_capture_admission::{CloseCaptureAdmission, CloseCapturePermit};
 use crate::{
     BackendError, BoundedPermit, BoundedPermitPool, CancellationToken, Error, FetchRange,
     LocalFileIdentity, MAX_CONCURRENT_DIRECTORY_ENUMERATIONS, MAX_CONCURRENT_FETCHES,
@@ -39,6 +40,44 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroizing;
+
+#[path = "native_file_delete.rs"]
+pub(super) mod native_file_delete;
+
+#[path = "native_file_create.rs"]
+pub(super) mod native_file_create;
+#[path = "native_vault_cached_completion.rs"]
+mod native_vault_cached_completion;
+#[path = "native_vault_child_create.rs"]
+pub(super) mod native_vault_child_create;
+#[path = "native_vault_directory_create.rs"]
+pub(super) mod native_vault_directory_create;
+#[path = "native_vault_directory_rename.rs"]
+mod native_vault_directory_rename;
+#[path = "native_vault_file_create.rs"]
+pub(super) mod native_vault_file_create;
+#[path = "native_vault_file_rename.rs"]
+pub(super) mod native_vault_file_rename;
+#[path = "native_vault_pending_history.rs"]
+mod native_vault_pending_history;
+#[path = "native_vault_rename_driver.rs"]
+mod native_vault_rename_driver;
+pub(crate) use native_file_create::NativeFileCreateCompletion;
+pub(crate) use native_file_create::NativeFileCreateContinuation;
+#[path = "native_file_rename.rs"]
+pub(super) mod native_file_rename;
+#[path = "native_namespace_directory.rs"]
+pub(super) mod native_namespace_directory;
+#[path = "native_namespace_observer.rs"]
+mod native_namespace_observer;
+#[path = "native_namespace_scan.rs"]
+pub(super) mod native_namespace_scan;
+#[path = "native_plain_file_capture.rs"]
+pub(super) mod native_plain_file_capture;
+#[path = "native_streamed_io.rs"]
+mod native_streamed_io;
+#[path = "native_vault_cleanup_inventory.rs"]
+mod native_vault_cleanup_inventory;
 
 const CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT: u32 = 0x2;
 const CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH: u32 = 0x4;
@@ -384,6 +423,8 @@ union CfCallbackParameterData {
     fetch_placeholders: CfCallbackFetchPlaceholders,
     cancel_fetch_placeholders: CfCallbackCancelFetchPlaceholders,
     close_completion: CfCallbackCloseCompletion,
+    delete: native_file_delete::CallbackDelete,
+    delete_completion: native_file_delete::CallbackDelete,
     align: u64,
 }
 
@@ -432,6 +473,7 @@ struct CfTransferPlaceholdersParameters {
 #[repr(C)]
 #[allow(dead_code)]
 union CfOperationParameterData {
+    ack_delete: native_file_delete::AckDelete,
     transfer_data: CfTransferDataParameters,
     transfer_placeholders: CfTransferPlaceholdersParameters,
     // The Windows SDK union is 40 bytes on x64 (RetrieveData is its largest
@@ -843,6 +885,7 @@ pub(super) struct VaultCleanupFence {
     rows: Vec<hydration_inventory::HydratedFileRow>,
     owned: std::collections::BTreeSet<[u8; 16]>,
     held: Vec<HeldWritableEviction>,
+    local_inventory: native_vault_cleanup_inventory::InventoryFence,
 }
 struct HeldWritableEviction {
     file: ProtectedCompletionFile,
@@ -876,7 +919,7 @@ impl WritableCleanupReceipt {
     }
 }
 fn hydration_full_on_disk(handle: Handle, length: u64) -> Result<bool, Error> {
-    if length > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+    if length > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES {
         return Err(Error::EditRecoveryUnavailable);
     }
     let mut ranges = [CfFileRange {
@@ -944,9 +987,17 @@ fn placeholder_on_disk_empty(handle: Handle) -> Result<bool, Error> {
 pub(super) struct ConfiguredRootConnection {
     root: Option<Box<OwnedConfiguredRoot>>,
     state: Arc<CallbackState>,
+    composite_root_identity: crate::OpaqueIdentity,
     context_key: usize,
     connection_key: CfConnectionKey,
     connected: bool,
+    namespace_observer: Option<native_namespace_observer::NamespaceObserver>,
+    namespace_binding: native_namespace_observer::NamespaceObserverBinding,
+    namespace_observation_closed: bool,
+    create_owner: std::cell::RefCell<native_file_create::CreateOwner>,
+    vault_child_owner: std::cell::RefCell<native_vault_child_create::Owner>,
+    directory_owner: std::cell::RefCell<native_namespace_directory::DirectoryOwner>,
+    delete_owner: Option<native_file_delete::Owner>,
 }
 
 #[allow(dead_code)]
@@ -1702,13 +1753,13 @@ impl OwnedConfiguredRoot {
 
     fn register(&mut self, file_identity: &[u8]) -> Result<(), Error> {
         self.verify_identity(false)?;
-        let identity = configured_sync_root_identity(self.identity);
+        let domain = configured_registration_domain(self.identity)?;
         register_root_with_identity(
             &self.path,
-            &identity,
+            &domain.sync_root_identity,
             Some(file_identity),
-            "Raiun Internal Cloud Files Root",
-            "0.0.0-internal",
+            &domain.provider_name,
+            domain.provider_version,
         )?;
         self.registered = true;
         Ok(())
@@ -1743,8 +1794,78 @@ impl OwnedConfiguredRoot {
     }
 }
 
+fn file_rename_store_from_prepared(
+    recovery: Option<&Arc<dyn PreparedEditRecovery>>,
+    provider_scope: &crate::ProviderScope,
+    root_identity: crate::ConfiguredRootIdentity,
+    scope: &crate::EditJournalScope,
+    authorization: crate::namespace_intent::CapturedAuthorization,
+) -> Result<Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>, Error> {
+    if scope.profile_id != provider_scope.profile_id()
+        || scope.server_origin != provider_scope.server_origin()
+        || scope.account_subject != provider_scope.account_id()
+        || scope.root_volume_serial != root_identity.volume_serial
+        || scope.root_file_index != root_identity.file_index
+        || scope.space_id.is_empty()
+        || scope.root_resource_id.is_empty()
+        || authorization.agent_generation == 0
+        || authorization.token_generation != provider_scope.token_generation()
+    {
+        return Err(Error::ProviderUnavailable);
+    }
+    let Some(recovery) = recovery else {
+        return Ok(None);
+    };
+    if recovery.provider_scope() != provider_scope || recovery.root_identity() != root_identity {
+        return Err(Error::ProviderUnavailable);
+    }
+    recovery
+        .file_rename_store(scope, authorization)
+        .map_err(|_| Error::EditRecoveryUnavailable)
+}
+
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    pub(super) fn file_rename_store(
+        &self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+        scope: &crate::EditJournalScope,
+        authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>, Error>
+    {
+        if !self.connected
+            || self.state.readiness.load(Ordering::Acquire) != CALLBACK_READY
+            || backend.is_revoked()
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        let backend_trait: Arc<dyn PlaceholderBackend> = backend.clone();
+        if !Arc::ptr_eq(&backend_trait, &self.state.backend)
+            || !backend.owns_composite_root_identity(self.composite_root_identity)
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let root_identity = crate::ConfiguredRootIdentity {
+            volume_serial: root.identity.volume_serial,
+            file_index: root.identity.file_index,
+        };
+        file_rename_store_from_prepared(
+            self.state.recovery.as_ref(),
+            backend.scope(),
+            root_identity,
+            scope,
+            authorization,
+        )
+    }
+
+    pub(super) fn ordinary_edit_status_source(&self) -> Arc<dyn crate::OrdinaryEditStatusSource> {
+        Arc::new(CachedOrdinaryEditStatus {
+            state: Arc::downgrade(&self.state),
+        })
+    }
     // Admission only: this is not a proof that all filesystem names/content
     // are absent. Reconnected roots deliberately have unknown prior custody.
     pub(super) fn can_admit_vault_session(&self) -> bool {
@@ -1827,6 +1948,11 @@ impl ConfiguredRootConnection {
             || route.local_root().volume_serial != root.identity.volume_serial
             || route.local_root().file_index != root.identity.file_index
             || self.state.has_unresolved_placeholder_data()
+            || self
+                .vault_child_owner
+                .try_borrow()
+                .map(|owner| owner.active())
+                .unwrap_or(true)
         {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -1841,6 +1967,19 @@ impl ConfiguredRootConnection {
             }
             inventory.snapshot(route_owned)
         };
+        // Discover every physical local descendant before any dehydration.
+        // Unknown bytes remain untouched and deny cleanup completion.
+        let locator = self
+            .state
+            .backend
+            .vault_cleanup_root_locator(route)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        let local_inventory = native_vault_cleanup_inventory::InventoryFence::begin(
+            root,
+            locator,
+            route_owned,
+            &rows,
+        )?;
         let mut fence = VaultCleanupFence {
             state: Arc::clone(&self.state),
             binding: Arc::downgrade(route.backend().binding()),
@@ -1848,6 +1987,7 @@ impl ConfiguredRootConnection {
             rows: rows.clone(),
             owned: route_owned.clone(),
             held: Vec::new(),
+            local_inventory,
         };
         for row in rows {
             let components = row
@@ -1951,7 +2091,7 @@ impl ConfiguredRootConnection {
                     return Err(Error::EditRecoveryUnavailable);
                 }
             } else {
-                if receipt.length > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+                if receipt.length > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES
                     || opened.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0
                 {
                     return Err(Error::EditRecoveryUnavailable);
@@ -1962,9 +2102,23 @@ impl ConfiguredRootConnection {
                 if receipt.clean_hydration && !hydration_full_on_disk(file.raw, receipt.length)? {
                     return Err(Error::EditRecoveryUnavailable);
                 }
-                let mut bytes = Zeroizing::new(vec![0u8; receipt.length as usize]);
-                file.read_complete(&mut bytes)?;
-                if <[u8; 32]>::from(Sha256::digest(&bytes)) != receipt.sha256 {
+                let sha = if receipt.length > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+                    {
+                        let cleanup_job = CancellationToken::for_recovery_job(
+                            crate::StreamedRecoveryPolicy::default(),
+                        );
+                        vault_stream_digest(&file.digest_complete_with_stop(
+                            receipt.length,
+                            Some(cleanup_job.cancellation()),
+                            &|| self.state.readiness.load(Ordering::Acquire) != CALLBACK_READY,
+                        )?)?
+                    }
+                } else {
+                    let mut bytes = Zeroizing::new(vec![0u8; receipt.length as usize]);
+                    file.read_complete(&mut bytes)?;
+                    <[u8; 32]>::from(Sha256::digest(&bytes))
+                };
+                if sha != receipt.sha256 {
                     return Err(Error::EditRecoveryUnavailable);
                 }
             }
@@ -2158,6 +2312,7 @@ impl ConfiguredRootConnection {
                 return Err(Error::EditRecoveryUnavailable);
             }
         }
+        fence.local_inventory.verify(root, &fence.rows)?;
         if self.state.has_unresolved_placeholder_data() {
             return Err(Error::UnresolvedPlaceholderEdits);
         }
@@ -2327,7 +2482,24 @@ impl ConfiguredRootConnection {
         expected_length: u64,
         expected_identity: &[u8; 16],
     ) -> Result<(), Error> {
-        if self.state.has_unresolved_placeholder_data() {
+        self.dehydrate_clean_vault_placeholder_inner(
+            local_components,
+            expected_file_index,
+            expected_length,
+            expected_identity,
+            false,
+        )
+    }
+
+    fn dehydrate_clean_vault_placeholder_inner(
+        &self,
+        local_components: &[&str],
+        expected_file_index: u64,
+        expected_length: u64,
+        expected_identity: &[u8; 16],
+        qualified_cached_pending: bool,
+    ) -> Result<(), Error> {
+        if !qualified_cached_pending && self.state.has_unresolved_placeholder_data() {
             return Err(Error::UnresolvedPlaceholderEdits);
         }
         if !self.connected
@@ -2418,7 +2590,7 @@ impl ConfiguredRootConnection {
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic cleanup refusal stage=preupdate_registration");
         })?;
-        if self.state.has_unresolved_placeholder_data() {
+        if !qualified_cached_pending && self.state.has_unresolved_placeholder_data() {
             return Err(Error::UnresolvedPlaceholderEdits);
         }
         #[cfg(feature = "synthetic-agent-integration")]
@@ -2614,7 +2786,8 @@ impl ConfiguredRootConnection {
         if upload.root().volume_serial != root.identity.volume_serial
             || upload.root().file_index != root.identity.file_index
             || target.local_file().volume_serial != root.identity.volume_serial
-            || upload.remote_evidence().entry().size > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+            || upload.remote_evidence().entry().size
+                > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES
         {
             return Err(Error::ConfiguredRootChanged);
         }
@@ -2667,9 +2840,31 @@ impl ConfiguredRootConnection {
                 }
                 verify_completion_identity(file.raw, &upload.identity())?;
                 let saved_usn = completion_usn(file.raw, target.local_file().file_index)?;
-                let mut bytes = Zeroizing::new(vec![0u8; length as usize]);
-                file.read_complete(&mut bytes)?;
-                let sha: [u8; 32] = Sha256::digest(&bytes).into();
+                let mut legacy_bytes = if length <= crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+                    Some(Zeroizing::new(vec![0u8; length as usize]))
+                } else {
+                    None
+                };
+                let mut body_sha = || -> Result<[u8; 32], Error> {
+                    if let Some(bytes) = legacy_bytes.as_mut() {
+                        file.read_complete(bytes)?;
+                        Ok(<[u8; 32]>::from(Sha256::digest(&*bytes)))
+                    } else {
+                        if !hydration_full_on_disk(file.raw, length)? {
+                            return Err(Error::EditRecoveryUnavailable);
+                        }
+                        vault_stream_digest(&file.digest_complete_with_stop(
+                            length,
+                            Some(upload.control.read_cancellation()),
+                            &|| {
+                                upload.control.is_cancelled()
+                                    || upload.composite.is_revoked()
+                                    || upload.route.backend().binding().is_revoked()
+                            },
+                        )?)
+                    }
+                };
+                let sha = body_sha()?;
                 if sha != upload.remote_evidence().plaintext_sha256()
                     || !same_edit_snapshot(opened, root_snapshot(file.raw)?)
                     || completion_usn(file.raw, target.local_file().file_index)? != saved_usn
@@ -2823,8 +3018,7 @@ impl ConfiguredRootConnection {
                     return Err(Error::ConfiguredRootChanged);
                 }
                 verify_completion_identity(file.raw, &upload.identity())?;
-                file.read_complete(&mut bytes)?;
-                if <[u8; 32]>::from(Sha256::digest(&bytes)) != sha
+                if body_sha()? != sha
                     || !same_edit_snapshot(marked, root_snapshot(file.raw)?)
                     || completion_basic_info(file.raw)? != marked_basic
                     || completion_usn(file.raw, target.local_file().file_index)? != marked_usn
@@ -2926,8 +3120,7 @@ impl ConfiguredRootConnection {
                     return Err(Error::ConfiguredRootChanged);
                 }
                 verify_completion_identity(file.raw, &upload.identity())?;
-                file.read_complete(&mut bytes)?;
-                if <[u8; 32]>::from(Sha256::digest(&bytes)) != sha
+                if body_sha()? != sha
                     || !same_edit_snapshot(completed, root_snapshot(file.raw)?)
                     || completion_basic_info(file.raw)? != expected_basic
                     || completion_usn(file.raw, target.local_file().file_index)? != completed_usn
@@ -3034,12 +3227,26 @@ impl ConfiguredRootConnection {
             .as_ref()
             .ok_or(Error::EditRecoveryUnavailable)?;
         let metadata = publication.proof().metadata();
+        let recovery_job = publication.proof().recovery_job();
+        if publication.proof().is_streamed() && recovery_job.is_none() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let check_job = || {
+            if recovery_job.is_some_and(|job| job.is_stopped()) {
+                Err(Error::EditRecoveryUnavailable)
+            } else {
+                Ok(())
+            }
+        };
+        check_job()?;
         if recovery.provider_scope() != publication.provider_scope()
             || metadata.generation != publication.provider_scope().token_generation()
             || metadata.scope.root_volume_serial != root.identity.volume_serial
             || metadata.scope.root_file_index != root.identity.file_index
             || metadata.local_file.volume_serial != root.identity.volume_serial
-            || metadata.content_len > MAX_REQUEST_BYTES
+            || metadata.content_len > MAX_FILE_BYTES
+            || (metadata.content_len > MAX_REQUEST_BYTES && !publication.proof().is_streamed())
+            || (publication.proof().is_streamed() && !recovery.supports_streamed_capture())
         {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -3098,11 +3305,12 @@ impl ConfiguredRootConnection {
             let saved_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic_save_completion_usn_first={saved_usn}");
-            let len = usize::try_from(metadata.content_len)
-                .map_err(|_| Error::EditRecoveryUnavailable)?;
-            let mut bytes = Zeroizing::new(vec![0_u8; len]);
-            file.read_complete(&mut bytes)?;
-            if crate::recovery_reconcile::digest_hex(&bytes) != metadata.content_sha256
+            let digest = file.digest_complete(
+                metadata.content_len,
+                recovery_job.map(|job| job.cancellation()),
+            )?;
+            check_job()?;
+            if digest != metadata.content_sha256
                 || !same_edit_snapshot(opened, root_snapshot(file.raw)?)
                 || {
                     let observed_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
@@ -3126,7 +3334,9 @@ impl ConfiguredRootConnection {
             // closure. No USN comparison/output is requested: the retained
             // combined content fence is the authority, not an optional output.
             // Windows may leave a zero-input USN untouched even on S_OK.
+            check_job()?;
             let result = unsafe { CfSetInSyncState(file.protected, 1, 0, null_mut()) };
+            check_job()?;
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic_save_completion_no_usn_comparison hresult={result}");
             if result < 0 {
@@ -3146,17 +3356,20 @@ impl ConfiguredRootConnection {
             // handle: record only this exact native-completed snapshot. If
             // persistence fails, its encrypted body remains unresolved.
             observe_completion!("persist_local_completion");
+            check_job()?;
+            let completed =
+                crate::CompletedLocalEdit::from_verified_native_completion(publication.proof())
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
             recovery
-                .record_local_completion(crate::CompletedLocalEdit::from_native_completion(
-                    metadata,
-                ))
+                .record_local_completion(completed)
                 .map_err(|error| {
                     #[cfg(feature = "synthetic-agent-integration")]
                     eprintln!("synthetic_save_completion_journal_refused error={error:?}");
                     #[cfg(not(feature = "synthetic-agent-integration"))]
                     let _ = error;
                     Error::EditRecoveryUnavailable
-                })
+                })?;
+            check_job()
         })
     }
     pub(super) fn take_initial_edit(&self) -> Result<Option<crate::PendingInitialEdit>, Error> {
@@ -3333,6 +3546,18 @@ impl ConfiguredRootConnection {
     }
 
     pub(super) fn connect(runtime: PreparedConfiguredRootRuntime) -> Result<Self, Error> {
+        Self::connect_inner(runtime, None)
+    }
+    pub(crate) fn connect_owned_delete(
+        runtime: PreparedConfiguredRootRuntime,
+        config: native_file_delete::Config,
+    ) -> Result<Self, Error> {
+        Self::connect_inner(runtime, Some(config))
+    }
+    fn connect_inner(
+        runtime: PreparedConfiguredRootRuntime,
+        delete: Option<native_file_delete::Config>,
+    ) -> Result<Self, Error> {
         let PreparedConfiguredRootRuntime {
             root: configured_root,
             backend,
@@ -3346,7 +3571,13 @@ impl ConfiguredRootConnection {
         let lease = configured_root._native;
         let history_owner = backend.scope().clone();
         let history_registration =
-            vault_custody_registration_binding(identity, composite_root_identity);
+            vault_custody_registration_binding(identity, composite_root_identity)?;
+        let namespace_binding = native_namespace_observer::NamespaceObserverBinding::new(
+            &backend,
+            composite_root_identity,
+        );
+        let cached_backend = backend.clone();
+        let delete_backend = backend.clone();
         let backend: Arc<dyn PlaceholderBackend> = backend;
         if identity != lease.identity {
             return Err(Error::InvalidConfiguredRoot);
@@ -3360,6 +3591,14 @@ impl ConfiguredRootConnection {
             root.verify_registered()?;
         } else {
             root.register(composite_root_identity.as_bytes())?;
+        }
+
+        if cached_backend.is_cached_only() {
+            restore_cached_space_labels(
+                &root,
+                &cached_backend,
+                composite_root_identity.as_bytes(),
+            )?;
         }
 
         let mut state = CallbackState::new_for_root(
@@ -3384,12 +3623,32 @@ impl ConfiguredRootConnection {
         if !already_registered || vault_history.is_none() {
             state.record_reconnect_scan(scan_registered_root(&root.path, root.identity));
         }
+        let mut delete_owner = match delete {
+            Some(config) => Some(native_file_delete::Owner::start(
+                &state,
+                delete_backend,
+                composite_root_identity,
+                config,
+            )?),
+            None => None,
+        };
+        if let Some(owner) = delete_owner.as_ref() {
+            *state
+                .delete_shared
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)? = Some(owner.shared());
+        }
         let context_key = Arc::as_ptr(&state) as usize;
         callback_registry()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(context_key, Arc::clone(&state));
         let callback_table = callback_table();
+        let callback_table = if delete_owner.is_some() {
+            native_file_delete::table().into_iter().collect::<Vec<_>>()
+        } else {
+            callback_table.into_iter().collect::<Vec<_>>()
+        };
         let mut connection_key = CfConnectionKey { internal: 0 };
         // SAFETY: root path and callback table stay alive for the call. The
         // context is an opaque key resolved only through the protected map.
@@ -3428,15 +3687,26 @@ impl ConfiguredRootConnection {
             return Err(native_error("CfConnectSyncRoot configured root", result));
         }
 
+        if let Some(owner) = delete_owner.as_ref() {
+            owner.connected(connection_key);
+        }
         root.connected = true;
         if let Err(error) = root.verify_identity(true) {
             state.fail_initial_readiness();
             let mut connection = Self {
                 root: Some(root),
                 state,
+                composite_root_identity,
                 context_key,
                 connection_key,
                 connected: true,
+                namespace_observer: None,
+                namespace_binding,
+                namespace_observation_closed: false,
+                create_owner: Default::default(),
+                vault_child_owner: Default::default(),
+                directory_owner: Default::default(),
+                delete_owner: delete_owner.take(),
             };
             if connection.finish(false).is_err() {
                 let _ = Box::leak(Box::new(connection));
@@ -3446,9 +3716,17 @@ impl ConfiguredRootConnection {
         let mut connection = Self {
             root: Some(root),
             state,
+            composite_root_identity,
             context_key,
             connection_key,
             connected: true,
+            namespace_observer: None,
+            namespace_binding,
+            namespace_observation_closed: false,
+            create_owner: Default::default(),
+            vault_child_owner: Default::default(),
+            directory_owner: Default::default(),
+            delete_owner,
         };
         if already_registered {
             if let Some(history) = vault_history {
@@ -3532,12 +3810,31 @@ impl ConfiguredRootConnection {
         let rows = history
             .snapshot(owner, expected, registration)
             .map_err(|_| Error::EditRecoveryUnavailable)?;
-        if rows.len() > 100_000 {
+        let current = history
+            .current_native_intents(owner, expected, registration)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        if rows.len() > 100_000 || current.len() > 100_000 {
             return Err(Error::EditRecoveryUnavailable);
         }
         let mut identities = std::collections::BTreeSet::new();
         let mut files = std::collections::BTreeSet::new();
         let mut paths = std::collections::BTreeSet::new();
+        let mut pending = std::collections::BTreeMap::new();
+        for row in &current {
+            if !identities.insert(row.identity)
+                || !files.insert(row.file_index)
+                || !paths.insert(row.components.clone())
+            {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            native_vault_pending_history::inspect(root, expected, row)?;
+            if !row.terminal_verified {
+                pending.insert(
+                    row.identity,
+                    (row.write_id.clone(), row.revision, row.file_index),
+                );
+            }
+        }
         for row in &rows {
             if row.root != expected
                 || row.identity == [0; 16]
@@ -3566,18 +3863,52 @@ impl ConfiguredRootConnection {
                 &row.identity,
             )?;
         }
+        for row in &current {
+            if row.terminal_verified && row.entry.as_ref().is_some_and(|entry| !entry.directory) {
+                let components = row
+                    .components
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                self.dehydrate_clean_vault_placeholder(
+                    &components,
+                    row.file_index,
+                    row.length,
+                    &row.identity,
+                )?;
+            }
+        }
         root.verify_identity(true)?;
         root.verify_registered()?;
         if self.state.has_unresolved_placeholder_data() {
             return Err(Error::UnresolvedPlaceholderEdits);
         }
-        let proof = HistoricalVaultCleanupProof { rows };
+        let mut admitted_rows = rows;
+        admitted_rows.extend(current.into_iter().filter_map(|row| {
+            (row.terminal_verified && row.entry.as_ref().is_some_and(|entry| !entry.directory))
+                .then_some(crate::vault_custody::VaultHydrationIntent {
+                    root: expected,
+                    identity: row.identity,
+                    file_index: row.file_index,
+                    length: row.length,
+                    components: row.components,
+                })
+        }));
+        let proof = HistoricalVaultCleanupProof {
+            rows: admitted_rows,
+        };
         self.state
             .hydrated_files
             .lock()
             .map_err(|_| Error::EditRecoveryUnavailable)?
             .admit_historical_custody(proof)
-            .map_err(|_| Error::EditRecoveryUnavailable)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        *self
+            .state
+            .known_cached_pending
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)? = pending;
+        Ok(())
     }
 
     pub(super) fn disconnect(&mut self) -> Result<(), Error> {
@@ -3588,12 +3919,39 @@ impl ConfiguredRootConnection {
         self.finish(true)
     }
 
+    /// Stop and positively join owned deletion before a backend lease writer.
+    pub(super) fn cancel_file_delete(&mut self) -> Result<(), Error> {
+        if self
+            .delete_owner
+            .as_mut()
+            .is_some_and(|owner| !owner.stop_and_join())
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        Ok(())
+    }
+
     fn finish(&mut self, unregister: bool) -> Result<(), Error> {
+        self.cancel_file_delete()?;
+        if !self.close_fresh_personal_directory_create()
+            || !self.close_fresh_personal_file_create()
+            || !self.close_vault_child_create()
+        {
+            // Cancelled but actual SDK/body ownership is still in flight.
+            // Caller must drain/join; keep this same root/attempt connected.
+            return Err(Error::EditRecoveryUnavailable);
+        }
         if self.root.is_none() && !self.connected {
+            if self.namespace_observer.is_some() {
+                return Err(Error::ConnectionStateInvalid);
+            }
             return Ok(());
         }
         if self.connected {
             self.state.close_readiness();
+            // Cancellation/drain is physical ownership, and must remain
+            // available after backend/token authorization has been revoked.
+            self.stop_namespace_observer(std::time::Duration::from_millis(250))?;
             // Keep callback state registered through CfDisconnectSyncRoot;
             // Windows may deliver callbacks while the disconnect is running.
             let result = unsafe { CfDisconnectSyncRoot(self.connection_key) };
@@ -3639,14 +3997,37 @@ impl ConfiguredRootConnection {
     }
 
     fn preserve_after_cleanup_failure(&mut self) {
-        if let Some(root) = self.root.take() {
-            let _ = Box::leak(root);
-        }
+        // Explicit observer stop/poll retirement can precede global callback
+        // closure. Always close admission before retaining an aggregate that
+        // cannot safely run further cleanup, without waiting for callbacks.
+        self.state.close_readiness();
+        // Retain the complete aggregate, including any still-pending kernel
+        // I/O. Never run DirectoryObserver's blocking Drop on this failure path.
+        let _ = Box::leak(Box::new((
+            self.root.take(),
+            self.namespace_observer.take(),
+            Arc::clone(&self.state),
+            self.namespace_binding.clone(),
+            self.context_key,
+            self.connection_key,
+            self.connected,
+            std::mem::take(self.create_owner.get_mut()),
+            std::mem::take(self.vault_child_owner.get_mut()),
+            std::mem::take(self.directory_owner.get_mut()),
+            self.delete_owner.take(),
+        )));
+        self.connected = false;
     }
 }
 
 impl Drop for ConfiguredRootConnection {
     fn drop(&mut self) {
+        if self.namespace_observation_closed && self.namespace_observer_drain_pending() {
+            // A consuming caller may already have received DrainPending.
+            // Preserve that exact owner rather than implicitly retrying finish.
+            self.preserve_after_cleanup_failure();
+            return;
+        }
         if self.finish(false).is_err() {
             self.preserve_after_cleanup_failure();
         }
@@ -3690,6 +4071,8 @@ unsafe extern "system" fn notify_file_close_completion_callback(
     let Some(guard) = callback_guard(info) else {
         return;
     };
+    let close_admission = Arc::clone(&guard.0.close_capture_admission);
+    let mut close_permit = close_admission.begin_close();
     if info.is_null() || parameters.is_null() {
         guard
             .0
@@ -3726,12 +4109,23 @@ unsafe extern "system" fn notify_file_close_completion_callback(
             .fetch_add(1, Ordering::AcqRel);
         return;
     }
-    let notification = guard.0.record_placeholder_close(info, flags);
+    if flags == CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED
+        && native_file_delete::deleted_close(&guard.0, info, &mut close_permit)
+    {
+        return;
+    }
+    let notification = guard
+        .0
+        .record_placeholder_close(info, flags, &mut close_permit);
     // The owned notification contains no callback/native pointers. All path,
     // file, store, route/token/epoch and close-pool guards have unwound; release
     // callback lifetime accounting too before the sole nonblocking send.
+    let vault_handoff = notification.is_some();
     drop(guard);
-    let _ = crate::backend::publish_vault_capture_notification(notification);
+    let published = crate::backend::publish_vault_capture_notification(notification).is_ok();
+    if vault_handoff && published {
+        close_permit.finish_durable();
+    }
 }
 
 fn valid_close_completion_param_size(value: usize) -> bool {
@@ -5129,6 +5523,73 @@ mod hydration_inventory {
             row.length = new_length;
             Ok(())
         }
+        /// Actual original-owner replacement completion only. The immutable
+        /// durable history remains original; remove its now-deleted native FI
+        /// only after the newly converted FI/body and remote bytes were proved.
+        pub(super) fn replace_verified(
+            &mut self,
+            identity: [u8; 16],
+            old_file: u64,
+            new_file: u64,
+            old_length: u64,
+            new_length: u64,
+            components: &[String],
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete()
+                || old_file == 0
+                || new_file == 0
+                || old_file == new_file
+                || self.rows.contains_key(&(identity, new_file))
+                || self.rows.values().any(|r| {
+                    (r.identity == identity && r.file_index != old_file)
+                        || (r.components == components
+                            && (r.identity != identity || r.file_index != old_file))
+                })
+            {
+                return Err(InventoryError::Conflict);
+            }
+            let old = self
+                .rows
+                .get(&(identity, old_file))
+                .ok_or(InventoryError::Conflict)?;
+            if old.length != old_length || old.components != components {
+                return Err(InventoryError::Conflict);
+            }
+            let mut next = old.clone();
+            next.file_index = new_file;
+            next.length = new_length;
+            // Allocate/insert first; a panic cannot discard the original row.
+            self.rows.insert((identity, new_file), next);
+            self.rows.remove(&(identity, old_file));
+            Ok(())
+        }
+        /// Only after conditional cloud deletion and factual native absence.
+        /// Cloud-only clean placeholders may have no published plaintext row.
+        pub(super) fn retire_deleted(
+            &mut self,
+            identity: [u8; 16],
+            file: u64,
+            length: u64,
+            components: &[String],
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete()
+                || file == 0
+                || self.rows.values().any(|r| {
+                    (r.identity == identity && r.file_index != file)
+                        || (r.components == components
+                            && (r.identity != identity || r.file_index != file))
+                })
+            {
+                return Err(InventoryError::Conflict);
+            }
+            if let Some(row) = self.rows.get(&(identity, file)) {
+                if row.length != length || row.components != components {
+                    return Err(InventoryError::Conflict);
+                }
+                self.rows.remove(&(identity, file));
+            }
+            Ok(())
+        }
         #[cfg(feature = "synthetic-agent-integration")]
         pub(super) fn file_for_components(
             &self,
@@ -5148,6 +5609,69 @@ mod hydration_inventory {
                 return Err(InventoryError::Conflict);
             }
             Ok(file)
+        }
+        pub(super) fn rebase_vault_rename(
+            &mut self,
+            identity: [u8; 16],
+            file: u64,
+            len: u64,
+            old: &[String],
+            new: &[String],
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete() {
+                return Err(InventoryError::Conflict);
+            }
+            if let Some(row) = self.rows.get_mut(&(identity, file)) {
+                if row.length != len || row.components != old {
+                    return Err(InventoryError::Conflict);
+                }
+                row.components = new.to_vec();
+            }
+            Ok(())
+        }
+        /// Typed cached completion has already been re-inspected on the same
+        /// native FI/USN/body. Preserve exact uniqueness before making a
+        /// terminal file eligible for later clean dehydration.
+        pub(super) fn admit_cached_verified_file(
+            &mut self,
+            identity: [u8; 16],
+            file_index: u64,
+            length: u64,
+            components: &[String],
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete()
+                || identity == [0; 16]
+                || file_index == 0
+                || components.is_empty()
+                || self.rows.values().any(|row| {
+                    (row.identity == identity && row.file_index != file_index)
+                        || (row.components.as_slice() == components && row.identity != identity)
+                })
+            {
+                return Err(InventoryError::Conflict);
+            }
+            if let Some(row) = self.rows.get_mut(&(identity, file_index)) {
+                row.length = length;
+                row.components = components.to_vec();
+                return Ok(());
+            }
+            self.record(identity, file_index, length, components.to_vec())
+        }
+        pub(super) fn retire_cached_verified_absence(
+            &mut self,
+            identity: [u8; 16],
+            file_index: u64,
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete()
+                || self
+                    .rows
+                    .values()
+                    .any(|row| row.identity == identity && row.file_index != file_index)
+            {
+                return Err(InventoryError::Conflict);
+            }
+            self.rows.remove(&(identity, file_index));
+            Ok(())
         }
         pub fn mark_incomplete(&mut self) {
             self.incomplete = true;
@@ -5253,6 +5777,221 @@ mod hydration_inventory {
     }
 }
 
+#[cfg(test)]
+mod file_rename_store_accessor_tests {
+    use super::*;
+    use crate::{
+        BackendError, ConfiguredRootIdentity, EditJournalScope, PlaceholderEditBinding,
+        PreparedEditRecovery, ProviderScope, namespace_intent::CapturedAuthorization,
+    };
+    use raiun_opencloud::OpenCloudClient;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeRecovery {
+        scope: ProviderScope,
+        root: ConfiguredRootIdentity,
+        calls: AtomicUsize,
+    }
+
+    impl PreparedEditRecovery for FakeRecovery {
+        fn provider_scope(&self) -> &ProviderScope {
+            &self.scope
+        }
+
+        fn root_identity(&self) -> ConfiguredRootIdentity {
+            self.root
+        }
+
+        fn file_rename_store(
+            &self,
+            _scope: &EditJournalScope,
+            _authorization: CapturedAuthorization,
+        ) -> Result<
+            Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>,
+            BackendError,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn append_edit(
+            &self,
+            _binding: &PlaceholderEditBinding,
+            _root_identity: ConfiguredRootIdentity,
+            _local_file: crate::LocalFileIdentity,
+            _relative_path: &str,
+            _content: &[u8],
+        ) -> Result<(), BackendError> {
+            Err(BackendError::Unavailable)
+        }
+
+        fn has_unresolved(&self) -> Result<bool, BackendError> {
+            Ok(false)
+        }
+    }
+
+    fn fixture() -> (
+        ProviderScope,
+        ConfiguredRootIdentity,
+        EditJournalScope,
+        CapturedAuthorization,
+    ) {
+        let client = OpenCloudClient::new("https://r46.invalid", "fixture-token".into()).unwrap();
+        let provider = ProviderScope::new(
+            &client,
+            "r46-profile".into(),
+            "r46-account".into(),
+            "https://r46.invalid".into(),
+        )
+        .unwrap();
+        let root = ConfiguredRootIdentity {
+            volume_serial: 41,
+            file_index: 73,
+        };
+        let scope = EditJournalScope {
+            profile_id: provider.profile_id().to_owned(),
+            server_origin: provider.server_origin().to_owned(),
+            account_subject: provider.account_id().to_owned(),
+            space_id: "r46-space".into(),
+            root_resource_id: "r46-root".into(),
+            root_volume_serial: root.volume_serial,
+            root_file_index: root.file_index,
+        };
+        let authorization = CapturedAuthorization {
+            agent_generation: 5,
+            token_generation: provider.token_generation(),
+        };
+        (provider, root, scope, authorization)
+    }
+
+    #[test]
+    fn r46_store_accessor_delegates_once_to_exact_prepared_capability() {
+        let (provider, root, scope, authorization) = fixture();
+        let recovery = Arc::new(FakeRecovery {
+            scope: provider.clone(),
+            root,
+            calls: AtomicUsize::new(0),
+        });
+        let recovery_capability: Arc<dyn PreparedEditRecovery> = recovery.clone();
+        assert!(
+            file_rename_store_from_prepared(
+                Some(&recovery_capability),
+                &provider,
+                root,
+                &scope,
+                authorization,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
+
+        assert!(
+            file_rename_store_from_prepared(None, &provider, root, &scope, authorization,)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn r46_store_accessor_rejects_scope_root_and_auth_before_delegation() {
+        let (provider, root, scope, authorization) = fixture();
+        let recovery = Arc::new(FakeRecovery {
+            scope: provider.clone(),
+            root,
+            calls: AtomicUsize::new(0),
+        });
+        let recovery_capability: Arc<dyn PreparedEditRecovery> = recovery.clone();
+        let rejected = |requested: &EditJournalScope, auth: CapturedAuthorization| {
+            file_rename_store_from_prepared(
+                Some(&recovery_capability),
+                &provider,
+                root,
+                requested,
+                auth,
+            )
+            .is_err()
+        };
+        let mut wrong_profile = scope.clone();
+        wrong_profile.profile_id.push_str("-other");
+        assert!(rejected(&wrong_profile, authorization));
+        let mut wrong_origin = scope.clone();
+        wrong_origin.server_origin = "https://other.invalid".into();
+        assert!(rejected(&wrong_origin, authorization));
+        let mut wrong_account = scope.clone();
+        wrong_account.account_subject.push_str("-other");
+        assert!(rejected(&wrong_account, authorization));
+        let mut wrong_physical_root = scope.clone();
+        wrong_physical_root.root_file_index += 1;
+        assert!(rejected(&wrong_physical_root, authorization));
+        assert!(rejected(
+            &scope,
+            CapturedAuthorization {
+                agent_generation: 0,
+                ..authorization
+            },
+        ));
+        assert!(rejected(
+            &scope,
+            CapturedAuthorization {
+                token_generation: authorization.token_generation + 1,
+                ..authorization
+            },
+        ));
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 0);
+
+        let mismatched_recovery = Arc::new(FakeRecovery {
+            scope: provider.clone(),
+            root: ConfiguredRootIdentity {
+                file_index: root.file_index + 1,
+                ..root
+            },
+            calls: AtomicUsize::new(0),
+        });
+        let mismatched_capability: Arc<dyn PreparedEditRecovery> = mismatched_recovery.clone();
+        assert!(
+            file_rename_store_from_prepared(
+                Some(&mismatched_capability),
+                &provider,
+                root,
+                &scope,
+                authorization,
+            )
+            .is_err()
+        );
+        assert_eq!(mismatched_recovery.calls.load(Ordering::SeqCst), 0);
+
+        let other_client =
+            OpenCloudClient::new("https://other-r46.invalid", "other-token".into()).unwrap();
+        let other_provider = ProviderScope::new(
+            &other_client,
+            "r46-profile".into(),
+            "other-account".into(),
+            "https://other-r46.invalid".into(),
+        )
+        .unwrap();
+        let mismatched_provider_recovery = Arc::new(FakeRecovery {
+            scope: other_provider,
+            root,
+            calls: AtomicUsize::new(0),
+        });
+        let mismatched_provider_capability: Arc<dyn PreparedEditRecovery> =
+            mismatched_provider_recovery.clone();
+        assert!(
+            file_rename_store_from_prepared(
+                Some(&mismatched_provider_capability),
+                &provider,
+                root,
+                &scope,
+                authorization,
+            )
+            .is_err()
+        );
+        assert_eq!(mismatched_provider_recovery.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
 /// Retaining a vault edit is historical evidence only. An optional fresh
 /// notification remains separate from ordinary journaling and completion;
 /// only the outer callback may publish it after dirty accounting and guard drop.
@@ -5267,18 +6006,23 @@ struct CallbackState {
     fetch_validation_stage: AtomicUsize,
     hydrated_files: Mutex<hydration_inventory::HydratedFileInventory>,
     writable_cleanup: Mutex<crate::writable_cleanup_receipts::Receipts<WritableCleanupReceipt>>,
-    readiness: std::sync::atomic::AtomicU8,
+    readiness: Arc<std::sync::atomic::AtomicU8>,
     readiness_fetch_rejections: AtomicUsize,
     activity: Mutex<CallbackActivity>,
     drained: Condvar,
+    close_capture_admission: Arc<CloseCaptureAdmission>,
+    delete_shared: Mutex<Option<Arc<native_file_delete::Shared>>>,
     backend: Arc<dyn PlaceholderBackend>,
     recovery: Option<Arc<dyn PreparedEditRecovery>>,
     initial_edits: crate::initial_edit_queue::InitialEditQueue,
     root_path: Option<PathBuf>,
     root_identity: Option<RootIdentity>,
+    #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+    fixture_dirty_close_entries: AtomicU64,
     modified_placeholder_closes: AtomicUsize,
     non_vault_modified_closes: AtomicUsize,
     vault_dirty: Mutex<crate::vault_dirty::VaultDirtyFiles>,
+    known_cached_pending: Mutex<std::collections::BTreeMap<[u8; 16], (String, u64, u64)>>,
     journaled_placeholder_closes: AtomicUsize,
     unverifiable_placeholder_closes: AtomicUsize,
     close_completion_callbacks: AtomicUsize,
@@ -5301,6 +6045,30 @@ struct CallbackState {
     directory_callbacks: AtomicUsize,
     last_directory_param_size: AtomicUsize,
     placeholder_entries_submitted: AtomicUsize,
+}
+
+struct CachedOrdinaryEditStatus {
+    // A status observer must not prolong a disconnected backend/session or
+    // retain its credentials after the native owner and callbacks release it.
+    state: std::sync::Weak<CallbackState>,
+}
+impl crate::OrdinaryEditStatusSource for CachedOrdinaryEditStatus {
+    fn cached_pending_count(&self) -> Option<usize> {
+        // The activity guard prevents a new callback from entering across this
+        // snapshot. Never wait behind a callback, body operation or network I/O.
+        let state = self.state.upgrade()?;
+        let activity = state.activity.try_lock().ok()?;
+        if activity.active_callbacks != 0
+            || state.readiness.load(Ordering::Acquire) != CALLBACK_READY
+            || state
+                .unverifiable_placeholder_closes
+                .load(Ordering::Acquire)
+                != 0
+        {
+            return None;
+        }
+        state.recovery.as_ref()?.cached_ordinary_pending_count()
+    }
 }
 
 struct CallbackActivity {
@@ -5353,7 +6121,7 @@ impl CallbackState {
             fetch_validation_stage: AtomicUsize::new(0),
             hydrated_files: Mutex::new(hydration_inventory::HydratedFileInventory::new()),
             writable_cleanup: Mutex::new(crate::writable_cleanup_receipts::Receipts::default()),
-            readiness: std::sync::atomic::AtomicU8::new(readiness),
+            readiness: Arc::new(std::sync::atomic::AtomicU8::new(readiness)),
             readiness_fetch_rejections: AtomicUsize::new(0),
             activity: Mutex::new(CallbackActivity {
                 active_callbacks: 0,
@@ -5362,14 +6130,19 @@ impl CallbackState {
                 requests: HashMap::new(),
             }),
             drained: Condvar::new(),
+            close_capture_admission: Arc::new(CloseCaptureAdmission::default()),
+            delete_shared: Mutex::new(None),
             backend,
             recovery,
             initial_edits: crate::initial_edit_queue::InitialEditQueue::default(),
             root_path,
             root_identity,
+            #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+            fixture_dirty_close_entries: AtomicU64::new(0),
             modified_placeholder_closes: AtomicUsize::new(0),
             non_vault_modified_closes: AtomicUsize::new(0),
             vault_dirty: Mutex::new(crate::vault_dirty::VaultDirtyFiles::default()),
+            known_cached_pending: Mutex::new(std::collections::BTreeMap::new()),
             journaled_placeholder_closes: AtomicUsize::new(0),
             unverifiable_placeholder_closes: AtomicUsize::new(0),
             close_completion_callbacks: AtomicUsize::new(0),
@@ -5426,6 +6199,11 @@ impl CallbackState {
 
     fn has_unresolved_placeholder_data(&self) -> bool {
         self.non_vault_modified_closes.load(Ordering::Acquire) != 0
+            || self
+                .known_cached_pending
+                .lock()
+                .map(|rows| !rows.is_empty())
+                .unwrap_or(true)
             || self
                 .vault_dirty
                 .lock()
@@ -5577,6 +6355,7 @@ impl CallbackState {
         &self,
         info: &CfCallbackInfo,
         flags: u32,
+        close_permit: &mut CloseCapturePermit<'_>,
     ) -> Option<Box<dyn crate::DeferredVaultCaptureNotification>> {
         self.last_close_file_id
             .store(info.file_id as u64, Ordering::Release);
@@ -5595,9 +6374,12 @@ impl CallbackState {
                 .fetch_add(1, Ordering::AcqRel);
             return None;
         }
-        let result = self.capture_and_journal_modified_file(info);
+        let result = self.capture_and_journal_modified_file(info, close_permit);
         match result {
-            Ok(ModifiedCloseCapture::Clean) => None,
+            Ok(ModifiedCloseCapture::Clean) => {
+                close_permit.finish_clean();
+                None
+            }
             Ok(ModifiedCloseCapture::OrdinaryJournaled) => {
                 self.non_vault_modified_closes
                     .fetch_add(1, Ordering::AcqRel);
@@ -5648,6 +6430,7 @@ impl CallbackState {
     fn capture_and_journal_modified_file(
         &self,
         info: &CfCallbackInfo,
+        close_permit: &mut CloseCapturePermit<'_>,
     ) -> Result<ModifiedCloseCapture, (usize, i32, bool)> {
         let root_path = self.root_path.as_deref().ok_or((1, 0, false))?;
         let root_identity = self.root_identity.ok_or((1, 0, false))?;
@@ -5675,6 +6458,7 @@ impl CallbackState {
         let path = &callback_guard.path;
         let path_wide = wide_path(path).map_err(|_| (6, 0, false))?;
         let snapshot = callback_guard.snapshot;
+
         if snapshot.identity.volume_serial != root_identity.volume_serial
             || snapshot.identity.file_index != info.file_id as u64
             || snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
@@ -5682,7 +6466,7 @@ impl CallbackState {
             || snapshot.reparse_tag & IO_REPARSE_TAG_CLOUD_MASK
                 != (IO_REPARSE_TAG_CLOUD & IO_REPARSE_TAG_CLOUD_MASK)
             || snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
-            || snapshot.file_size > MAX_REQUEST_BYTES
+            || snapshot.file_size > MAX_FILE_BYTES
         {
             return Err((9, 0, false));
         }
@@ -5743,6 +6527,27 @@ impl CallbackState {
             eprintln!("synthetic close metadata clean without data open=true");
             return Ok(ModifiedCloseCapture::Clean);
         }
+        // The callback is now known dirty. Advance the shared close epoch
+        // before opening or staging its body, while retaining the permit until
+        // durable commit and initial-handoff handling have completed.
+        close_permit.mark_dirty_before_capture();
+        // Read-only diagnostic event after REAL dirty bookkeeping released its
+        // mutex. Never borrow/mutate admission state from the fixture observer.
+        #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+        {
+            let mut value = self.fixture_dirty_close_entries.load(Ordering::Acquire);
+            loop {
+                match self.fixture_dirty_close_entries.compare_exchange_weak(
+                    value,
+                    value.saturating_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => value = actual,
+                }
+            }
+        }
         // Known MODIFIED bytes invalidate this connection's exact opaque receipt
         // immediately, before any data open, revoked route lookup or retention
         // can block. Other clean files keep their own receipts. This establishes
@@ -5757,7 +6562,62 @@ impl CallbackState {
         if snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
             return Err((9, 0, true));
         }
-        let len = usize::try_from(snapshot.file_size).map_err(|_| (15, 0, true))?;
+        // Classify through the live opaque backend before any content open.
+        // Clean metadata-only closes above retain their previous behavior.
+        let vault_capture = self
+            .backend
+            .requires_hydration_inventory(identity)
+            .map_err(|_| (60, 0, true))?;
+        let streamed_requested = self
+            .recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.supports_streamed_capture());
+        let cached_vault_capture = vault_capture
+            && self
+                .backend
+                .cached_vault_edit_mode(identity)
+                .map_err(|_| (60, 0, true))?;
+        let large_vault_stream = vault_capture
+            && (cached_vault_capture
+                || snapshot.file_size > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64);
+        let capture_kind = if large_vault_stream {
+            if snapshot.file_size > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES {
+                return Err((61, 0, true));
+            }
+            native_streamed_io::CaptureKind::Vault
+        } else {
+            native_streamed_io::select_capture_kind(
+                snapshot.file_size,
+                streamed_requested,
+                vault_capture,
+            )
+            .map_err(|_| (9, 0, true))?
+        };
+        let streamed_job = if capture_kind == native_streamed_io::CaptureKind::Streamed {
+            // Snapshot the original epoch before capturing this job's clock.
+            let epoch = self.backend.recovery_transfer_cancellation();
+            let job = self
+                .recovery
+                .as_ref()
+                .ok_or((18, 0, true))?
+                .begin_streamed_job()
+                .ok_or((19, 0, true))?;
+            let readiness = Arc::downgrade(&self.readiness);
+            let backend = Arc::downgrade(&self.backend);
+            let job = job.with_revocation_check(Arc::new(move || {
+                readiness
+                    .upgrade()
+                    .is_none_or(|ready| ready.load(Ordering::Acquire) != CALLBACK_READY)
+                    || backend
+                        .upgrade()
+                        .is_none_or(|backend| backend.recovery_job_revoked())
+                    || epoch.as_ref().is_none_or(|cancelled| cancelled())
+            }));
+            job.check().map_err(|_| (19, 0, true))?;
+            Some(job)
+        } else {
+            None
+        };
         // Keep the no-follow entry guard open without FILE_SHARE_DELETE, then
         // open the Cloud Files data stream normally. The guard prevents name
         // substitution; the second handle is checked against the guard's file
@@ -5769,7 +6629,7 @@ impl CallbackState {
                 FILE_SHARE_READ,
                 null(),
                 OPEN_EXISTING,
-                0,
+                if large_vault_stream { 0x4000_0000 } else { 0 }, // FILE_FLAG_OVERLAPPED
                 null_mut(),
             )
         };
@@ -5798,11 +6658,233 @@ impl CallbackState {
         // fall through to the ordinary journal or automatic edit dispatch.
         // All backend/session fences are acquired lexically before the body
         // read and retained through protected index/body publication/readback.
-        if self
+        let current_vault_capture = self
             .backend
             .requires_hydration_inventory(identity)
-            .map_err(|_| (60, 0, true))?
-        {
+            .map_err(|_| (60, 0, true))?;
+        if current_vault_capture != vault_capture {
+            return Err((60, 0, true));
+        }
+        if current_vault_capture && large_vault_stream {
+            let mut stream = Some(content_handle);
+            let mut failure = (62, 0, true);
+            let mut retained = false;
+            let mut notification = None;
+            let callback_result =
+                self.backend
+                    .with_vault_edit_capture_context(identity, &mut |capture| {
+                        let result = (|| {
+                            let baseline = capture.baseline();
+                            if baseline.identity().as_slice() != identity
+                                || baseline.root().volume_serial != root_identity.volume_serial
+                                || baseline.root().file_index != root_identity.file_index
+                                || baseline.metadata().directory
+                                || baseline.token_generation() == 0
+                                || baseline.unlock_epoch() == 0
+                            {
+                                return Err((63, 0, true));
+                            }
+                            let handle = stream.take().ok_or((64, 0, true))?;
+                            let route_cancelled =
+                                capture.stream_revocation().ok_or((63, 0, true))?;
+                            let readiness = Arc::downgrade(&self.readiness);
+                            let backend = Arc::downgrade(&self.backend);
+                            let epoch = self.backend.recovery_transfer_cancellation();
+                            let job = CancellationToken::for_recovery_job(
+                                crate::StreamedRecoveryPolicy::default(),
+                            )
+                            .with_revocation_check(Arc::new(
+                                move || {
+                                    route_cancelled()
+                                        || readiness.upgrade().is_none_or(|ready| {
+                                            ready.load(Ordering::Acquire) != CALLBACK_READY
+                                        })
+                                        || backend
+                                            .upgrade()
+                                            .is_none_or(|backend| backend.recovery_job_revoked())
+                                        || epoch.as_ref().is_some_and(|cancelled| cancelled())
+                                },
+                            ));
+                            let cancelled = || job.is_stopped();
+                            let original_usn =
+                                completion_usn(handle.0, snapshot.identity.file_index)
+                                    .map_err(|_| (63, 0, true))?;
+                            let original_basic =
+                                completion_basic_info(handle.0).map_err(|_| (63, 0, true))?;
+                            if original_usn <= 0
+                                || !hydration_full_on_disk(handle.0, snapshot.file_size)
+                                    .map_err(|_| (63, 0, true))?
+                            {
+                                return Err((63, 0, true));
+                            }
+                            let mut source = VaultStreamCaptureReader {
+                                handle: &handle,
+                                offset: 0,
+                                length: snapshot.file_size,
+                                eof: false,
+                                sha: Sha256::new(),
+                                cancellation: job.cancellation(),
+                            };
+                            let mut chunk = Zeroizing::new([0u8; 64 * 1024]);
+                            loop {
+                                let count = source.read(&mut *chunk).map_err(|_| (64, 0, true))?;
+                                if count == 0 {
+                                    break;
+                                }
+                            }
+                            if !source.eof || source.offset != snapshot.file_size {
+                                return Err((64, 0, true));
+                            }
+                            let sha256: [u8; 32] = source.sha.clone().finalize().into();
+                            // Explicit-offset seek-back on the SAME original overlapped
+                            // owner, never reopen/transfer a native pointer or source.
+                            source.offset = 0;
+                            source.eof = false;
+                            source.sha = Sha256::new();
+                            let components = pinned_entry_final
+                                .strip_prefix(&callback_guard.root_final_path)
+                                .ok()
+                                .and_then(|path| {
+                                    path.components()
+                                        .map(|part| match part {
+                                            std::path::Component::Normal(value) => {
+                                                value.to_str().map(str::to_owned)
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect::<Option<Vec<_>>>()
+                                })
+                                .filter(|parts| !parts.is_empty())
+                                .ok_or((65, 0, true))?;
+                            let file = LocalFileIdentity {
+                                volume_serial: snapshot.identity.volume_serial,
+                                file_index: snapshot.identity.file_index,
+                            };
+                            let post_proof = || -> Result<(), BackendError> {
+                                if cancelled()
+                                    || !same_edit_snapshot(
+                                        root_snapshot(handle.0)
+                                            .map_err(|_| BackendError::Unavailable)?,
+                                        snapshot,
+                                    )
+                                    || completion_usn(handle.0, file.file_index)
+                                        .map_err(|_| BackendError::Unavailable)?
+                                        != original_usn
+                                    || completion_basic_info(handle.0)
+                                        .map_err(|_| BackendError::Unavailable)?
+                                        != original_basic
+                                    || !modified_ranges_for_handle(handle.0)
+                                        .map_err(|_| BackendError::Unavailable)?
+                                    || !hydration_full_on_disk(handle.0, snapshot.file_size)
+                                        .map_err(|_| BackendError::Unavailable)?
+                                    || native_namespace_directory::opaque_directory_identity(
+                                        handle.0,
+                                    )
+                                    .map_err(|_| BackendError::Unavailable)?
+                                        != baseline.identity()
+                                {
+                                    return Err(BackendError::Unavailable);
+                                }
+                                let post = callback_path(
+                                    root_path,
+                                    info.volume_dos_name,
+                                    info.normalized_path,
+                                    root_identity,
+                                    info.file_id as u64,
+                                    CallbackSizePolicy::Exact(snapshot.file_size),
+                                    &self.last_close_path_common_prefix_bytes,
+                                )
+                                .map_err(|_| BackendError::Unavailable)?;
+                                if !same_edit_snapshot(post.snapshot, snapshot)
+                                    || !windows_paths_equal(
+                                        &post.root_final_path,
+                                        &callback_guard.root_final_path,
+                                    )
+                                    || !windows_paths_equal(
+                                        &final_path_for_handle(handle.0)
+                                            .map_err(|_| BackendError::Unavailable)?,
+                                        &pinned_entry_final,
+                                    )
+                                {
+                                    return Err(BackendError::Unavailable);
+                                }
+                                Ok(())
+                            };
+                            post_proof().map_err(|_| (66, 0, true))?;
+                            let checks = std::cell::Cell::new(0usize);
+                            let mut verify_source = || {
+                                post_proof()?;
+                                checks.set(checks.get() + 1);
+                                Ok(())
+                            };
+                            notification = capture
+                                .retain_streamed_with_usn(
+                                    crate::vault_custody::ExistingVaultStreamedEditPayload {
+                                        root: crate::ConfiguredRootIdentity {
+                                            volume_serial: root_identity.volume_serial,
+                                            file_index: root_identity.file_index,
+                                        },
+                                        file,
+                                        components: components.clone(),
+                                        length: snapshot.file_size,
+                                        sha256,
+                                    },
+                                    original_usn,
+                                    &mut source,
+                                    &mut verify_source,
+                                    &cancelled,
+                                )
+                                .map_err(|_| (66, 0, true))?;
+                            if checks.get() != 1
+                                || !source.eof
+                                || source.offset != snapshot.file_size
+                                || <[u8; 32]>::from(source.sha.clone().finalize()) != sha256
+                            {
+                                return Err((66, 0, true));
+                            }
+                            post_proof().map_err(|_| (66, 0, true))?;
+                            let mut dirty = self.vault_dirty.lock().map_err(|_| (68, 0, true))?;
+                            self.writable_cleanup
+                                .lock()
+                                .map_err(|_| (68, 0, true))?
+                                .invalidate(&baseline.identity());
+                            dirty
+                                .record(
+                                    baseline.identity(),
+                                    file,
+                                    snapshot.file_size,
+                                    sha256,
+                                    components,
+                                )
+                                .map_err(|_| (68, 0, true))?;
+                            retained = true;
+                            Ok(())
+                        })();
+                        result.map_err(|error| {
+                            retained = false;
+                            notification = None;
+                            failure = error;
+                            BackendError::Unavailable
+                        })
+                    });
+            if callback_result.is_ok() && !retained {
+                failure = (67, 0, true);
+            }
+            let notification = crate::backend::finish_vault_capture_notification(
+                callback_result,
+                retained,
+                notification,
+            )
+            .map_err(|_| failure)?;
+            return Ok(ModifiedCloseCapture::VaultRetained(notification));
+        }
+        if current_vault_capture {
+            // The legacy body API retains its original cap. Larger vault
+            // captures use the preceding protected streamed branch.
+            if snapshot.file_size > MAX_REQUEST_BYTES {
+                return Err((61, 0, true));
+            }
+            let len = usize::try_from(snapshot.file_size).map_err(|_| (15, 0, true))?;
             if len > crate::MAX_VAULT_EDIT_CAPTURE_BYTES {
                 return Err((61, 0, true));
             }
@@ -5975,8 +7057,84 @@ impl CallbackState {
         {
             return Err((29, 0, true));
         }
-        let (content, after_read) = read_placeholder_for_recovery(content_handle, len)
-            .map_err(|(stage, hresult)| (stage, hresult, true))?;
+        let relative_path = binding
+            .virtual_path
+            .strip_prefix('/')
+            .filter(|relative| !relative.is_empty())
+            .ok_or((17, 0, true))?;
+        let recovery = self.recovery.as_ref().ok_or((18, 0, true))?;
+        let cancellation = streamed_job
+            .as_ref()
+            .map_or_else(CancellationToken::new, |job| job.cancellation().clone());
+        let mut cancelled = || {
+            self.readiness.load(Ordering::Acquire) != CALLBACK_READY
+                || cancellation.is_cancelled()
+                || cancellation.is_expired()
+        };
+        let mut streamed_file = None;
+        let (content, staged, after_read) = if capture_kind
+            == native_streamed_io::CaptureKind::Streamed
+        {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!(
+                "synthetic_streamed_close_phase=guard support={} ready={} cancelled={} expired={}",
+                recovery.supports_streamed_capture(),
+                self.readiness.load(Ordering::Acquire) == CALLBACK_READY,
+                cancellation.is_cancelled(),
+                cancellation.is_expired()
+            );
+            if !recovery.supports_streamed_capture() || cancelled() {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!("synthetic_streamed_close_phase=guard_refused");
+                return Err((19, 0, true));
+            }
+            let mut owned = content_handle;
+            let raw = std::mem::replace(&mut owned.0, null_mut());
+            // SAFETY: this is the owned synchronous read handle opened above,
+            // not a borrowed Cf protected handle. Ownership transfers exactly
+            // once, retaining its write/delete exclusions through commit.
+            let mut file = unsafe { std::fs::File::from_raw_handle(raw) };
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_streamed_close_phase=stage_begin");
+            let stage = recovery
+                .stage_streamed_edit(
+                    binding,
+                    crate::ConfiguredRootIdentity {
+                        volume_serial: root_identity.volume_serial,
+                        file_index: root_identity.file_index,
+                    },
+                    LocalFileIdentity {
+                        volume_serial: snapshot.identity.volume_serial,
+                        file_index: snapshot.identity.file_index,
+                    },
+                    relative_path,
+                    snapshot.file_size,
+                    streamed_job.as_ref().ok_or((19, 0, true))?,
+                    &mut file,
+                    &mut cancelled,
+                )
+                .map_err(|_| {
+                    #[cfg(feature = "synthetic-agent-integration")]
+                    eprintln!("synthetic_streamed_close_phase=stage_refused ready={} cancelled={} expired={}",
+                        self.readiness.load(Ordering::Acquire) == CALLBACK_READY,
+                        cancellation.is_cancelled(), cancellation.is_expired());
+                    (19, 0, true)
+                })?;
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_streamed_close_phase=stage_complete");
+            let after = root_snapshot(file.as_raw_handle()).map_err(|_| (23, 0, true))?;
+            if !matches!(modified_ranges_for_handle(file.as_raw_handle()), Ok(true)) || cancelled()
+            {
+                return Err((24, 0, true));
+            }
+            streamed_file = Some(file);
+            (None, Some(stage), after)
+        } else {
+            let len = usize::try_from(snapshot.file_size).map_err(|_| (15, 0, true))?;
+            let (content, after) = read_placeholder_for_recovery(content_handle, len)
+                .map_err(|(stage, hresult)| (stage, hresult, true))?;
+            (Some(content), None, after)
+        };
         if after_read.identity != snapshot.identity
             || after_read.file_attributes != snapshot.file_attributes
             || after_read.reparse_tag != snapshot.reparse_tag
@@ -6011,27 +7169,62 @@ impl CallbackState {
             return Err((39, 0, true));
         }
 
-        let relative_path = binding
-            .virtual_path
-            .strip_prefix('/')
-            .filter(|relative| !relative.is_empty())
-            .ok_or((17, 0, true))?;
-        let recovery = self.recovery.as_ref().ok_or((18, 0, true))?;
-        let receipt = recovery
-            .append_edit_for_initial_dispatch(
-                binding,
-                crate::ConfiguredRootIdentity {
-                    volume_serial: root_identity.volume_serial,
-                    file_index: root_identity.file_index,
-                },
-                LocalFileIdentity {
-                    volume_serial: after_read.identity.volume_serial,
-                    file_index: after_read.identity.file_index,
-                },
-                relative_path,
-                &content,
-            )
-            .map_err(|_| (19, 0, true))?;
+        let receipt = if let Some(stage) = staged {
+            let Some(file) = streamed_file.as_ref() else {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!("synthetic_streamed_close_phase=source_owner_missing");
+                return Err((19, 0, true));
+            };
+            if cancelled()
+                || !same_edit_snapshot(
+                    root_snapshot(file.as_raw_handle()).map_err(|_| (23, 0, true))?,
+                    snapshot,
+                )
+                || !matches!(modified_ranges_for_handle(file.as_raw_handle()), Ok(true))
+            {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!(
+                    "synthetic_streamed_close_phase=precommit_refused ready={} cancelled={} expired={}",
+                    self.readiness.load(Ordering::Acquire) == CALLBACK_READY,
+                    cancellation.is_cancelled(),
+                    cancellation.is_expired()
+                );
+                return Err((24, 0, true));
+            }
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_streamed_close_phase=commit_begin");
+            let receipt = recovery
+                .commit_streamed_edit(stage, &mut cancelled)
+                .map_err(|_| {
+                    #[cfg(feature = "synthetic-agent-integration")]
+                    eprintln!("synthetic_streamed_close_phase=commit_refused ready={} cancelled={} expired={}",
+                        self.readiness.load(Ordering::Acquire) == CALLBACK_READY,
+                        cancellation.is_cancelled(), cancellation.is_expired());
+                    (19, 0, true)
+                })?;
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!(
+                "synthetic_streamed_close_phase=commit_complete receipt={}",
+                receipt.is_some()
+            );
+            receipt
+        } else {
+            recovery
+                .append_edit_for_initial_dispatch(
+                    binding,
+                    crate::ConfiguredRootIdentity {
+                        volume_serial: root_identity.volume_serial,
+                        file_index: root_identity.file_index,
+                    },
+                    LocalFileIdentity {
+                        volume_serial: after_read.identity.volume_serial,
+                        file_index: after_read.identity.file_index,
+                    },
+                    relative_path,
+                    content.as_ref().ok_or((19, 0, true))?,
+                )
+                .map_err(|_| (19, 0, true))?
+        };
         if let Some(receipt) = receipt {
             // Saturation/contention loses only automatic scheduling. The
             // immutable body was already durably retained for explicit review.
@@ -6069,9 +7262,13 @@ impl CallbackState {
                     .ok()
                 });
             if let Some(location) = location {
-                let _ =
-                    self.initial_edits
-                        .push_with_location(Arc::clone(recovery), receipt, location);
+                if self
+                    .initial_edits
+                    .push_with_location(Arc::clone(recovery), receipt, location)
+                    .is_ok()
+                {
+                    close_permit.finish_durable();
+                }
             }
         }
         Ok(ModifiedCloseCapture::OrdinaryJournaled)
@@ -6610,6 +7807,7 @@ unsafe extern "system" fn fetch_placeholders_callback(
                 children,
                 STATUS_SUCCESS,
                 &|child| prepared.file_read_only(child),
+                prepared.completes_population(),
             );
             #[cfg(test)]
             eprintln!(
@@ -7188,13 +8386,20 @@ fn execute_transfer_placeholders(
     completion_status: i32,
     read_only: bool,
 ) -> PlaceholderExecutionOutcome {
-    execute_transfer_placeholders_with_policy(info, children, completion_status, &|_| read_only)
+    execute_transfer_placeholders_with_policy(
+        info,
+        children,
+        completion_status,
+        &|_| read_only,
+        true,
+    )
 }
 fn execute_transfer_placeholders_with_policy(
     info: &CfCallbackInfo,
     children: &[crate::PlaceholderChild],
     completion_status: i32,
     file_read_only: &dyn Fn(&crate::PlaceholderChild) -> bool,
+    completes_population: bool,
 ) -> PlaceholderExecutionOutcome {
     let names = children
         .iter()
@@ -7247,7 +8452,7 @@ fn execute_transfer_placeholders_with_policy(
     // contract. Tell Cloud Files the current directory population is finished;
     // without this terminal flag it may keep requesting pages and wait on the
     // original filesystem enumeration.
-    let flags = if completion_status == STATUS_SUCCESS {
+    let flags = if completion_status == STATUS_SUCCESS && completes_population {
         CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION
     } else {
         CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE
@@ -8259,12 +9464,13 @@ pub(super) fn pin_registered_configured_root(
 }
 
 fn verify_sync_root_registration(path: &Path, expected: RootIdentity) -> Result<(), Error> {
+    let domain = configured_registration_domain(expected)?;
     verify_sync_root_registration_identity(
         path,
         expected,
-        &configured_sync_root_identity(expected),
-        "Raiun Internal Cloud Files Root",
-        "0.0.0-internal",
+        &domain.sync_root_identity,
+        &domain.provider_name,
+        domain.provider_version,
     )
 }
 
@@ -8992,6 +10198,28 @@ impl ProtectedCompletionFile {
         }
         Ok(())
     }
+    fn read_complete_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), Error> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let length = u32::try_from(bytes.len()).map_err(|_| Error::EditRecoveryUnavailable)?;
+        let mut io = CompletionIo::new()?;
+        io.overlapped.offset = offset as u32;
+        io.overlapped.offset_high = (offset >> 32) as u32;
+        let result = unsafe {
+            ReadFile(
+                self.raw,
+                bytes.as_mut_ptr().cast(),
+                length,
+                null_mut(),
+                &mut io.overlapped,
+            )
+        };
+        if io.finish(self.raw, result)? != length {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        Ok(())
+    }
 }
 impl Drop for ProtectedCompletionFile {
     fn drop(&mut self) {
@@ -9148,33 +10376,86 @@ fn completion_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
     }
     // SAFETY: returned is bounded by the initialized storage above.
     let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), returned) };
-    let length = u32::from_le_bytes(
-        bytes[0..4]
-            .try_into()
-            .map_err(|_| Error::EditRecoveryUnavailable)?,
-    ) as usize;
-    let major = u16::from_le_bytes(
-        bytes[4..6]
-            .try_into()
-            .map_err(|_| Error::EditRecoveryUnavailable)?,
-    );
+    decode_file_usn_record(bytes, expected_file_id).ok_or(Error::EditRecoveryUnavailable)
+}
+
+fn decode_file_usn_record(bytes: &[u8], expected_file_id: u64) -> Option<i64> {
+    let returned = bytes.len();
+    if !(60..=65536).contains(&returned) {
+        return None;
+    }
+    let length = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
+    let major = u16::from_le_bytes(bytes[4..6].try_into().ok()?);
     if length < 60 || length > returned || major != 2 {
-        return Err(Error::EditRecoveryUnavailable);
+        return None;
     }
-    let file_id = u64::from_le_bytes(
-        bytes[8..16]
-            .try_into()
-            .map_err(|_| Error::EditRecoveryUnavailable)?,
-    );
-    let usn = i64::from_le_bytes(
-        bytes[24..32]
-            .try_into()
-            .map_err(|_| Error::EditRecoveryUnavailable)?,
-    );
+    let file_id = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
+    let usn = i64::from_le_bytes(bytes[24..32].try_into().ok()?);
     if file_id != expected_file_id || usn <= 0 {
+        return None;
+    }
+    Some(usn)
+}
+
+// Native-only original OVERLAPPED encrypted-source owner. Reader borrows are
+// lexical; PendingRead drains before any buffer or handle can be released.
+struct VaultStreamCaptureReader<'a> {
+    handle: &'a RawOwnedHandle,
+    offset: u64,
+    length: u64,
+    eof: bool,
+    sha: Sha256,
+    cancellation: &'a CancellationToken,
+}
+impl std::io::Read for VaultStreamCaptureReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.cancellation.is_cancelled() || self.cancellation.is_expired() {
+            return Err(std::io::Error::other("vault stream capture cancelled"));
+        }
+        let eof = self.offset == self.length;
+        let bound = if eof {
+            1
+        } else {
+            output
+                .len()
+                .min(64 * 1024)
+                .min((self.length - self.offset) as usize)
+        };
+        let count = native_streamed_io::read_vault_capture_at(
+            self.handle,
+            self.offset,
+            &mut output[..bound],
+            eof,
+            Some(self.cancellation),
+        )
+        .map_err(|_| std::io::Error::other("vault source read refused"))?;
+        if (eof && count != 0) || (!eof && count == 0) {
+            return Err(std::io::Error::other("vault source length changed"));
+        }
+        self.eof |= eof;
+        self.offset += count as u64;
+        self.sha.update(&output[..count]);
+        Ok(count)
+    }
+}
+fn vault_stream_digest(value: &str) -> Result<[u8; 32], Error> {
+    if value.len() != 64 {
         return Err(Error::EditRecoveryUnavailable);
     }
-    Ok(usn)
+    let mut digest = [0u8; 32];
+    for (i, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char)
+            .to_digit(16)
+            .ok_or(Error::EditRecoveryUnavailable)?;
+        let low = (pair[1] as char)
+            .to_digit(16)
+            .ok_or(Error::EditRecoveryUnavailable)?;
+        digest[i] = ((high << 4) | low) as u8;
+    }
+    Ok(digest)
 }
 
 type PlaceholderRecoveryRead = Result<(Zeroizing<Vec<u8>>, RootSnapshot), (usize, i32)>;
@@ -9297,12 +10578,18 @@ fn synthetic_sync_root_identity(identity: RootIdentity) -> [u8; 24] {
 }
 
 #[allow(dead_code)]
-fn configured_sync_root_identity(identity: RootIdentity) -> [u8; 24] {
-    let mut root_identity = [0_u8; 24];
-    root_identity[..8].copy_from_slice(b"RaiunCF1");
-    root_identity[8..12].copy_from_slice(&identity.volume_serial.to_le_bytes());
-    root_identity[12..20].copy_from_slice(&identity.file_index.to_le_bytes());
-    root_identity
+fn configured_registration_domain(
+    identity: RootIdentity,
+) -> Result<crate::registration_domain::ConfiguredRegistrationDomain, Error> {
+    let context = raiun_control_windows::headless_context()
+        .map_err(|error| io_error("validate headless registration context", error))?;
+    crate::registration_domain::ConfiguredRegistrationDomain::new(
+        crate::ConfiguredRootIdentity {
+            volume_serial: identity.volume_serial,
+            file_index: identity.file_index,
+        },
+        context.as_ref().map(|context| context.scope_id()),
+    )
 }
 
 /// Domain separation only. Native registration verification remains the existing
@@ -9311,19 +10598,12 @@ fn configured_sync_root_identity(identity: RootIdentity) -> [u8; 24] {
 pub(super) fn vault_custody_registration_binding(
     root: crate::ConfiguredRootIdentity,
     composite: crate::OpaqueIdentity,
-) -> String {
-    use std::fmt::Write;
-    let sync = configured_sync_root_identity(RootIdentity {
+) -> Result<String, Error> {
+    let domain = configured_registration_domain(RootIdentity {
         volume_serial: root.volume_serial,
         file_index: root.file_index,
-    });
-    let mut binding =
-        String::from("raiun-vault-registration-v1:Raiun Internal Cloud Files Root:0.0.0-internal:");
-    for byte in sync.into_iter().chain(composite.as_bytes().iter().copied()) {
-        // Formatting into a String is infallible.
-        write!(&mut binding, "{byte:02x}").expect("format registration binding");
-    }
-    binding
+    })?;
+    Ok(domain.vault_binding(composite.as_bytes()))
 }
 
 fn register_root_with_identity(
@@ -9630,6 +10910,92 @@ fn io_error(operation: &'static str, error: std::io::Error) -> Error {
 
 #[cfg(test)]
 mod backend_tests {
+    #[test]
+    fn ordinary_status_probe_is_nonblocking_and_does_not_retain_disconnected_backend() {
+        let state = std::sync::Arc::new(super::CallbackState::new(std::sync::Arc::new(
+            super::SyntheticBackend,
+        )));
+        let weak = std::sync::Arc::downgrade(&state);
+        let probe = super::CachedOrdinaryEditStatus {
+            state: weak.clone(),
+        };
+        state
+            .readiness
+            .store(super::CALLBACK_READY, super::Ordering::Release);
+        let activity = state.activity.lock().unwrap();
+        assert_eq!(
+            crate::OrdinaryEditStatusSource::cached_pending_count(&probe),
+            None
+        );
+        drop(activity);
+        assert_eq!(
+            crate::OrdinaryEditStatusSource::cached_pending_count(&probe),
+            None,
+            "unsupported legacy recovery is unknown"
+        );
+        drop(state);
+        assert!(
+            weak.upgrade().is_none(),
+            "status cannot keep a credential-bearing backend alive"
+        );
+        assert_eq!(
+            crate::OrdinaryEditStatusSource::cached_pending_count(&probe),
+            None
+        );
+    }
+    #[test]
+    fn configured_registration_uses_validated_headless_context_without_fallback() {
+        const CHILD: &str = "RAIUN_REGISTRATION_DOMAIN_CHILD";
+        let identity = super::RootIdentity {
+            volume_serial: 17,
+            file_index: 29,
+        };
+        match std::env::var(CHILD).as_deref() {
+            Ok("valid") => {
+                let context = raiun_control_windows::headless_context().unwrap().unwrap();
+                let actual = super::configured_registration_domain(identity).unwrap();
+                let expected = crate::registration_domain::ConfiguredRegistrationDomain::new(
+                    crate::ConfiguredRootIdentity {
+                        volume_serial: identity.volume_serial,
+                        file_index: identity.file_index,
+                    },
+                    Some(context.scope_id()),
+                )
+                .unwrap();
+                assert_eq!(actual.sync_root_identity, expected.sync_root_identity);
+                assert_eq!(actual.provider_name, expected.provider_name);
+                assert_ne!(&actual.sync_root_identity[..8], b"RaiunCF1");
+                return;
+            }
+            Ok("invalid") => {
+                assert!(super::configured_registration_domain(identity).is_err());
+                return;
+            }
+            _ => {}
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let desktop_local = temp.path().join("desktop-local");
+        std::fs::create_dir(&desktop_local).unwrap();
+        for mode in ["valid", "invalid"] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "native::backend_tests::configured_registration_uses_validated_headless_context_without_fallback",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .env("RAIUN_HEADLESS_CONTEXT", "1")
+                .env("LOCALAPPDATA", &desktop_local)
+                .env_remove("RAIUN_STATE_DIR");
+            if mode == "valid" {
+                command.env("RAIUN_STATE_DIR", temp.path().join("headless"));
+            }
+            assert!(command.status().unwrap().success());
+        }
+        assert!(!desktop_local.join("Raiun").exists());
+    }
+
     #[test]
     fn failed_transfer_covers_waiting_range_without_a_payload() {
         // The broker payload is deliberately not page-aligned at EOF.
@@ -11117,5 +12483,78 @@ mod backend_tests {
             self.trace.lock().unwrap().read_range_calls += 1;
             Err(BackendError::Unavailable)
         }
+    }
+}
+
+// Read only existing on-disk labels. Opaque identities must already be present
+// in the account/root protected catalogue; names never grant remote authority.
+fn restore_cached_space_labels(
+    root: &OwnedConfiguredRoot,
+    backend: &crate::OpenCloudPlaceholderBackend,
+    composite: &[u8],
+) -> Result<(), Error> {
+    let children = backend
+        .enumerate(
+            composite,
+            &CancellationToken::with_timeout(crate::DEFAULT_FETCH_TIMEOUT),
+        )
+        .map_err(|_| Error::ProviderUnavailable)?;
+    let spaces = children
+        .iter()
+        .find(|c| c.name == "Spaces")
+        .ok_or(Error::ProviderUnavailable)?;
+    let (_spaces, _snapshot, _ancestors) =
+        pin_configured_directory_path(root, spaces, &["Spaces"], FILE_READ_ATTRIBUTES)?;
+    let candidates = backend
+        .cached_space_roots()
+        .map_err(|_| Error::ProviderUnavailable)?;
+    let mut seen_roots = std::collections::HashSet::new();
+    for name in native_vault_cleanup_inventory::local_names(&root.path.join("Spaces"))? {
+        let mut found = None;
+        for candidate in &candidates {
+            let mut child = candidate.clone();
+            child.name = name.clone();
+            if let Ok(pins) = pin_configured_directory_path(
+                root,
+                &child,
+                &["Spaces", &name],
+                FILE_READ_ATTRIBUTES,
+            ) {
+                if found.is_some() {
+                    return Err(Error::ConfiguredRootChanged);
+                }
+                found = Some((candidate.identity.clone(), pins));
+            }
+        }
+        if let Some((identity, _pins)) = found {
+            // A protected opaque copied onto two physical children cannot
+            // establish one cached Space locator. Preserve both and refuse.
+            if !seen_roots.insert(identity.clone()) {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            backend
+                .set_cached_space_label(&identity, &name)
+                .map_err(|_| Error::ProviderUnavailable)?;
+        }
+    }
+    root.verify_identity(true)?;
+    root.verify_registered()
+}
+
+impl ConfiguredRootConnection {
+    pub(super) fn refresh_cached_space_labels(
+        &self,
+        backend: &crate::OpenCloudPlaceholderBackend,
+    ) -> Result<(), Error> {
+        if !self.connected
+            || !std::ptr::eq(
+                self.state.backend.as_ref() as *const dyn PlaceholderBackend as *const (),
+                backend as *const _ as *const (),
+            )
+        {
+            return Err(Error::ConnectionStateInvalid);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConnectionStateInvalid)?;
+        restore_cached_space_labels(root, backend, self.composite_root_identity.as_bytes())
     }
 }

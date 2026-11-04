@@ -5,8 +5,15 @@
 //! Remote pipe clients are rejected by the kernel. JSON framing and limits
 //! remain implemented in `raiun-control`.
 
+mod headless;
+pub use headless::{HeadlessContext, headless_context};
+pub mod startup;
+
 #[cfg(any(windows, test))]
 pub mod autostart;
+
+#[cfg(any(windows, test))]
+pub mod directory_notifications;
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -21,8 +28,8 @@ mod win32;
 /// A pinned Windows directory handle for safe private-journal operations.
 #[cfg(windows)]
 pub use private_directory::{
-    OwnedPrivateReader, OwnedPrivateStagedReader, PinnedDirectory, PinnedFileIdentity,
-    PinnedPrivateFile, PinnedPrivateFileAccess, PrivateDirectory,
+    LegacyRecoveryMetadataDirectory, OwnedPrivateReader, OwnedPrivateStagedReader, PinnedDirectory,
+    PinnedFileIdentity, PinnedPrivateFile, PinnedPrivateFileAccess, PrivateDirectory,
 };
 /// DPAPI-protected, current-user-only storage for bounded serialized sessions.
 #[cfg(windows)]
@@ -30,6 +37,23 @@ pub use session_store::DpapiSessionStore;
 /// A one-shot listener bound to the current Windows user's private pipe.
 #[cfg(windows)]
 pub use win32::{NamedPipeListener, PipeStream, connect_current_user};
+
+/// Stable, nonsecret GUI instance scope from this process's Windows TokenUser.
+/// It changes only native singleton names, never application data locations.
+#[cfg(windows)]
+pub fn current_user_instance_scope() -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let sid = win32::current_user_sid_for_storage()?;
+    if !is_sid_shape(&sid) {
+        return Err(std::io::Error::other(
+            "Windows returned an invalid user identity",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"raiun-desktop-instance-sid-v1\0");
+    hash.update(sid.as_bytes());
+    Ok(format!("{:x}", hash.finalize()))
+}
 
 /// Construct the stable, per-user pipe path from an already-resolved SID.
 ///
@@ -39,6 +63,25 @@ pub fn pipe_path_for_sid(sid: &str) -> Option<String> {
         return None;
     }
     Some(format!(r"\\.\pipe\raiun-control-{sid}"))
+}
+
+/// Construct a separate bounded pipe name for an admitted headless scope.
+/// The SID must come from the process token and the scope from `headless_context`.
+pub fn headless_pipe_path_for_sid(sid: &str, scope_id: &str) -> Option<String> {
+    if !is_sid_shape(sid)
+        || scope_id.len() != 64
+        || !scope_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    // Hash the already-bounded SID to keep the entire pipe component within
+    // Windows' 256-character limit even for a maximum-sized valid SID.
+    let user = Sha256::digest(sid.as_bytes());
+    let user: String = user.iter().map(|byte| format!("{byte:02x}")).collect();
+    Some(format!(r"\\.\pipe\raiun-headless-{user}-{scope_id}"))
 }
 
 fn is_sid_shape(sid: &str) -> bool {

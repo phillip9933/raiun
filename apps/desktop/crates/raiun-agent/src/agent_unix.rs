@@ -26,6 +26,7 @@ use raiun_engine::{
     Engine, MEDIA_STABLE_FILE_SECONDS, MediaImportRecoveryCursor, MediaImportRunStatus, SyncReport,
 };
 use raiun_opencloud::transfer_budget::{TransferBudget, TransferLimits};
+use runtime_mode::RuntimeMode;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -40,6 +41,41 @@ use std::{
 use storage::Settings;
 
 const MAX_PENDING_SPACE_SYNCS: usize = 256;
+
+fn pending_write_response(item: raiun_cache::PendingWriteItem) -> Result<Value, String> {
+    let mut response = json!({
+        "space_id": item.space_id,
+        "root_resource_id": item.root_resource_id,
+        "write_id": item.write_id.to_string(),
+        "path": item.path,
+        "state": match item.state {
+            raiun_cache::WriteState::Pending => "pending",
+            raiun_cache::WriteState::Conflict => "conflict",
+            raiun_cache::WriteState::Verified => "verified",
+        },
+        "bytes": item.bytes,
+        "created_at_unix": item.created_at_unix,
+    });
+    if let Some(handoff) = item.create_handoff {
+        use raiun_cache::{OrdinaryCreateState as Create, WriteState};
+        let (state, expected) = match handoff.state {
+            Create::Staged => ("staged", WriteState::Pending),
+            Create::Ready => ("ready", WriteState::Pending),
+            Create::Claimed => ("claimed", WriteState::Pending),
+            Create::Uncertain => ("uncertain", WriteState::Conflict),
+            Create::Conflict => ("conflict", WriteState::Conflict),
+            Create::Verified => return Err("Completed upload appeared in pending edits".into()),
+        };
+        if item.state != expected
+            || (handoff.state == Create::Staged && handoff.local_handoff_acknowledged)
+        {
+            return Err("Saved upload lifecycle is inconsistent".into());
+        }
+        response["create_state"] = json!(state);
+        response["local_handoff_acknowledged"] = json!(handoff.local_handoff_acknowledged);
+    }
+    Ok(response)
+}
 
 fn remote_listing_response(entries: Vec<RemoteEntry>) -> Result<Value, String> {
     let warnings = windows_name_warnings(&entries);
@@ -126,11 +162,18 @@ struct AuthState {
 }
 
 trait MountedCloud: Send {
+    fn stop_create_uploads(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     fn unmount(&mut self) -> Result<(), String>;
     fn is_mounted(&self) -> bool;
 }
 
 impl MountedCloud for raiun_fuse::MountHandle {
+    fn stop_create_uploads(&mut self) -> Result<(), String> {
+        raiun_fuse::MountHandle::stop_create_uploads(self)
+    }
+
     fn unmount(&mut self) -> Result<(), String> {
         raiun_fuse::MountHandle::unmount(self)
     }
@@ -160,6 +203,9 @@ struct SecretServiceStore {
 
 impl SessionStore for SecretServiceStore {
     fn save(&self, session: &auth::Session) -> Result<(), String> {
+        if session.app_token_username.is_some() {
+            return Err("App tokens are unavailable in Desktop credential storage".into());
+        }
         match self.scope.as_deref() {
             Some(scope) => auth::save_session_scoped(session, Some(scope)),
             None => auth::save_session(session),
@@ -176,10 +222,19 @@ impl SessionStore for SecretServiceStore {
         server: &str,
         client_id: &str,
     ) -> Result<Option<auth::Session>, auth::SessionLoadError> {
-        match self.scope.as_deref() {
+        let session = match self.scope.as_deref() {
             Some(scope) => auth::load_session_scoped_classified(server, client_id, Some(scope)),
             None => auth::load_session_scoped_classified(server, client_id, None),
+        }?;
+        if session
+            .as_ref()
+            .is_some_and(|session| session.app_token_username.is_some())
+        {
+            return Err(auth::SessionLoadError::Invalid(
+                "App tokens are unavailable in Desktop credential storage".into(),
+            ));
         }
+        Ok(session)
     }
 
     fn remove(&self, server: &str, client_id: &str) -> Result<(), String> {
@@ -187,6 +242,67 @@ impl SessionStore for SecretServiceStore {
             Some(scope) => auth::remove_session_scoped(server, client_id, Some(scope)),
             None => auth::remove_session(server, client_id),
         }
+    }
+}
+
+/// Headless credentials live only in AuthState and are never written to a keyring or file.
+struct EphemeralSessionStore;
+
+/// Headless deployments have no session bus/keyring. Store credentials separately
+/// from the nonsecret config using owned, private, link-resistant filesystem IO.
+struct HeadlessSessionStore {
+    root: PathBuf,
+    profile: String,
+    config: raiun_headless::HeadlessConfig,
+}
+
+impl SessionStore for HeadlessSessionStore {
+    fn save(&self, session: &auth::Session) -> Result<(), String> {
+        auth::validate_session(session)?;
+        if !crate::headless_runtime::session_matches(&self.config, session) {
+            return Err("Session does not match the headless configuration".into());
+        }
+        let bytes = zeroize::Zeroizing::new(
+            serde_json::to_vec(session).map_err(|_| "Could not encode saved credentials")?,
+        );
+        raiun_headless::save_session(&self.root, &self.profile, &bytes).map_err(|_| {
+            "Could not save headless credentials in the private state directory".into()
+        })
+    }
+    fn load(&self, server: &str, client_id: &str) -> Result<Option<auth::Session>, String> {
+        let Some(bytes) = raiun_headless::load_session(&self.root, &self.profile)
+            .map_err(|_| "Could not read private headless credentials")?
+        else {
+            return Ok(None);
+        };
+        let session: auth::Session =
+            serde_json::from_slice(&bytes).map_err(|_| "Saved headless credentials are invalid")?;
+        auth::validate_session(&session)?;
+        if session.server != server
+            || session.client_id != client_id
+            || !crate::headless_runtime::session_matches(&self.config, &session)
+        {
+            return Err(
+                "Saved credentials do not match the headless configuration; sign in again".into(),
+            );
+        }
+        Ok(Some(session))
+    }
+    fn remove(&self, _server: &str, _client_id: &str) -> Result<(), String> {
+        raiun_headless::remove_session(&self.root, &self.profile)
+            .map_err(|_| "Could not remove private headless credentials".into())
+    }
+}
+
+impl SessionStore for EphemeralSessionStore {
+    fn save(&self, _session: &auth::Session) -> Result<(), String> {
+        Ok(())
+    }
+    fn load(&self, _server: &str, _client_id: &str) -> Result<Option<auth::Session>, String> {
+        Ok(None)
+    }
+    fn remove(&self, _server: &str, _client_id: &str) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -204,11 +320,21 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
-    Serve,
-    Request { message: String },
+    Serve {
+        /// Run only the cloud drive with memory-only credentials, without folder sync.
+        #[arg(long)]
+        mount_only: bool,
+    },
+    Request {
+        message: String,
+    },
+    /// Read a bounded control request from stdin; secrets never belong in argv.
+    RequestStdin,
 }
 
 struct Runtime {
+    mode: RuntimeMode,
+    headless_config: Option<raiun_headless::HeadlessConfig>,
     dir: PathBuf,
     settings: Mutex<Settings>,
     transfer_budget: Mutex<Option<(String, TransferBudget)>>,
@@ -330,6 +456,73 @@ impl Drop for TransferAdmissionFence {
 }
 
 impl Runtime {
+    fn login_app_token(
+        self: &Arc<Self>,
+        request: &Value,
+        token: zeroize::Zeroizing<String>,
+    ) -> Result<Value, String> {
+        if self.mode != RuntimeMode::MountOnly {
+            return Err("App-token login is available in the headless client".into());
+        }
+        let server = request
+            .get("server")
+            .and_then(Value::as_str)
+            .ok_or("Missing server")?;
+        let username = request
+            .get("username")
+            .and_then(Value::as_str)
+            .ok_or("Missing username")?;
+        crate::headless_runtime::validate_login(&self.local_profile_id, server, Some(username))?;
+        let initial = self.operation_generation()?;
+        if self.restoring.load(Ordering::Acquire)
+            || self.authenticating.swap(true, Ordering::AcqRel)
+        {
+            return Err("Sign-in or saved-session restore is already in progress".into());
+        }
+        let result: Result<Value, String> = (|| {
+            if self
+                .auth_state
+                .lock()
+                .map_err(|_| "Authentication state poisoned")?
+                .session
+                .is_some()
+                || self
+                    .mount
+                    .lock()
+                    .map_err(|_| "Mount state poisoned")?
+                    .is_some()
+            {
+                return Err("Sign out before signing in again".into());
+            }
+            let proxy = self
+                .settings
+                .lock()
+                .map_err(|_| "Settings poisoned")?
+                .network_proxy
+                .clone();
+            let session = auth::Session::for_app_token(server, username, token.to_string(), proxy)?;
+            let generation = initial
+                .checked_add(1)
+                .ok_or("Account generation exhausted")?;
+            self.auth_generation
+                .compare_exchange(initial, generation, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| "Sign-in was canceled by an account transition")?;
+            session
+                .verify_app_token()
+                .map_err(|error| error.to_string())?;
+            self.install_session(session, generation)?;
+            Ok(json!({"connected":true,"authentication":"app_token","auth_generation":generation}))
+        })();
+        self.authenticating.store(false, Ordering::Release);
+        if let Err(error) = &result
+            && self.auth_generation.load(Ordering::Acquire) <= initial.saturating_add(1)
+            && !self.auth_transition.load(Ordering::Acquire)
+        {
+            *self.error.lock().map_err(|_| "Error state poisoned")? = Some(error.clone());
+        }
+        result
+    }
+
     fn operation_generation(&self) -> Result<u64, String> {
         // Capture generation before checking the transition flag. A later
         // transition must then invalidate this snapshot even if it completes
@@ -383,15 +576,13 @@ impl Runtime {
         {
             return Err("Agent is shutting down".into());
         }
-        let client = raiun_opencloud::OpenCloudClient::new_with_proxy(
-            &session.server,
-            session.access_token.clone(),
-            &session.proxy,
-        )
-        .map_err(|e| e.to_string())?;
-        let spaces = client
-            .spaces()
-            .map_err(|error| auth::graph_error_with_issuer_hint(&error.to_string(), &session))?;
+        let client = session.opencloud_client().map_err(|e| e.to_string())?;
+        let spaces = if self.mode == RuntimeMode::MountOnly {
+            client.with_bounded_namespace_probe(|| client.spaces())
+        } else {
+            client.spaces()
+        }
+        .map_err(|error| auth::graph_error_with_issuer_hint(&error.to_string(), &session))?;
         self.install_session_with_spaces(session, expected_generation, client, spaces, false, None)
     }
 
@@ -416,13 +607,25 @@ impl Runtime {
         // TCP connection that never responds cannot leave the app restoring
         // forever. The installed Engine receives a normal-timeout client for
         // later recovery and user operations.
-        let probe_client = raiun_opencloud::OpenCloudClient::new_for_namespace_probe_with_proxy(
-            &session.server,
-            session.access_token.clone(),
-            &session.proxy,
-        )
-        .map_err(|error| RestoreFailure::Permanent(error.to_string()))?;
-        let (spaces, offline) = match probe_client.spaces() {
+        let probe_client = if self.mode == RuntimeMode::MountOnly {
+            session.opencloud_client()
+        } else {
+            // Preserve the Desktop saved-session probe's original transport
+            // deadlines; headless app-token reconstruction remains separate.
+            raiun_opencloud::OpenCloudClient::new_for_namespace_probe_with_proxy(
+                &session.server,
+                session.access_token.clone(),
+                &session.proxy,
+            )
+            .map_err(|error| error.to_string())
+        }
+        .map_err(RestoreFailure::Permanent)?;
+        let probe_result = if self.mode == RuntimeMode::MountOnly {
+            probe_client.with_bounded_namespace_probe(|| probe_client.spaces())
+        } else {
+            probe_client.spaces()
+        };
+        let (spaces, offline) = match probe_result {
             Ok(spaces) => (spaces, false),
             Err(error) if error.kind == raiun_core::backend::ErrorKind::Offline => {
                 let spaces = self.load_account_namespace(session).map_err(|error| {
@@ -443,12 +646,9 @@ impl Runtime {
                 "Saved-session restore was canceled or its account settings changed".into(),
             ));
         }
-        let client = raiun_opencloud::OpenCloudClient::new_with_proxy(
-            &session.server,
-            session.access_token.clone(),
-            &session.proxy,
-        )
-        .map_err(|error| RestoreFailure::Permanent(error.to_string()))?;
+        let client = session
+            .opencloud_client()
+            .map_err(|error| RestoreFailure::Permanent(error.to_string()))?;
         self.install_session_with_spaces(
             session.clone(),
             expected_generation,
@@ -533,6 +733,13 @@ impl Runtime {
             || self.retiring.load(Ordering::Acquire)
         {
             return Err("Agent is shutting down".into());
+        }
+        if self
+            .headless_config
+            .as_ref()
+            .is_some_and(|config| !crate::headless_runtime::session_matches(config, &session))
+        {
+            return Err("Session does not match the headless configuration".into());
         }
         let personal: Vec<_> = spaces.iter().filter(|space| space.personal).collect();
         if personal.len() != 1 || personal[0].id.trim().is_empty() {
@@ -726,6 +933,17 @@ impl Runtime {
         Ok(())
     }
 
+    // Workers use immutable Engine/account bindings and atomic currentness
+    // hooks only. Join them before taking settings/auth/sync locks or revoking
+    // the original account. A busy unmount must not leave an uploader running.
+    fn stop_mounted_create_uploads(&self) -> Result<(), String> {
+        let mut mounted = self.mount.lock().map_err(|_| "Mount state poisoned")?;
+        if let Some(handle) = mounted.as_mut() {
+            handle.stop_create_uploads()?;
+        }
+        Ok(())
+    }
+
     fn mount_if_enabled(&self, expected_generation: u64) -> Result<(), String> {
         // Serialize restoration with explicit unmount/configuration updates.
         // Otherwise a stale enabled snapshot could remount after unmount wins.
@@ -751,7 +969,56 @@ impl Runtime {
                     .ok_or("Account identity is unavailable; sign in again")?,
             )
         };
-        self.mount_engine(engine, &settings, &account_id)
+        self.mount_engine(engine, &settings, &account_id, expected_generation)
+    }
+
+    fn create_upload_hooks(
+        &self,
+        expected_generation: u64,
+        account_id: &str,
+    ) -> raiun_engine::CreateUploadHooks {
+        let generation = self.auth_generation.clone();
+        let shutdown = self.shutdown.clone();
+        let transition = self.auth_transition.clone();
+        let account_id = account_id.to_owned();
+        raiun_engine::CreateUploadHooks {
+            // Never capture Runtime locks: logout/unmount must join workers
+            // before tearing down their original account and mounted Engine.
+            is_current: Arc::new(move || {
+                generation.load(Ordering::Acquire) == expected_generation
+                    && !shutdown.load(Ordering::Acquire)
+                    && !transition.load(Ordering::Acquire)
+            }),
+            // Explicit bounded policy: retain the existing ordinary-create
+            // contract (fresh absence/parent/root plus conditional PUT), now
+            // with two owned workers and no ambiguous-send replay. This does
+            // not assert server-side atomic no-clobber; see IMPLEMENTATION.md.
+            // Engine independently checks origin, root and plaintext ancestry.
+            dispatch_allowed: Arc::new(move |scope| {
+                scope.account_id() == account_id
+                    && scope.protection() == raiun_cache::ScopeProtection::PlaintextAllowed
+            }),
+        }
+    }
+
+    fn create_handoff_options(
+        &self,
+        engine: &Engine,
+        hooks: raiun_engine::CreateUploadHooks,
+        disabled: bool,
+    ) -> Option<raiun_fuse::CreateHandoffOptions> {
+        if self.mode != RuntimeMode::Desktop || disabled {
+            return None;
+        }
+        // The cache is optional for the established online mount. If it is
+        // unavailable, preserve that synchronous path rather than breaking
+        // sign-in/mounting to enable this optimization. Existing Engine write
+        // checks remain responsible for any unusable cache/journal state.
+        let quota = engine.offline_cache_usage().ok()?.quota_bytes;
+        (quota > 0).then_some(raiun_fuse::CreateHandoffOptions {
+            hooks,
+            max_pending_bytes: quota,
+        })
     }
 
     fn mount_engine(
@@ -759,7 +1026,13 @@ impl Runtime {
         engine: Engine,
         settings: &Settings,
         account_id: &str,
+        expected_generation: u64,
     ) -> Result<(), String> {
+        let hooks = self.create_upload_hooks(expected_generation, account_id);
+        let current = hooks.is_current.clone();
+        if !current() {
+            return Err("Sign-in was canceled".into());
+        }
         let account_dir = account_engine_dir(&self.dir, account_id);
         raiun_fuse::recover_stale_mount(&settings.config.cloud_root, &account_dir)?;
         let root = ensure_cloud_root(&settings.config, &self.dir, &account_dir)?;
@@ -767,20 +1040,38 @@ impl Runtime {
             self.configure_vault_mount_routes(settings, account_id)?;
         }
         let mut mounted = self.mount.lock().map_err(|_| "Mount state poisoned")?;
-        if self.shutdown.load(Ordering::Acquire) {
-            return Err("Agent is shutting down".into());
+        if !current() {
+            return Err("Sign-in was canceled".into());
         }
         if mounted.as_ref().is_some_and(|handle| !handle.is_mounted()) {
             *mounted = None;
         }
         if mounted.is_none() {
-            *mounted = Some(Box::new(raiun_fuse::mount_with_vault_registry_for_profile(
-                engine,
-                &root,
-                &account_dir,
-                &self.local_profile_id,
-                self.vault_mounts.clone(),
-            )?));
+            let handoff = self.create_handoff_options(
+                &engine,
+                hooks,
+                std::env::var_os("RAIUN_DISABLE_CREATE_HANDOFF").as_deref()
+                    == Some(std::ffi::OsStr::new("1")),
+            );
+            *mounted = Some(Box::new(
+                raiun_fuse::mount_with_vault_registry_and_create_handoff(
+                    engine,
+                    &root,
+                    &account_dir,
+                    &self.local_profile_id,
+                    self.vault_mounts.clone(),
+                    handoff,
+                )?,
+            ));
+            if !current() {
+                // Keep a failed/busy mount owned so normal teardown can retry;
+                // never detach a stale account's upload workers.
+                let handle = mounted.as_mut().expect("newly mounted handle");
+                handle.stop_create_uploads()?;
+                handle.unmount()?;
+                *mounted = None;
+                return Err("Sign-in was canceled".into());
+            }
         }
         drop(mounted);
         *self.error.lock().map_err(|_| "Error state poisoned")? = None;
@@ -788,6 +1079,7 @@ impl Runtime {
     }
 
     fn enable_mount(&self) -> Result<(), String> {
+        let expected_generation = self.operation_generation()?;
         let mut settings = self.settings.lock().map_err(|_| "Settings poisoned")?;
         let (engine, account_id) = {
             let auth = self
@@ -801,7 +1093,7 @@ impl Runtime {
                     .ok_or("Account identity is unavailable; sign in again")?,
             )
         };
-        self.mount_engine(engine, &settings, &account_id)?;
+        self.mount_engine(engine, &settings, &account_id, expected_generation)?;
         if !settings.mount_enabled {
             let mut next = settings.clone();
             next.mount_enabled = true;
@@ -812,6 +1104,7 @@ impl Runtime {
     }
 
     fn disable_mount(&self) -> Result<(), String> {
+        self.stop_mounted_create_uploads()?;
         let mut settings = self.settings.lock().map_err(|_| "Settings poisoned")?;
         // Stop exposing decrypted route snapshots before the mount is detached.
         // The verified session remains unlocked for sync and a later remount.
@@ -864,6 +1157,7 @@ impl Runtime {
         }
         self.auth_generation.fetch_add(1, Ordering::AcqRel);
         let mut transfer_fence = self.fence_transfer_admission()?;
+        self.stop_mounted_create_uploads()?;
         self.vault_edit_reconcile_jobs.cancel_all_and_wait()?;
         self.vault_pin_jobs.cancel_all_and_wait()?;
         self.cache_jobs.cancel_active();
@@ -920,6 +1214,13 @@ impl Runtime {
         if let Some(account_id) = settings.account_id.as_deref() {
             namespace::remove(&account_engine_dir(&self.dir, account_id))?;
         }
+        // Explicit logout revokes earlier remembered credentials even when
+        // this process was started with persistence disabled or no config.
+        // Save/load policy must not turn logout into a no-op for old files.
+        if self.mode == RuntimeMode::MountOnly {
+            raiun_headless::remove_session(&self.dir, &self.local_profile_id)
+                .map_err(|_| "Could not remove remembered headless credentials")?;
+        }
         if let Some(server) = settings.server.as_deref() {
             if let Err(error) = self.session_store.remove(server, &settings.client_id) {
                 if let Some(engine) = auth_state.engine.as_ref() {
@@ -964,15 +1265,17 @@ impl Runtime {
         drop(auth_state);
         drop(settings);
         #[cfg(not(test))]
-        match vault_secrets::revoke_profile(&self.dir, &self.vault_account_id) {
-            Ok(cleanup) => self.vault_cleanup_uncertain.store(
-                cleanup == vault_secrets::CredentialCleanup::Uncertain,
-                Ordering::Release,
-            ),
-            Err(error) => {
-                return Err(format!(
-                    "Signed out, but remembered vault-password access could not be revoked: {error}"
-                ));
+        if self.mode == RuntimeMode::Desktop {
+            match vault_secrets::revoke_profile(&self.dir, &self.vault_account_id) {
+                Ok(cleanup) => self.vault_cleanup_uncertain.store(
+                    cleanup == vault_secrets::CredentialCleanup::Uncertain,
+                    Ordering::Release,
+                ),
+                Err(error) => {
+                    return Err(format!(
+                        "Signed out, but remembered vault-password access could not be revoked: {error}"
+                    ));
+                }
             }
         }
         self.wake.store(true, Ordering::Release);
@@ -987,6 +1290,7 @@ impl Runtime {
         let _transition = AuthTransition::begin(&self.auth_transition)?;
         self.auth_generation.fetch_add(1, Ordering::AcqRel);
         let mut transfer_fence = self.fence_transfer_admission()?;
+        self.stop_mounted_create_uploads()?;
         self.vault_edit_reconcile_jobs.cancel_all_and_wait()?;
         self.vault_pin_jobs.cancel_all_and_wait()?;
         self.cache_jobs.cancel_active();
@@ -1119,7 +1423,13 @@ impl Runtime {
         let offline_namespace = self.offline_namespace.load(Ordering::Acquire);
         let last_probe = self.offline_namespace_probe_unix.load(Ordering::Acquire);
         let namespace_probe_due = offline_namespace
-            && (refreshed || now.saturating_sub(last_probe) >= 60)
+            && (refreshed
+                || now.saturating_sub(last_probe)
+                    >= self
+                        .headless_config
+                        .as_ref()
+                        .map(|c| c.reconnect_interval_seconds)
+                        .unwrap_or(60))
             && self
                 .offline_namespace_probe_unix
                 .compare_exchange(last_probe, now, Ordering::AcqRel, Ordering::Acquire)
@@ -2267,6 +2577,7 @@ impl Runtime {
     }
 
     fn handle(self: &Arc<Self>, request: Value) -> Result<Value, String> {
+        self.mode.validate_request(&request)?;
         if self.retiring.load(Ordering::Acquire) {
             return Err("This account is being removed or has been removed".into());
         }
@@ -2462,8 +2773,11 @@ impl Runtime {
                 }
                 Ok(json!({
                     "agent_version": env!("CARGO_PKG_VERSION"),
+                    "runtime_mode": self.mode.name(),
+                    "credential_storage": if self.headless_config.as_ref().is_some_and(|c| c.remember_login) { "private_file" } else if self.mode == RuntimeMode::MountOnly { "memory_only" } else { "os_keyring" },
+                    "folder_sync_enabled": self.mode == RuntimeMode::Desktop,
                     "auth_generation": generation,
-                    "folder_settings_supported": true,
+                    "folder_settings_supported": self.mode == RuntimeMode::Desktop,
                     "connected": connected,
                     "offline_namespace": offline_namespace,
                     "session_expires_at": session_expires_at,
@@ -2478,7 +2792,7 @@ impl Runtime {
                     "encrypted_edit_recovery_available": encrypted_edit_recovery_available,
                     "offline_cache": offline_cache,
                     "vault_password_cleanup_uncertain": self.vault_cleanup_uncertain.load(Ordering::Acquire),
-                    "autostart": autostart::is_enabled(),
+                    "autostart": self.mode == RuntimeMode::Desktop && autostart::is_enabled(),
                     "error": displayed_error,
                     "pair_reports": reports,
                     "authenticating": self.authenticating.load(Ordering::Acquire),
@@ -2513,6 +2827,9 @@ impl Runtime {
                 }
                 let result = (|| {
                     let raw = text("server")?;
+                    if self.mode == RuntimeMode::MountOnly {
+                        crate::headless_runtime::validate_login(&self.local_profile_id, raw, None)?;
+                    }
                     let server = if raw.contains("://") {
                         raw.to_owned()
                     } else {
@@ -2523,10 +2840,28 @@ impl Runtime {
                         .lock()
                         .map_err(|_| "Settings poisoned")?
                         .clone();
-                    let client_id = request
-                        .get("client_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&settings.client_id);
+                    let requested_client_id = request.get("client_id").and_then(Value::as_str);
+                    let client_id = if self.mode == RuntimeMode::MountOnly {
+                        // An omitted override permits WebFinger discovery;
+                        // saved app-token/previous OAuth identity is not an override.
+                        requested_client_id
+                            .or_else(|| {
+                                self.headless_config
+                                    .as_ref()
+                                    .and_then(|c| c.client_id.as_deref())
+                            })
+                            .unwrap_or("")
+                    } else {
+                        requested_client_id.unwrap_or(&settings.client_id)
+                    };
+                    if self
+                        .headless_config
+                        .as_ref()
+                        .and_then(|c| c.client_id.as_deref())
+                        .is_some_and(|expected| expected != client_id)
+                    {
+                        return Err("OAuth client does not match the headless configuration".into());
+                    }
                     let requested_server = normalize_server_input(&server)?;
                     let existing_server = settings
                         .server
@@ -2574,9 +2909,20 @@ impl Runtime {
                         .map_err(|_| "Sign-in was canceled by an account transition".to_owned())?;
                     let runtime = self.clone();
                     std::thread::spawn(move || {
-                        let result = flow
-                            .wait()
-                            .and_then(|session| runtime.install_session(session, generation));
+                        // Headless control transitions must release a pending
+                        // callback listener promptly. Once callback parsing or
+                        // exchange has started, its existing timeout still applies.
+                        let result = if runtime.mode == RuntimeMode::MountOnly {
+                            flow.wait_with_cancel(|| {
+                                runtime.auth_generation.load(Ordering::Acquire) != generation
+                                    || runtime.auth_transition.load(Ordering::Acquire)
+                                    || runtime.shutdown.load(Ordering::Acquire)
+                                    || runtime.retiring.load(Ordering::Acquire)
+                            })
+                        } else {
+                            flow.wait()
+                        }
+                        .and_then(|session| runtime.install_session(session, generation));
                         if let Err(error) = result {
                             if runtime.auth_generation.load(Ordering::Acquire) == generation
                                 && !runtime.shutdown.load(Ordering::Acquire)
@@ -3384,6 +3730,38 @@ impl Runtime {
                     .list(text("space_id")?, text("path")?)
                     .map_err(|e| e.to_string())?,
             ),
+            "cache_quota_set" => {
+                let expected = request
+                    .get("expected_auth_generation")
+                    .and_then(Value::as_u64)
+                    .ok_or("Refresh this account before changing storage settings")?;
+                let quota = request
+                    .get("quota_bytes")
+                    .and_then(Value::as_u64)
+                    .ok_or("Enter a valid cache limit")?;
+                let auth = self
+                    .auth_state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if self.auth_generation.load(Ordering::Acquire) != expected
+                    || self.auth_transition.load(Ordering::Acquire)
+                    || self.retiring.load(Ordering::Acquire)
+                    || self.shutdown.load(Ordering::Acquire)
+                {
+                    return Err("The account changed; review storage settings again".into());
+                }
+                let engine = auth
+                    .engine
+                    .as_ref()
+                    .ok_or("Reconnect this account before changing its cache limit")?;
+                engine.set_offline_cache_quota(quota).map_err(
+                    |_| "Could not confirm the saved limit; refresh storage before trying again",
+                )?;
+                Ok(
+                    json!({"auth_generation":expected,"scope":"account","saved":true,
+                    "eviction_performed":false,"quota_bytes":quota}),
+                )
+            }
             "cache_policy_set" => {
                 let generation = self.operation_generation()?;
                 let space = text("space_id")?;
@@ -3499,6 +3877,11 @@ impl Runtime {
                     .unwrap_or(50)
                     .clamp(1, 100) as usize;
                 let page = self.pending_write_page(after, limit)?;
+                let items = page
+                    .items
+                    .into_iter()
+                    .map(pending_write_response)
+                    .collect::<Result<Vec<_>, _>>()?;
                 ensure_generation(&self.auth_generation, generation)?;
                 let latest = self.settings.lock().map_err(|_| "Settings poisoned")?;
                 if latest.server != saved_settings.server
@@ -3509,19 +3892,7 @@ impl Runtime {
                 Ok(json!({
                     "auth_generation": generation,
                     "account_scope": Self::saved_write_account_scope(&saved_settings),
-                    "items": page.items.into_iter().map(|item| json!({
-                        "space_id": item.space_id,
-                        "root_resource_id": item.root_resource_id,
-                        "write_id": item.write_id.to_string(),
-                        "path": item.path,
-                        "state": match item.state {
-                            raiun_cache::WriteState::Pending => "pending",
-                            raiun_cache::WriteState::Conflict => "conflict",
-                            raiun_cache::WriteState::Verified => "verified",
-                        },
-                        "bytes": item.bytes,
-                        "created_at_unix": item.created_at_unix,
-                    })).collect::<Vec<_>>(),
+                    "items": items,
                     "next_after": page.next_after,
                     "pending_count": page.pending_count,
                     "conflict_count": page.conflict_count,
@@ -4234,7 +4605,12 @@ fn scheduler_loop(scheduler: Arc<Runtime>) {
         }
         ticks += 1;
         let forced = scheduler.wake.swap(false, Ordering::AcqRel);
-        let periodic = ticks >= 30;
+        let periodic = u64::from(ticks)
+            >= scheduler
+                .headless_config
+                .as_ref()
+                .map(|c| c.reconnect_interval_seconds)
+                .unwrap_or(30);
         let full_sync = forced || periodic;
         let target_spaces = if full_sync {
             if periodic || forced {
@@ -4249,9 +4625,6 @@ fn scheduler_loop(scheduler: Arc<Runtime>) {
                 continue;
             };
             if pending.is_empty() {
-                if ticks >= 30 {
-                    ticks = 0;
-                }
                 continue;
             }
             Some(std::mem::take(&mut *pending))
@@ -4274,6 +4647,14 @@ fn scheduler_loop(scheduler: Arc<Runtime>) {
             continue;
         }
         let generation = schedule_generation;
+        if scheduler.mode == RuntimeMode::MountOnly {
+            if let Err(error) = scheduler.mount_if_enabled(generation) {
+                if let Ok(mut state) = scheduler.error.lock() {
+                    *state = Some(error);
+                }
+            }
+            continue;
+        }
         if periodic && !forced {
             // Encrypted pins refresh only from the authenticated periodic
             // online scheduler, and only for routes still unlocked now.
@@ -4449,14 +4830,61 @@ fn main() {
     }
 }
 
+#[cfg(test)]
 fn new_runtime(
     dir: PathBuf,
     scope: Option<String>,
     vaults: Arc<raiun_vault::session::VaultSessionCoordinator>,
 ) -> Result<Arc<Runtime>, String> {
+    new_runtime_with_mode(dir, scope, vaults, RuntimeMode::Desktop)
+}
+
+fn new_runtime_with_mode(
+    dir: PathBuf,
+    scope: Option<String>,
+    vaults: Arc<raiun_vault::session::VaultSessionCoordinator>,
+    mode: RuntimeMode,
+) -> Result<Arc<Runtime>, String> {
     let local_profile_id = scope.clone().unwrap_or_else(|| "default".into());
+    let headless_config = if mode == RuntimeMode::MountOnly {
+        crate::headless_runtime::config()?
+            .filter(|config| config.profile == local_profile_id)
+            .cloned()
+    } else {
+        None
+    };
+    let mut settings = Settings::load(&dir)?;
+    if mode == RuntimeMode::MountOnly {
+        if !settings.config.pairs.is_empty() || !settings.media_jobs.is_empty() {
+            return Err("Mount-only mode requires state without folder pairs or media jobs; choose a separate state directory".into());
+        }
+        if !dir.join("settings.json").exists() {
+            let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is unset")?);
+            settings.config.cloud_root = home.join("RaiunHeadless");
+        }
+    }
+    if let Some(config) = &headless_config {
+        settings.config.cloud_root = config.mount_path.clone();
+        settings.mount_enabled = config.auto_mount;
+    }
+    let session_store: Arc<dyn SessionStore> = if mode == RuntimeMode::MountOnly {
+        match headless_config.as_ref().filter(|c| c.remember_login) {
+            Some(config) => Arc::new(HeadlessSessionStore {
+                root: dir.clone(),
+                profile: local_profile_id.clone(),
+                config: config.clone(),
+            }),
+            None => Arc::new(EphemeralSessionStore),
+        }
+    } else {
+        Arc::new(SecretServiceStore {
+            scope: scope.clone(),
+        })
+    };
     Ok(Arc::new(Runtime {
-        settings: Mutex::new(Settings::load(&dir)?),
+        mode,
+        headless_config,
+        settings: Mutex::new(settings),
         transfer_budget: Mutex::new(None),
         dir,
         auth_state: Mutex::new(AuthState {
@@ -4492,11 +4920,22 @@ fn new_runtime(
         vault_cleanup_uncertain: AtomicBool::new(false),
         vaults,
         vault_mounts: raiun_fuse::VaultMountRegistry::new(),
-        session_store: Arc::new(SecretServiceStore { scope }),
+        session_store,
     }))
 }
 
 fn start_runtime(runtime: Arc<Runtime>) {
+    if runtime.mode == RuntimeMode::MountOnly
+        && !runtime
+            .headless_config
+            .as_ref()
+            .is_some_and(|c| c.remember_login)
+    {
+        // Unconfigured/transient agents never query persistent credential stores.
+        runtime.restoring.store(false, Ordering::Release);
+        std::thread::spawn(move || scheduler_loop(runtime));
+        return;
+    }
     let restore_generation = runtime.auth_generation.load(Ordering::Acquire);
     let restore = runtime.clone();
     std::thread::spawn(move || {
@@ -4536,7 +4975,11 @@ fn start_runtime(runtime: Arc<Runtime>) {
                     let Some(binding) = binding.as_ref().ok().and_then(Option::as_ref) else {
                         break;
                     };
-                    let delay = restore_retry_delay(retry_number);
+                    let delay = restore
+                        .headless_config
+                        .as_ref()
+                        .map(|c| Duration::from_secs(c.reconnect_interval_seconds))
+                        .unwrap_or_else(|| restore_retry_delay(retry_number));
                     retry_number = retry_number.saturating_add(1);
                     if !wait_for_restore_retry(&restore, restore_generation, binding, delay) {
                         break;
@@ -4666,6 +5109,12 @@ fn restore_saved_session_once(
         *refreshed_session_needs_persist = false;
     }
 
+    if session.app_token_username.is_some() {
+        session.verify_app_token().map_err(|error| match error {
+            auth::RefreshError::Transport => RestoreFailure::Retryable(error.to_string()),
+            _ => RestoreFailure::Permanent(error.to_string()),
+        })?;
+    }
     runtime.install_restored_session(session, generation, binding)
 }
 
@@ -4725,31 +5174,53 @@ fn run() -> Result<(), String> {
     let args = Args::parse();
     let dir = storage::state_dir()?;
     let socket = dir.join("control.sock");
-    if let Command::Request { message } = args.command {
-        let request: Value = serde_json::from_str(&message).map_err(|e| e.to_string())?;
-        if request.get("password").is_some()
+    if matches!(
+        &args.command,
+        Command::Request { .. } | Command::RequestStdin
+    ) {
+        let from_stdin = matches!(&args.command, Command::RequestStdin);
+        let request: Value = match &args.command {
+            Command::Request { message } => {
+                serde_json::from_str(message).map_err(|_| "Invalid control request")?
+            }
+            Command::RequestStdin => read_json_value(&mut std::io::stdin().lock())?,
+            _ => unreachable!(),
+        };
+        let request = crate::headless_runtime::SecretRequest(request);
+        let request = &request.0;
+        if from_stdin && request.get("action").and_then(Value::as_str) != Some("auth_app_token") {
+            return Err("request-stdin only accepts app-token login".into());
+        }
+        if (!from_stdin
+            && (request.get("app_token").is_some()
+                || request.get("action").and_then(Value::as_str) == Some("auth_app_token")))
+            || request.get("password").is_some()
             || request
                 .get("action")
                 .and_then(Value::as_str)
                 .is_some_and(|a| matches!(a, "vault_unlock" | "vault_create"))
         {
             return Err(
-                "Enter vault passwords in Raiun Desktop, never in command-line arguments".into(),
+                "Secrets must be entered through protected input, never command-line arguments"
+                    .into(),
             );
         }
         let mut stream = UnixStream::connect(socket).map_err(|e| e.to_string())?;
-        let response_timeout =
-            if request.get("action").and_then(Value::as_str) == Some("auth_begin") {
-                Duration::from_secs(65)
-            } else if request.get("action").and_then(Value::as_str) == Some("shutdown") {
-                Duration::from_secs(300)
-            } else {
-                Duration::from_secs(30)
-            };
+        let response_timeout = if request
+            .get("action")
+            .and_then(Value::as_str)
+            .is_some_and(|action| matches!(action, "auth_begin" | "auth_app_token"))
+        {
+            Duration::from_secs(65)
+        } else if request.get("action").and_then(Value::as_str) == Some("shutdown") {
+            Duration::from_secs(300)
+        } else {
+            Duration::from_secs(30)
+        };
         stream
             .set_read_timeout(Some(response_timeout))
             .map_err(|e| e.to_string())?;
-        write_json_line(&mut stream, &request)?;
+        write_json_line(&mut stream, request)?;
         let response = read_json_line(&mut stream)?;
         let response = std::str::from_utf8(&response)
             .map_err(|_| "Agent response is not valid UTF-8".to_string())?;
@@ -4782,7 +5253,18 @@ fn run() -> Result<(), String> {
         signal.store(true, Ordering::Release);
     })
     .map_err(|error| format!("Could not install shutdown signal handlers: {error}"))?;
-    let manager = ProfileManager::open(dir)?;
+    let Command::Serve { mount_only } = args.command else {
+        unreachable!()
+    };
+    if mount_only && !cfg!(target_os = "linux") {
+        return Err("Headless mount-only operation currently requires Linux FUSE".into());
+    }
+    let mode = if mount_only {
+        RuntimeMode::MountOnly
+    } else {
+        RuntimeMode::Desktop
+    };
+    let manager = ProfileManager::open_with_mode(dir, mode)?;
     // A bounded number of workers avoids an unbounded thread per socket request.
     let connections = Arc::new(Mutex::new(listener));
     let mut workers = Vec::new();
@@ -6568,6 +7050,209 @@ mod tests {
         logout.join().unwrap().unwrap();
     }
 
+    #[test]
+    fn pending_write_response_distinguishes_create_lifecycle_from_legacy_retry() {
+        use raiun_cache::{
+            OrdinaryCreateState as Create, PendingCreateLifecycle, PendingWriteItem, WriteState,
+        };
+        let legacy = PendingWriteItem {
+            space_id: "space".into(),
+            root_resource_id: "root".into(),
+            write_id: 1,
+            path: "/new".into(),
+            state: WriteState::Pending,
+            bytes: 4,
+            created_at_unix: 1,
+            create_handoff: None,
+        };
+        let value = pending_write_response(legacy.clone()).unwrap();
+        assert!(value.get("create_state").is_none());
+        assert!(value.get("local_handoff_acknowledged").is_none());
+        for (state, expected, base) in [
+            (Create::Staged, "staged", WriteState::Pending),
+            (Create::Ready, "ready", WriteState::Pending),
+            (Create::Claimed, "claimed", WriteState::Pending),
+            (Create::Uncertain, "uncertain", WriteState::Conflict),
+            (Create::Conflict, "conflict", WriteState::Conflict),
+        ] {
+            let mut item = legacy.clone();
+            item.state = base;
+            item.create_handoff = Some(PendingCreateLifecycle {
+                state,
+                local_handoff_acknowledged: state != Create::Staged,
+            });
+            let value = pending_write_response(item.clone()).unwrap();
+            assert_eq!(value["create_state"], expected);
+            assert_eq!(value["local_handoff_acknowledged"], state != Create::Staged);
+            item.state = WriteState::Verified;
+            assert!(pending_write_response(item).is_err());
+        }
+        let mut completed = legacy;
+        completed.create_handoff = Some(PendingCreateLifecycle {
+            state: Create::Verified,
+            local_handoff_acknowledged: true,
+        });
+        assert!(pending_write_response(completed).is_err());
+    }
+
+    #[test]
+    fn create_handoff_options_preserve_headless_and_cache_unavailable_mounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_for_mount_test(dir.path().to_path_buf(), false, None);
+        let engine_dir = dir.path().join("engine");
+        let base = Engine::open(&engine_dir, Arc::new(OfflineCacheFixture)).unwrap();
+        let hooks = || runtime.create_upload_hooks(0, "account-a");
+        assert!(
+            runtime
+                .create_handoff_options(&base, hooks(), false)
+                .is_none()
+        );
+        let cache_dir = offline_cache_state_dir(&engine_dir).unwrap();
+        let cache = raiun_cache::Cache::open(&cache_dir, 1024 * 1024).unwrap();
+        let engine = base
+            .with_offline_cache(
+                cache,
+                "account-a".into(),
+                "https://fixture.example.test".into(),
+            )
+            .unwrap();
+        let options = runtime
+            .create_handoff_options(&engine, hooks(), false)
+            .unwrap();
+        assert_eq!(options.max_pending_bytes, 1024 * 1024);
+        assert!((options.hooks.is_current)());
+        assert!(
+            runtime
+                .create_handoff_options(&engine, hooks(), true)
+                .is_none()
+        );
+        runtime.mode = RuntimeMode::MountOnly;
+        assert!(runtime.create_handoff_options(
+            &engine, runtime.create_upload_hooks(0, "account-a"), false,
+        ).is_none());
+    }
+
+    #[test]
+    fn create_upload_hooks_keep_original_generation_without_runtime_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime_for_mount_test(dir.path().to_path_buf(), false, None);
+        runtime.auth_generation.store(7, Ordering::Release);
+        let hooks = runtime.create_upload_hooks(7, "account-a");
+        // Worker checks remain safe while teardown owns these locks.
+        let _settings = runtime.settings.lock().unwrap();
+        let _auth = runtime.auth_state.lock().unwrap();
+        let _mount = runtime.mount.lock().unwrap();
+        assert!((hooks.is_current)());
+        runtime.auth_transition.store(true, Ordering::Release);
+        assert!(!(hooks.is_current)());
+        runtime.auth_transition.store(false, Ordering::Release);
+        assert!((hooks.is_current)());
+        runtime.shutdown.store(true, Ordering::Release);
+        assert!(!(hooks.is_current)());
+        runtime.shutdown.store(false, Ordering::Release);
+        runtime.auth_generation.store(8, Ordering::Release);
+        assert!(!(hooks.is_current)());
+        // Constructing an owner for an old Engine cannot adopt the new epoch.
+        let stale = runtime.create_upload_hooks(7, "account-a");
+        assert!(!(stale.is_current)());
+        let scope = |account| {
+            raiun_cache::CacheScope::new(
+                "https://example.invalid/",
+                account,
+                "space",
+                "root",
+                raiun_cache::ScopeProtection::PlaintextAllowed,
+            )
+            .unwrap()
+        };
+        assert!((hooks.dispatch_allowed)(&scope("account-a")));
+        assert!(!(hooks.dispatch_allowed)(&scope("account-b")));
+    }
+
+    struct CreateStoppingMount {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail_stop: bool,
+    }
+
+    impl MountedCloud for CreateStoppingMount {
+        fn stop_create_uploads(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("stop-create-uploads");
+            if self.fail_stop {
+                Err("fixture create owner could not drain".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn unmount(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("unmount");
+            Err("fixture busy mount".into())
+        }
+
+        fn is_mounted(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn create_owner_drain_failure_preserves_account_and_mount_before_teardown() {
+        for action in ["unmount", "logout", "shutdown"] {
+            let dir = tempfile::tempdir().unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let runtime = runtime_for_mount_test(
+                dir.path().to_path_buf(),
+                true,
+                Some(Box::new(CreateStoppingMount {
+                    events: events.clone(),
+                    fail_stop: true,
+                })),
+            );
+            {
+                let mut settings = runtime.settings.lock().unwrap();
+                settings.account_id = Some("synthetic-account".into());
+                settings.server = Some("https://example.invalid/".into());
+            }
+            let result = match action {
+                "unmount" => runtime.disable_mount(),
+                "logout" => runtime.logout(),
+                _ => runtime.shutdown_safely(),
+            };
+            assert!(result.unwrap_err().contains("create owner could not drain"));
+            assert_eq!(*events.lock().unwrap(), ["stop-create-uploads"]);
+            let settings = runtime.settings.lock().unwrap();
+            assert_eq!(settings.account_id.as_deref(), Some("synthetic-account"));
+            assert_eq!(settings.server.as_deref(), Some("https://example.invalid/"));
+            assert!(settings.mount_enabled);
+            assert!(runtime.mount.lock().unwrap().as_ref().unwrap().is_mounted());
+            assert!(!runtime.shutdown.load(Ordering::Acquire));
+            assert!(!dir.path().join("settings.json").exists());
+        }
+    }
+
+    #[test]
+    fn create_owner_stops_before_busy_unmount_without_clearing_mount_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let runtime = runtime_for_mount_test(
+            dir.path().to_path_buf(),
+            true,
+            Some(Box::new(CreateStoppingMount {
+                events: events.clone(),
+                fail_stop: false,
+            })),
+        );
+        assert!(
+            runtime
+                .disable_mount()
+                .unwrap_err()
+                .contains("mount remains active")
+        );
+        assert_eq!(*events.lock().unwrap(), ["stop-create-uploads", "unmount"]);
+        assert!(runtime.settings.lock().unwrap().mount_enabled);
+        assert!(runtime.mount.lock().unwrap().as_ref().unwrap().is_mounted());
+        assert!(!dir.path().join("settings.json").exists());
+    }
+
     struct FakeMount {
         mounted: bool,
         fail_while_mounted: bool,
@@ -6597,6 +7282,8 @@ mod tests {
         mount: Option<Box<dyn MountedCloud>>,
     ) -> Runtime {
         Runtime {
+            mode: RuntimeMode::Desktop,
+            headless_config: None,
             dir: state_dir.clone(),
             transfer_budget: Mutex::new(None),
             settings: Mutex::new(Settings {
@@ -7225,6 +7912,183 @@ mod tests {
         }
     }
 
+    #[test]
+    fn headless_browser_logout_cancels_pending_callback_and_allows_replacement_login() {
+        use std::{os::unix::fs::PermissionsExt, thread};
+        // Discovery only: neither callback receives a code, so no token,
+        // Graph, mount, credential store or external server is needed.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let stopping = Arc::new(AtomicBool::new(false));
+        let fixture_stopping = stopping.clone();
+        let fixture_server = server.clone();
+        let discovery_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fixture_count = discovery_count.clone();
+        let fixture = thread::spawn(move || {
+            while !fixture_stopping.load(Ordering::Acquire) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => panic!("synthetic discovery listener failed"),
+                };
+                let request = read_fixture_request(&mut stream);
+                assert!(
+                    !String::from_utf8_lossy(&request)
+                        .to_ascii_lowercase()
+                        .contains("authorization:")
+                );
+                let (status, body) = if request.starts_with(b"GET /.well-known/webfinger?") {
+                    ("200 OK", json!({
+                        "links":[{"rel":"http://openid.net/specs/connect/1.0/issuer", "href":fixture_server}],
+                        "properties":{"http://opencloud.eu/ns/oidc/client_id":"synthetic-advertised-client"},
+                    }).to_string())
+                } else {
+                    assert!(
+                        request.starts_with(b"GET /.well-known/openid-configuration "),
+                        "only synthetic discovery is allowed"
+                    );
+                    (
+                        "200 OK",
+                        json!({
+                            "issuer":fixture_server,
+                            "authorization_endpoint":format!("{fixture_server}/authorize"),
+                            "token_endpoint":format!("{fixture_server}/token"),
+                            "code_challenge_methods_supported":["S256"],
+                        })
+                        .to_string(),
+                    )
+                };
+                fixture_count.fetch_add(1, Ordering::AcqRel);
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Arc::new(FakeSecretService::default());
+        let mut runtime = runtime_for_mount_test(dir.path().to_path_buf(), false, None);
+        runtime.mode = RuntimeMode::MountOnly;
+        runtime.local_profile_id = "default".into();
+        runtime.session_store = store.clone();
+        {
+            let mut settings = runtime.settings.lock().unwrap();
+            settings.network_proxy = raiun_opencloud::ProxyConfig::Direct;
+            // Logout retains settings metadata from a prior app-token login.
+            settings.client_id = auth::APP_TOKEN_CLIENT_ID.into();
+        }
+        let runtime = Arc::new(runtime);
+        let begin = || {
+            runtime.handle(
+                json!({"action":"auth_begin", "required_mode":"mount_only", "server":server}),
+            )
+        };
+        let callback = |info: &Value| {
+            let url = url::Url::parse(info["url"].as_str().unwrap()).unwrap();
+            let callback = url
+                .query_pairs()
+                .find(|(key, _)| key == "redirect_uri")
+                .unwrap()
+                .1
+                .into_owned();
+            url::Url::parse(&callback).unwrap()
+        };
+        let wait_for_cancel = || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while runtime.authenticating.load(Ordering::Acquire) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            !runtime.authenticating.load(Ordering::Acquire)
+        };
+        // On the pre-fix source only, close the old listener with an OAuth
+        // denial after the two-second assertion window. This keeps a failing
+        // baseline test from leaving its ten-minute worker alive.
+        let cleanup_pending_callback = |callback: &url::Url| {
+            if let Ok(mut stream) = TcpStream::connect(callback.socket_addrs(|| None).unwrap()[0]) {
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let _ = write!(
+                    stream,
+                    "GET {}?error=access_denied HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    callback.path()
+                );
+            }
+        };
+        let result = (|| -> Result<(), String> {
+            let first = begin()?;
+            let first_callback = callback(&first);
+            let uses_advertised_client = |info: &Value| {
+                url::Url::parse(info["url"].as_str().unwrap())
+                    .unwrap()
+                    .query_pairs()
+                    .any(|(key, value)| {
+                        key == "client_id" && value == "synthetic-advertised-client"
+                    })
+            };
+            if !uses_advertised_client(&first) {
+                cleanup_pending_callback(&first_callback);
+                let _ = wait_for_cancel();
+                return Err("headless browser sign-in used stale saved client metadata instead of WebFinger discovery".into());
+            }
+            let first_generation = runtime.auth_generation.load(Ordering::Acquire);
+            assert!(runtime.authenticating.load(Ordering::Acquire));
+            runtime.handle(json!({"action":"logout"}))?;
+            assert!(runtime.auth_generation.load(Ordering::Acquire) > first_generation);
+            let cancelled = wait_for_cancel();
+            if !cancelled {
+                cleanup_pending_callback(&first_callback);
+                let _ = wait_for_cancel();
+                return Err("pending headless browser sign-in stayed authenticating for more than two seconds after logout".into());
+            }
+            assert!(
+                TcpStream::connect_timeout(
+                    &first_callback.socket_addrs(|| None).unwrap()[0],
+                    Duration::from_millis(100)
+                )
+                .is_err(),
+                "cancelled callback listener must be closed"
+            );
+            let second = begin()?;
+            let second_callback = callback(&second);
+            assert!(uses_advertised_client(&second));
+            assert!(runtime.authenticating.load(Ordering::Acquire));
+            runtime.handle(json!({"action":"shutdown"}))?;
+            let cancelled = wait_for_cancel();
+            if !cancelled {
+                cleanup_pending_callback(&second_callback);
+                let _ = wait_for_cancel();
+                return Err(
+                    "pending replacement browser sign-in stayed authenticating after shutdown"
+                        .into(),
+                );
+            }
+            assert!(
+                TcpStream::connect_timeout(
+                    &second_callback.socket_addrs(|| None).unwrap()[0],
+                    Duration::from_millis(100)
+                )
+                .is_err()
+            );
+            assert!(
+                runtime.error.lock().unwrap().is_none(),
+                "stale completion must not overwrite transition status"
+            );
+            assert!(runtime.auth_state.lock().unwrap().session.is_none());
+            assert!(runtime.auth_state.lock().unwrap().engine.is_none());
+            assert!(runtime.mount.lock().unwrap().is_none());
+            assert!(store.sessions.lock().unwrap().is_empty());
+            assert_eq!(store.load_count.load(Ordering::Acquire), 0);
+            assert_eq!(discovery_count.load(Ordering::Acquire), 4);
+            Ok(())
+        })();
+        stopping.store(true, Ordering::Release);
+        fixture.join().unwrap();
+        result.unwrap();
+    }
+
     fn token_fixture(
         listener: TcpListener,
         responses: Vec<(u16, &'static str)>,
@@ -7297,6 +8161,8 @@ mod tests {
             bandwidth_revision: 1,
         };
         Arc::new(Runtime {
+            mode: RuntimeMode::Desktop,
+            headless_config: None,
             dir: dir.to_path_buf(),
             transfer_budget: Mutex::new(None),
             settings: Mutex::new(settings),
@@ -7344,6 +8210,8 @@ mod tests {
         session_store: Arc<dyn SessionStore>,
     ) -> Arc<Runtime> {
         Arc::new(Runtime {
+            mode: RuntimeMode::Desktop,
+            headless_config: None,
             dir: dir.to_path_buf(),
             transfer_budget: Mutex::new(None),
             settings: Mutex::new(Settings {
@@ -7488,6 +8356,7 @@ mod tests {
             server: server.to_owned(),
             client_id: "OpenCloudDesktop".into(),
             access_token: "fixture-access".into(),
+            app_token_username: None,
             refresh_token: Some("fixture-old-refresh".into()),
             expires_at,
             token_endpoint,
@@ -7529,6 +8398,7 @@ mod tests {
             server: server.clone(),
             client_id: "OpenCloudDesktop".into(),
             access_token: "fixture-access".into(),
+            app_token_username: None,
             refresh_token: None,
             expires_at: now_unix().saturating_add(600),
             token_endpoint: format!("{server}/token"),
@@ -7676,6 +8546,7 @@ mod tests {
                 server: server.clone(),
                 client_id: "OpenCloudDesktop".into(),
                 access_token: "fixture-access".into(),
+                app_token_username: None,
                 refresh_token: None,
                 expires_at: now_unix().saturating_add(600),
                 token_endpoint: format!("{server}/token"),
@@ -7820,6 +8691,7 @@ mod tests {
                 server: server.clone(),
                 client_id: "OpenCloudDesktop".into(),
                 access_token: "fixture-access".into(),
+                app_token_username: None,
                 refresh_token: None,
                 expires_at: now_unix().saturating_add(600),
                 token_endpoint: format!("{server}/token"),
@@ -7923,6 +8795,7 @@ mod tests {
                 server: server.clone(),
                 client_id: "OpenCloudDesktop".into(),
                 access_token: "fixture-access".into(),
+                app_token_username: None,
                 refresh_token: None,
                 expires_at: now_unix().saturating_add(600),
                 token_endpoint: format!("{server}/token"),
@@ -7993,6 +8866,7 @@ mod tests {
             server,
             client_id: "OpenCloudDesktop".into(),
             access_token: "fixture-access".into(),
+            app_token_username: None,
             refresh_token: Some("fixture-refresh".into()),
             expires_at: now_unix().saturating_sub(1),
             token_endpoint,
@@ -8076,7 +8950,7 @@ mod tests {
             token_listener,
             vec![(
                 200,
-                r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}"#,
+                r#"{"token_type":"Bearer","access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}"#,
             )],
         );
         let account_id = account_identity(&server, "personal-drive");
@@ -8221,6 +9095,8 @@ mod tests {
     fn status_exposes_saved_client_id_only_with_saved_server() {
         let dir = PathBuf::from("/tmp/raiun-status-client-id-test");
         let runtime = Arc::new(Runtime {
+            mode: RuntimeMode::Desktop,
+            headless_config: None,
             dir: dir.clone(),
             transfer_budget: Mutex::new(None),
             settings: Mutex::new(Settings {
@@ -8337,7 +9213,7 @@ mod tests {
             listener,
             vec![(
                 200,
-                r#"{"access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}"#,
+                r#"{"token_type":"Bearer","access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}"#,
             )],
         );
         let initial_expiry = now_unix() + 1;
@@ -8345,6 +9221,7 @@ mod tests {
             server: server.clone(),
             client_id: "OpenCloudDesktop".into(),
             access_token: "fixture-old-access".into(),
+            app_token_username: None,
             refresh_token: Some("fixture-old-refresh".into()),
             expires_at: initial_expiry,
             token_endpoint,
@@ -8414,7 +9291,7 @@ mod tests {
                 (500, r#"{"error":"temporarily_unavailable"}"#),
                 (
                     200,
-                    r#"{"access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}"#,
+                    r#"{"token_type":"Bearer","access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}"#,
                 ),
             ],
         );
@@ -8422,6 +9299,7 @@ mod tests {
             server: server.clone(),
             client_id: "OpenCloudDesktop".into(),
             access_token: "fixture-old-access".into(),
+            app_token_username: None,
             refresh_token: Some("fixture-old-refresh".into()),
             expires_at: now_unix() + 1,
             token_endpoint: format!("{server}/token"),

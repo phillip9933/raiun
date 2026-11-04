@@ -8,11 +8,119 @@
 use std::{error::Error as StdError, fmt};
 
 mod backend;
+#[cfg(any(windows, test))]
+mod close_capture_admission;
+#[cfg(any(windows, test))]
+mod directory_create_phase;
 mod edit_journal;
+#[cfg(any(windows, test))]
+mod file_create_phase;
 mod initial_edit_queue;
+#[cfg(any(windows, test))]
+mod namespace_entry_observation;
+#[cfg(windows)]
+pub use namespace_entry_observation::NamespaceEntryKind;
+#[cfg(windows)]
+mod native_file_rename_producer;
+#[cfg(any(windows, test))]
+mod save_rename_admission;
+#[cfg(windows)]
+pub use native_file_rename_producer::NativeFileRenameError;
+#[cfg(any(windows, test))]
+pub mod namespace_file_delete;
+#[cfg(any(windows, test))]
+pub mod namespace_file_rename;
+pub mod namespace_intent;
+#[cfg(any(windows, test))]
+pub mod namespace_reconcile;
+
 mod opencloud;
+#[cfg(windows)]
+pub use opencloud::{
+    VaultCachedChildCreateDescriptor, VaultCachedNamespaceDescriptor,
+    VaultCachedNamespaceOperation, VaultCachedNamespaceQueued, VaultCachedRetargetDescriptor,
+};
+
+/// Expected current local presentation, supplied by authenticated custody.
+/// This value is never authority without the guarded SDK proof and a fresh
+/// physical-root inspection in `complete_cached_vault_pending`.
+#[cfg(windows)]
+pub struct VaultCachedNativeExpectation {
+    pub root: ConfiguredRootIdentity,
+    pub operation: raiun_opencloud::vault_cache::VaultPendingOperationKind,
+    pub write_id: String,
+    pub revision: u64,
+    pub identity: [u8; 16],
+    pub file: u64,
+    pub usn: i64,
+    pub components: Vec<String>,
+    pub original: Option<raiun_core::backend::RemoteEntry>,
+    pub entry: Option<raiun_core::backend::RemoteEntry>,
+    pub plaintext_len: u64,
+    pub source_sha256: Option<[u8; 32]>,
+}
+
+/// One-use factual native readback. Only the native owner constructs it from
+/// a real guarded SDK proof; serialized pending rows cannot create this type.
+#[cfg(windows)]
+pub struct VaultCachedNativeCompleted {
+    pub(crate) write_id: String,
+    pub(crate) revision: u64,
+    pub(crate) identity: [u8; 16],
+    pub(crate) file: u64,
+    pub(crate) usn: i64,
+    pub(crate) entry: Option<raiun_core::backend::RemoteEntry>,
+    pub(crate) observed_dirty: Option<vault_dirty::Observation>,
+    pub(crate) root: ConfiguredRootIdentity,
+    pub(crate) components: Vec<String>,
+    pub(crate) length: u64,
+    pub(crate) source_sha256: Option<[u8; 32]>,
+}
+#[cfg(windows)]
+impl VaultCachedNativeCompleted {
+    pub fn write_id(&self) -> &str {
+        &self.write_id
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn identity(&self) -> [u8; 16] {
+        self.identity
+    }
+    pub fn file(&self) -> u64 {
+        self.file
+    }
+    pub fn usn(&self) -> i64 {
+        self.usn
+    }
+    pub fn entry(&self) -> Option<&raiun_core::backend::RemoteEntry> {
+        self.entry.as_ref()
+    }
+}
+#[cfg(windows)]
+pub use opencloud::{VaultCachedQueuedCapture, VaultCachedQueuedEdit};
+#[cfg(windows)]
+mod vault_cached_edit;
+#[cfg(windows)]
+pub use vault_cached_edit::{
+    CachedVaultEditBaselineFacts, CachedVaultEditCapture, CachedVaultEditOperation,
+    CachedVaultEditPending,
+};
+#[cfg(windows)]
+pub(crate) mod recovery_admission;
 mod recovery_provider;
 mod recovery_reconcile;
+#[cfg(windows)]
+pub(crate) mod recovery_state;
+#[cfg(any(windows, test))]
+mod registration_domain;
+#[cfg(any(windows, test))]
+pub mod streamed_reconcile;
+pub mod streamed_snapshot;
+#[cfg(any(windows, test))]
+pub mod streamed_store;
+#[cfg(any(windows, test))]
+pub use streamed_store::namespace_store;
 #[cfg(any(windows, test))]
 mod vault_capture_dispatch;
 #[cfg(any(windows, test))]
@@ -34,6 +142,17 @@ pub use vault_completion::{
     VaultUploadControl,
 };
 #[cfg(windows)]
+pub mod vault_file_delete;
+#[cfg(windows)]
+mod vault_file_rename;
+#[cfg(windows)]
+pub mod vault_file_replace;
+#[cfg(windows)]
+pub use vault_file_rename::{
+    VaultDirectoryRenameNode, VaultFileRenameDescriptor, VaultFileRenameDestination,
+    VaultFileRenameFacts, VaultFileRenameRecord,
+};
+#[cfg(windows)]
 pub mod vault_custody;
 #[cfg(any(windows, test))]
 pub mod vault_placeholder;
@@ -41,8 +160,6 @@ pub mod vault_placeholder;
 pub mod vault_read;
 #[cfg(windows)]
 pub mod vault_routes;
-#[cfg(windows)]
-pub use backend::ExistingVaultEditCapture;
 #[cfg(windows)]
 pub(crate) use backend::placeholder_population_completed;
 pub use backend::{
@@ -53,8 +170,11 @@ pub use backend::{
     MAX_VAULT_EDIT_CAPTURE_BYTES, PlaceholderBackend, PlaceholderChild, PlaceholderEditBinding,
     PlaceholderMetadata, PreparedEditBinding, PreparedEditRecovery, PreparedEnumeration,
     PreparedFetch, PreparedFetchSession, PublishPermit, RequestPublicationGate,
-    RequestPublicationPermit, checked_fetch_range, next_chunk_len,
+    RequestPublicationPermit, StreamedRecoveryJob, StreamedRecoveryPolicy, checked_fetch_range,
+    next_chunk_len,
 };
+#[cfg(windows)]
+pub use backend::{ExistingVaultEditCapture, VaultCleanupRootLocator};
 #[cfg(windows)]
 pub use edit_journal::DpapiEditRecordProtector;
 pub use edit_journal::{
@@ -65,6 +185,15 @@ pub use edit_journal::{
 pub use initial_edit_queue::{
     InitialEditDispatch, InitialEditLocation, MAX_PENDING_INITIAL_EDITS, PendingInitialEdit,
 };
+#[cfg(windows)]
+pub(crate) use opencloud::CapturedDirectoryParent;
+#[cfg(windows)]
+pub use opencloud::FileRenameBindingCandidate;
+#[cfg(any(windows, test))]
+pub use opencloud::{
+    DirectoryCreateSession, FileRenameSession, PlainFileCaptureParent,
+    VerifiedDirectoryPublication, VerifiedFileRenamePublication,
+};
 pub use opencloud::{
     FileCacheBindingExpectation, FileCacheStatus, InitialEditSession, ListedFilePage,
     ListedFileRow, OpaqueIdentity, OpenCloudPlaceholderBackend, ProviderIdentityBinding,
@@ -74,6 +203,8 @@ pub use opencloud::{
 pub use opencloud::{
     FolderCacheBindingExpectation, ListedFolderPage, ListedFolderRow, OfflineDownloadError,
 };
+#[cfg(windows)]
+pub use recovery_provider::StagedStreamedEdit;
 pub use recovery_provider::{CompletedLocalEdit, DurableEditRecoveryProvider, InitialEditReceipt};
 pub use recovery_reconcile::{
     MAX_RECOVERY_UPLOAD_ATTEMPTS, MAX_RECOVERY_UPLOAD_BYTES, OpenCloudRecoveryRemote,
@@ -88,6 +219,57 @@ pub use vault_custody::{
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod native;
+#[cfg(windows)]
+pub use native::native_file_create::{FileCreateReply, FileCreateStep, FileCreateTask};
+#[cfg(windows)]
+pub use native::native_namespace_directory::{
+    DirectoryCreateReply, DirectoryCreateStep, DirectoryCreateTask,
+};
+
+/// Fresh native completion is distinct from closing a previously recorded
+/// historical link after an interrupted durable commit.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileCreateContinuationOutcome {
+    LocallyCompleted,
+    HistoricalLinkCompleted,
+}
+
+/// Fixed, data-free phase of an explicitly selected file-create recovery.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileCreateContinuationStage {
+    Context,
+    History,
+    Capture,
+    Remote,
+    NativePreflight,
+    NativeCompletion,
+    NativeVerify,
+    NativePublication,
+    NativePostPublish,
+    NativeSeal,
+    Custody,
+}
+
+#[cfg(windows)]
+impl fmt::Display for FileCreateContinuationStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Context => "account and drive verification",
+            Self::History => "saved file verification",
+            Self::Capture => "local file capture",
+            Self::Remote => "cloud verification",
+            Self::NativePreflight => "local completion preflight",
+            Self::NativeCompletion => "local file completion",
+            Self::NativeVerify => "converted file verification",
+            Self::NativePublication => "completed identity publication",
+            Self::NativePostPublish => "postpublication local verification",
+            Self::NativeSeal => "local completion seal",
+            Self::Custody => "recovery history completion",
+        })
+    }
+}
 
 /// Cloud Files API platform version. This reports API capability only; it is
 /// not evidence that Raiun has connected a provider or mounted a drive.
@@ -96,6 +278,12 @@ pub struct PlatformVersion {
     pub build: u32,
     pub revision: u32,
     pub integration: u32,
+}
+
+/// Read-only connection-bound cached metadata. Implementations must return
+/// None during uncertain/native capture activity, never scan files or bodies.
+pub trait OrdinaryEditStatusSource: Send + Sync {
+    fn cached_pending_count(&self) -> Option<usize>;
 }
 
 /// Read-only support evidence; no file names, identities or content are included.
@@ -139,6 +327,9 @@ pub enum Error {
     /// A protected edit-recovery capability could not be prepared for this
     /// account/root, so the native provider connection was not started.
     EditRecoveryUnavailable,
+    /// A selected file-create continuation stopped at a fixed safe phase.
+    #[cfg(windows)]
+    FileCreateContinuation { stage: FileCreateContinuationStage },
     /// A configured sync root is not a safe ordinary local directory.
     InvalidConfiguredRoot,
     /// A configured sync root must be empty before Raiun adopts it.
@@ -147,6 +338,9 @@ pub enum Error {
     ConfiguredRootChanged,
     /// Native connection ownership state did not match its lease.
     ConnectionStateInvalid,
+    /// The exact owned observer still has outstanding I/O. Keep the whole
+    /// connection alive and retry normal cancellation/drain; do not force-drop.
+    NamespaceObserverDrainPending,
     /// The exact authenticated account namespace could not be enumerated.
     ProviderUnavailable,
     /// At least one closed placeholder has modified or unverifiable data.
@@ -178,6 +372,13 @@ impl fmt::Display for Error {
             }
             Self::EditRecoveryUnavailable => formatter
                 .write_str("durable edit recovery is unavailable for this account and root"),
+            #[cfg(windows)]
+            Self::FileCreateContinuation { stage } => {
+                write!(
+                    formatter,
+                    "saved file recovery could not finish during {stage}"
+                )
+            }
             Self::InvalidConfiguredRoot => {
                 formatter.write_str("configured root is not a safe local directory")
             }
@@ -188,6 +389,8 @@ impl fmt::Display for Error {
             Self::ConnectionStateInvalid => {
                 formatter.write_str("Cloud Files connection state is invalid")
             }
+            Self::NamespaceObserverDrainPending => formatter
+                .write_str("directory observation I/O is still draining; connection retained"),
             Self::ProviderUnavailable => {
                 formatter.write_str("the authenticated provider namespace is unavailable")
             }
@@ -339,7 +542,7 @@ pub fn prepare_vault_custody_root<'a>(
         lease,
         backend,
         composite,
-        registration: native::vault_custody_registration_binding(lease.identity(), composite),
+        registration: native::vault_custody_registration_binding(lease.identity(), composite)?,
     };
     context.revalidate()?;
     Ok(context)
@@ -434,6 +637,27 @@ pub fn connect_configured_root(
     })
 }
 
+/// Connect the normal account-bound Windows drive with clean-file delete
+/// callbacks. The owner supplies its original generation fence; no path or
+/// recovered history can create a new dispatch capability.
+#[cfg(windows)]
+pub fn connect_configured_root_with_file_delete(
+    runtime: PreparedConfiguredRootRuntime,
+    authorization: namespace_intent::CapturedAuthorization,
+    current: std::sync::Arc<dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Result<ConfiguredRootConnection, Error> {
+    native::ConfiguredRootConnection::connect_owned_delete(
+        runtime,
+        native::native_file_delete::Config {
+            authorization,
+            current,
+            generation: Some(generation),
+        },
+    )
+    .map(|inner| ConfiguredRootConnection { inner })
+}
+
 /// Owner-thread-only held writable eviction proof. Dropping it releases native
 /// references but never confirms cleanup or reconstructs authority from history.
 #[cfg(windows)]
@@ -448,9 +672,665 @@ pub struct ConfiguredRootConnection {
     inner: native::ConfiguredRootConnection,
 }
 
+/// Closed plain-file capture guard. No public constructor, serialization,
+/// upload/conversion operation or historical-record adoption exists.
+#[cfg(windows)]
+pub struct NativePlainFileCapture<'connection, 'parent, 'lease> {
+    inner: native::native_plain_file_capture::NativePlainFileCapture<'connection, 'parent, 'lease>,
+}
+/// Explicit same-invocation outcomes; retained incomplete states never grant replay.
+#[cfg(windows)]
+#[derive(Debug, Eq, PartialEq)]
+pub enum FreshFileCreateOutcome {
+    BusyBeforeCapture,
+    CapturedLocalIncomplete,
+    SubmittedUncertain,
+    RemoteVerifiedLocalIncomplete,
+    LocallyCompleted,
+}
+#[cfg(windows)]
+impl NativePlainFileCapture<'_, '_, '_> {
+    /// Returns protected local evidence only. No network/conversion/in-sync.
+    pub fn capture_and_join(
+        self,
+        store: &std::sync::Arc<streamed_store::namespace_file_store::FileCreateStore>,
+    ) -> Result<streamed_store::namespace_file_store::PublishedFileJoin, Error> {
+        self.inner.capture_and_join(store)
+    }
+}
+
+/// Owner-thread bounded scan state. It contains no publication authority and
+/// must be discarded when its original connection context is retired.
+#[cfg(windows)]
+pub struct NamespaceScanCursor {
+    inner: native::native_namespace_scan::Scan,
+}
+#[cfg(windows)]
+pub struct NamespaceDirectoryCandidate {
+    pub parent_components: Vec<String>,
+    pub name: String,
+    pub local_file: LocalFileIdentity,
+}
+/// Hints only, including when `finished`: no scan establishes continuity or
+/// grants ordinary classification, catalog adoption or namespace authority.
+#[cfg(windows)]
+pub struct NamespaceScanPage {
+    pub candidates: Vec<NamespaceDirectoryCandidate>,
+    pub finished: bool,
+    pub limit_reached: bool,
+}
+
+/// Exact native plain-directory pins, not constructible from a path or stored
+/// namespace report. Metadata is exposed only after current owned CF parent
+/// routing, complete no-follow pins and FileIDs have independently joined.
+#[cfg(windows)]
+pub struct PreparedNamespaceDirectory<'connection> {
+    inner: native::native_namespace_directory::PinnedNamespaceDirectory<'connection>,
+}
+/// Value-only diagnostic snapshot; no admission, clean-state or completion authority.
+#[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RenamePublicEntryFixtureActivity {
+    pub dirty_close_entries: u64,
+    pub close_admission_unknown: bool,
+    pub active_callbacks: usize,
+    pub active_fetches: usize,
+    pub staged_fetches: usize,
+    pub modified_closes: usize,
+    pub journaled_closes: usize,
+    pub unverifiable_closes: usize,
+}
+#[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+pub type RenamePublicEntryFixtureActivitySource =
+    std::sync::Arc<dyn Fn() -> Option<RenamePublicEntryFixtureActivity> + Send + Sync>;
+/// Only the two fixed R58 fixture file names; never a caller-provided path.
+#[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+#[derive(Clone, Copy)]
+pub enum RenamePublicEntryFixturePath {
+    Source,
+    Destination,
+}
+/// Physical metadata only. Constructing or serializing these values cannot
+/// construct native admission, a live session or a publication capability.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamespaceDirectoryObservation {
+    pub local_file: LocalFileIdentity,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub placeholder_state: u32,
+    pub opaque_identity: Option<[u8; 16]>,
+}
+/// Value-only metadata from a pinned, no-follow Personal entry. The kind only
+/// distinguishes physical entry shapes; it does not establish provider ownership,
+/// clean content, continuity, a completed upload or permission to mutate it.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamespaceEntryObservation {
+    pub local_file: LocalFileIdentity,
+    pub kind: NamespaceEntryKind,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub placeholder_state: u32,
+    pub byte_len: u64,
+}
+/// Copied physical metadata from a live connected root. These values are
+/// untrusted hints; they carry no retained pin, classification, publication
+/// permission or native completion authority.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamespaceFileObservation {
+    pub local_file: LocalFileIdentity,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub placeholder_state: u32,
+    pub byte_len: u64,
+}
+#[cfg(windows)]
+pub struct NativeDirectoryCreateLocal<'pin, 'connection, 'session, 'backend> {
+    inner: native::native_namespace_directory::NativeDirectoryLocal<
+        'pin,
+        'connection,
+        'session,
+        'backend,
+    >,
+}
+#[cfg(windows)]
+impl<'connection> PreparedNamespaceDirectory<'connection> {
+    pub fn entry(&self) -> &namespace_intent::LocalNamespaceEntry {
+        self.inner.entry()
+    }
+    pub fn parent_identity(&self) -> OpaqueIdentity {
+        self.inner.parent_identity()
+    }
+    pub fn intent(&self) -> namespace_intent::NamespaceIntent {
+        self.inner.intent()
+    }
+    /// Recheck this pinned plain directory after a dispatch-lease wait. This
+    /// local validation grants no publication authority; local.admit remains
+    /// mandatory within the live publication session before mutation.
+    pub fn validate_presend(
+        &self,
+        intent: &namespace_intent::NamespaceIntent,
+    ) -> Result<(), Error> {
+        self.inner.validate_presend(intent)
+    }
+    /// Physical metadata only, never a directory publication capability.
+    pub fn observation(&self) -> Result<NamespaceDirectoryObservation, Error> {
+        self.inner.observation()
+    }
+    pub fn local<'pin, 'session, 'backend>(
+        &'pin mut self,
+        session: &'session DirectoryCreateSession<'backend>,
+    ) -> NativeDirectoryCreateLocal<'pin, 'connection, 'session, 'backend> {
+        NativeDirectoryCreateLocal {
+            inner: self.inner.local(session),
+        }
+    }
+}
+#[cfg(windows)]
+impl namespace_reconcile::DirectoryCreateLocal for NativeDirectoryCreateLocal<'_, '_, '_, '_> {
+    fn admit(
+        &mut self,
+        intent: &namespace_intent::NamespaceIntent,
+    ) -> Result<(), raiun_core::backend::CloudError> {
+        namespace_reconcile::DirectoryCreateLocal::admit(&mut self.inner, intent)
+    }
+    fn publish(
+        &mut self,
+        intent: &namespace_intent::NamespaceIntent,
+        readback: &namespace_reconcile::DirectoryCreateReadback,
+    ) -> Result<(), raiun_core::backend::CloudError> {
+        namespace_reconcile::DirectoryCreateLocal::publish(&mut self.inner, intent, readback)
+    }
+    fn record_completion<F>(
+        &mut self,
+        intent: &namespace_intent::NamespaceIntent,
+        readback: &namespace_reconcile::DirectoryCreateReadback,
+        record: F,
+    ) -> Result<(), namespace_reconcile::DirectoryCompletionError>
+    where
+        F: FnOnce() -> Result<(), streamed_store::StoreError>,
+    {
+        namespace_reconcile::DirectoryCreateLocal::record_completion(
+            &mut self.inner,
+            intent,
+            readback,
+            record,
+        )
+    }
+}
+
+/// Owned, untrusted hints from one exact connected-root observation instance.
+/// This is neither a complete inventory nor account/namespace mutation,
+/// conversion, clean-state or delete authority. Every consumer must revalidate
+/// its own current agent/backend/root/ordinary-ancestry context.
+#[cfg(windows)]
+pub struct NamespaceObservation {
+    root: ConfiguredRootIdentity,
+    provider_scope: ProviderScope,
+    instance: u64,
+    poll: raiun_control_windows::directory_notifications::ObserverPoll,
+}
+
+#[cfg(windows)]
+impl NamespaceObservation {
+    pub fn root_identity(&self) -> ConfiguredRootIdentity {
+        self.root
+    }
+    pub fn provider_scope(&self) -> &ProviderScope {
+        &self.provider_scope
+    }
+    pub fn instance(&self) -> u64 {
+        self.instance
+    }
+    /// Always true: observing hints cannot establish inventory continuity.
+    pub fn inventory_unknown(&self) -> bool {
+        true
+    }
+    pub fn poll(&self) -> &raiun_control_windows::directory_notifications::ObserverPoll {
+        &self.poll
+    }
+}
+
+#[cfg(windows)]
+impl fmt::Debug for NamespaceObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NamespaceObservation")
+            .field("instance", &self.instance)
+            .field("inventory_unknown", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+// Shared path correspondence only; native component and managed-parent admission
+// remain mandatory. The first component is the local namespace, never a Space.
+#[cfg(any(windows, test))]
+fn personal_create_relative(parent: &[&str], leaf: &str) -> Option<String> {
+    let prefix = match parent.first().copied() {
+        Some("Personal") => 1,
+        Some("Spaces") if parent.len() >= 2 => 2,
+        _ => return None,
+    };
+    if parent.len() >= 256 {
+        return None;
+    }
+    let valid = |part: &str| {
+        !part.is_empty()
+            && !matches!(part, "." | "..")
+            && !part.contains(['/', '\\'])
+            && !part.chars().any(char::is_control)
+    };
+    if !valid(leaf) || parent.iter().any(|part| !valid(part)) {
+        return None;
+    }
+    // Bound before collecting/joining caller input, including separators.
+    let total = parent
+        .iter()
+        .copied()
+        .chain(std::iter::once(leaf))
+        .try_fold(0usize, |total, part| {
+            total.checked_add(part.len())?.checked_add(1)
+        })?;
+    if total > 32768 {
+        return None;
+    }
+    let relative = parent[prefix..]
+        .iter()
+        .copied()
+        .chain(std::iter::once(leaf))
+        .collect::<Vec<_>>()
+        .join("/");
+    (relative.len() <= 32768).then_some(relative)
+}
+
+#[cfg(test)]
+mod personal_create_path_tests {
+    use super::personal_create_relative;
+    #[test]
+    fn parent_and_leaf_keep_exact_full_relative_path() {
+        assert_eq!(
+            personal_create_relative(&["Personal"], "file.bin").as_deref(),
+            Some("file.bin")
+        );
+        assert_eq!(
+            personal_create_relative(&["Personal", "Courses & CEUs #1", "nested"], "file.bin")
+                .as_deref(),
+            Some("Courses & CEUs #1/nested/file.bin")
+        );
+        assert_ne!(
+            personal_create_relative(&["Personal", "a"], "file.bin"),
+            personal_create_relative(&["Personal", "b"], "file.bin")
+        );
+    }
+    #[test]
+    fn invalid_scope_components_and_limits_refuse() {
+        for parent in [
+            vec![],
+            vec!["Spaces"],
+            vec!["personal"],
+            vec!["Personal", ".."],
+            vec!["Personal", "a/b"],
+        ] {
+            assert!(personal_create_relative(&parent, "file.bin").is_none());
+        }
+        assert!(personal_create_relative(&["Personal"], "a/b").is_none());
+        assert!(personal_create_relative(&["Personal"], "").is_none());
+        assert!(personal_create_relative(&vec!["Personal"; 256], "file.bin").is_none());
+        assert!(personal_create_relative(&["Personal"], &"a".repeat(32768)).is_none());
+    }
+}
+
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    /// Owner-thread observation only. Each fresh complete batch may supply
+    /// rename hints, which still require independent live admission. Neither
+    /// the first result nor later hints establish inventory continuity or
+    /// permit adoption; inventory work requires its own bounded scan.
+    pub fn attach_namespace_observer(&mut self) -> Result<NamespaceObservation, Error> {
+        self.inner.attach_namespace_observer()
+    }
+    /// Production callers should pass ZERO. The test wait is capped at 250ms;
+    /// all returned paths are untrusted hints, never namespace authority.
+    /// An error does not prove I/O drained: retain the owner and call stop or
+    /// normal disconnect, including after backend or token revocation.
+    pub fn poll_namespace_observer(
+        &mut self,
+        wait: std::time::Duration,
+    ) -> Result<NamespaceObservation, Error> {
+        self.inner.poll_namespace_observer(wait)
+    }
+    /// Physical cancellation remains available after authentication revocation.
+    /// A pending error retains the same observer/root/connection aggregate.
+    pub fn stop_namespace_observer(&mut self, wait: std::time::Duration) -> Result<(), Error> {
+        self.inner.stop_namespace_observer(wait)
+    }
+    /// Scheduling reservation only; no mutation/credential authority.
+    pub fn namespace_file_operation_pending(&self) -> bool {
+        self.inner.namespace_file_operation_pending()
+    }
+    /// Ignore duplicate hints only after exact original native publication and
+    /// a fresh same-FileID/opaque/root metadata observation.
+    pub fn completed_file_replacement(&self, components: &[&str]) -> Result<bool, Error> {
+        self.inner.completed_file_replacement(components)
+    }
+    /// Retire an oldsource hint only with a completed target, fresh physical
+    /// source absence and no admitted source catalog binding. No MOVE authority.
+    pub fn completed_replacement_source_absent(
+        &self,
+        old: &[&str],
+        new: &[&str],
+    ) -> Result<bool, Error> {
+        self.inner.completed_replacement_source_absent(old, new)
+    }
+    /// Inspect physical kind without admission, adoption, hydration or cloud I/O.
+    /// A cloud-shaped entry can be excluded from ordinary-directory candidates;
+    /// it must never be treated as proof of a healthy or completed upload.
+    pub fn observe_namespace_entry(
+        &self,
+        components: &[&str],
+    ) -> Result<NamespaceEntryObservation, Error> {
+        self.inner.observe_namespace_entry(components)
+    }
+    /// Read metadata only for an existing Personal file placeholder beneath
+    /// this connected root. Returned values never replace the public rename
+    /// entry's independent account, catalog, native and capture admission.
+    pub fn observe_namespace_file(
+        &self,
+        components: &[&str],
+    ) -> Result<NamespaceFileObservation, Error> {
+        self.inner.observe_namespace_file(components)
+    }
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn namespace_observer_fixture_file(
+        &self,
+    ) -> Result<(LocalFileIdentity, u32, u32, u64), Error> {
+        self.inner.namespace_observer_fixture_file()
+    }
+    /// Weak, value-only source tied to this callback owner. No native handles escape.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn rename_public_entry_fixture_activity_source(
+        &self,
+    ) -> RenamePublicEntryFixtureActivitySource {
+        self.inner.rename_public_entry_fixture_activity_source()
+    }
+    /// Nonblocking diagnostic snapshot, never a quiescence/admission capability.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn rename_public_entry_fixture_callback_counts(&self) -> Option<(usize, usize, usize)> {
+        self.inner.rename_public_entry_fixture_callback_counts()
+    }
+    /// Read-only fixed R58 file metadata; no capture or publication authority.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn rename_public_entry_fixture_observation(
+        &self,
+        selected: RenamePublicEntryFixturePath,
+    ) -> Result<NamespaceDirectoryObservation, Error> {
+        self.inner.rename_public_entry_fixture_observation(selected)
+    }
+    /// Fixed synthetic Personal/Courses & CEUs #1/source.bin parent+file values;
+    /// no caller path, native handle, read, mutation or completion capability.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn create_worker_subfolder_fixture_observation(
+        &self,
+    ) -> Result<(NamespaceDirectoryObservation, NamespaceDirectoryObservation), Error> {
+        self.inner.create_worker_subfolder_fixture_observation()
+    }
+    /// Open only the namespace-rename store already associated with this live
+    /// connection's prepared recovery capability. This grants storage access
+    /// only; rename admission still requires the explicit live producer call.
+    pub fn file_rename_store(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        scope: &EditJournalScope,
+        authorization: namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<streamed_store::namespace_rename_store::FileRenameStore>>,
+        Error,
+    > {
+        self.inner.file_rename_store(backend, scope, authorization)
+    }
+
+    pub fn prepare_plain_file_capture<'connection, 'parent, 'lease>(
+        &'connection self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent: &'parent PlainFileCaptureParent<'lease>,
+        name: &str,
+        record_generation: u64,
+    ) -> Result<NativePlainFileCapture<'connection, 'parent, 'lease>, Error> {
+        self.inner
+            .prepare_plain_file_capture(backend, parent, name, record_generation)
+            .map(|inner| NativePlainFileCapture { inner })
+    }
+    /// Start one owner-held attempt. Only the returned task may travel to a
+    /// joined SDK worker; native custody stays inside this original connection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_fresh_personal_file_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<FileCreateStep, Error> {
+        self.inner.begin_fresh_personal_file_create(
+            backend,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
+    }
+    /// Start one create under an existing managed ordinary Personal parent.
+    /// Components are immutable hints; the original owner independently admits
+    /// the exact managed/native parent. No parent creation or fallback occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_fresh_personal_file_create_in_parent(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<FileCreateStep, Error> {
+        self.inner.begin_fresh_personal_file_create_in_parent(
+            backend,
+            parent_components,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
+    }
+    /// Explicitly continue one interrupted create selected from protected
+    /// recovery. Its current bytes are a new conditional edit, never a replay
+    /// of the historical create or an acknowledgement of its old body.
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_personal_file_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        record_id: &str,
+        record_generation: u64,
+        authorization: namespace_intent::CapturedAuthorization,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<FileCreateContinuationOutcome, Error> {
+        self.inner.continue_personal_file_create(
+            backend,
+            parent_components,
+            name,
+            record_id,
+            record_generation,
+            authorization,
+            job,
+            current,
+        )
+    }
+
+    /// Start one explicit ordinary Personal directory attempt. Only returned
+    /// SDK tasks are Send; native pins/journal admission stay with this owner.
+    /// Callers MUST close admission and drain/join actual SDK workers/results
+    /// before auth/session mutation or disconnect. Backend revoke alone does
+    /// not drain these unleased tasks. No Agent routing is enabled here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_fresh_personal_directory_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<DirectoryCreateStep, Error> {
+        self.inner.begin_fresh_personal_directory_create(
+            backend,
+            parent_components,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
+    }
+    pub fn advance_fresh_personal_directory_create(
+        &self,
+        reply: DirectoryCreateReply,
+    ) -> Result<DirectoryCreateStep, Error> {
+        self.inner.advance_fresh_personal_directory_create(reply)
+    }
+    /// False means the original task data is still in flight. Drain/join SDK
+    /// workers before disconnect; neither this call nor history grants replay.
+    pub fn close_fresh_personal_directory_create(&self) -> bool {
+        self.inner.close_fresh_personal_directory_create()
+    }
+    /// Compatibility driver of the SAME phases. This blocks its caller; actual
+    /// Agent asynchronous scheduling is a separate, currently disabled route.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_fresh_personal_directory_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<namespace_reconcile::DirectoryCreateOutcome, Error> {
+        self.inner.reconcile_fresh_personal_directory_create(
+            backend,
+            parent_components,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
+    }
+    /// Consume exactly the original attempt's next reply on the owner thread.
+    pub fn advance_fresh_personal_file_create(
+        &self,
+        reply: FileCreateReply,
+    ) -> Result<FileCreateStep, Error> {
+        self.inner.advance_fresh_personal_file_create(reply)
+    }
+    /// Close admission/cancel original jobs. False retains root/native custody
+    /// until actual task-owned SDK data is dropped; caller still joins workers.
+    pub fn close_fresh_personal_file_create(&self) -> bool {
+        self.inner.close_fresh_personal_file_create()
+    }
+    /// Explicit direct-Personal create with same-invocation native/custody completion.
+    /// The currentness callback must use nonblocking original owner/epoch checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_fresh_personal_file_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<FreshFileCreateOutcome, Error> {
+        self.inner.reconcile_fresh_personal_file_create(
+            backend,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
+    }
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn namespace_directory_fixture_observation(
+        &self,
+        components: &[&str],
+    ) -> Result<NamespaceDirectoryObservation, Error> {
+        self.inner
+            .namespace_directory_fixture_observation(components)
+    }
+    pub fn begin_namespace_scan(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        composite: OpaqueIdentity,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        max_entries: usize,
+    ) -> Result<NamespaceScanCursor, Error> {
+        self.inner
+            .begin_namespace_scan(backend, composite, authorization, generation, max_entries)
+            .map(|inner| NamespaceScanCursor { inner })
+    }
+    pub fn advance_namespace_scan(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        cursor: &mut NamespaceScanCursor,
+    ) -> Result<NamespaceScanPage, Error> {
+        self.inner
+            .advance_namespace_scan(backend, &mut cursor.inner)
+    }
+    /// Components are only observation hints. Current backend routing and the
+    /// exact native handles, never those strings, provide admission evidence.
+    pub fn prepare_namespace_directory<'connection>(
+        &'connection self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+    ) -> Result<PreparedNamespaceDirectory<'connection>, Error> {
+        self.inner
+            .prepare_namespace_directory(
+                backend,
+                parent_components,
+                name,
+                authorization,
+                generation,
+            )
+            .map(|inner| PreparedNamespaceDirectory { inner })
+    }
+    pub fn ordinary_edit_status_source(&self) -> std::sync::Arc<dyn OrdinaryEditStatusSource> {
+        self.inner.ordinary_edit_status_source()
+    }
     /// Conservative admission fence for new vault sessions. Unknown historical
     /// custody (including reconnects) refuses activation; this does not hide
     /// existing plaintext or prove complete filesystem cleanup.
@@ -538,6 +1418,70 @@ impl ConfiguredRootConnection {
     ) -> Result<(), Error> {
         self.inner.complete_writable_vault_upload(upload, store)
     }
+
+    /// Complete only the original current native object after guarded SDK
+    /// reconciliation. The proof and physical inspection must both succeed.
+    #[cfg(windows)]
+    pub fn complete_cached_vault_pending(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        route: &std::sync::Arc<vault_routes::VerifiedVaultRoute>,
+        proof: &raiun_opencloud::vault_backend::VaultReconciledPending,
+        expected: &VaultCachedNativeExpectation,
+        provider: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+        provider_generation: u64,
+    ) -> Result<VaultCachedNativeCompleted, Error> {
+        self.inner.complete_cached_vault_pending(
+            backend,
+            route,
+            proof,
+            expected,
+            provider,
+            provider_generation,
+        )
+    }
+    /// Retire one initial known-pending guard only after durable Agent custody
+    /// has recorded the typed native completion returned by this connection.
+    #[cfg(windows)]
+    pub fn acknowledge_cached_native_durable(
+        &self,
+        completed: &VaultCachedNativeCompleted,
+    ) -> Result<(), Error> {
+        self.inner.acknowledge_cached_native_durable(completed)
+    }
+    /// Factual retained-root audit for a cached-only disconnect decision.
+    /// This does not authorize cleanup, unregister, or clearing queued data.
+    #[cfg(windows)]
+    pub fn audit_cached_pending_for_disconnect(
+        &self,
+        history: &dyn vault_custody::VaultPublishedHistorySource,
+        owner: &ProviderScope,
+        registration: &str,
+    ) -> Result<bool, Error> {
+        self.inner
+            .audit_cached_pending_for_disconnect(history, owner, registration)
+    }
+    /// Dehydrate disjoint clean published files while retaining exact queued
+    /// cached objects and the registration for ordinary disconnect.
+    #[cfg(windows)]
+    pub fn cleanup_retired_vault_route_preserving_cached_pending(
+        &self,
+        route: &vault_routes::VerifiedVaultRoute,
+        history: &dyn vault_custody::VaultPublishedHistorySource,
+        owner: &ProviderScope,
+        registration: &str,
+    ) -> Result<bool, Error> {
+        let owned = route
+            .revoke_and_cleanup_identities()
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        self.inner.cleanup_clean_history_preserving_cached_pending(
+            route.local_root(),
+            &owned,
+            history,
+            owner,
+            registration,
+        )
+    }
     /// Exact per-file tracker observation only; never global cleanup authority.
     #[cfg(feature = "synthetic-agent-integration")]
     pub fn vault_file_pending_for_test(&self, identity: &[u8; 16]) -> Result<bool, Error> {
@@ -607,6 +1551,12 @@ impl ConfiguredRootConnection {
         self.inner.hydrate_test_placeholder(relative_components)
     }
 
+    /// Cancel/join the original delete owner before revoking backend read
+    /// leases. Failure retains this connection and its original native custody.
+    pub fn cancel_file_delete_in_place(&mut self) -> Result<(), Error> {
+        self.inner.cancel_file_delete()
+    }
+
     /// Retry a disconnect without discarding the lease if the OS rejects the
     /// operation. The caller retains the connection object on error and must
     /// keep its authenticated scope revoked until a later disconnect succeeds.
@@ -632,6 +1582,12 @@ impl ConfiguredRootConnection {
 /// not expose this entry point, and the application has no call site for it.
 #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
 pub mod synthetic_agent_integration {
+    /// One-shot owner-thread diagnostic barrier; never a send or completion permit.
+    #[cfg(debug_assertions)]
+    pub use crate::save_rename_admission::completion_fixture::{
+        Guard as FileRenameCompletionFixtureGuard, arm as arm_file_rename_completion_fixture,
+    };
+
     use std::sync::Arc;
 
     use super::{
@@ -661,7 +1617,79 @@ pub mod synthetic_agent_integration {
         connect_configured_root(runtime).map(Connection)
     }
 
+    /// Explicit pre-connect delete diagnostic using the same owned delete
+    /// callbacks as the normal account-bound app factory.
+    pub fn connect_owned_delete(
+        runtime: PreparedConfiguredRootRuntime,
+        authorization: crate::namespace_intent::CapturedAuthorization,
+        current: Arc<dyn Fn(crate::namespace_intent::CapturedAuthorization) -> bool + Send + Sync>,
+    ) -> Result<Connection, Error> {
+        crate::native::ConfiguredRootConnection::connect_owned_delete(
+            runtime,
+            crate::native::native_file_delete::Config {
+                authorization,
+                current,
+                generation: None,
+            },
+        )
+        .map(|inner| Connection(ConfiguredRootConnection { inner }))
+    }
+
     impl Connection {
+        #[cfg(all(test, debug_assertions))]
+        pub fn namespace_directory_setup_diagnostics(&self) -> serde_json::Value {
+            let (entries, rejected, callbacks, param_size, submitted) =
+                self.0.directory_observation();
+            let (_, _, _, first_failed_hresult) = self.0.fetch_observation();
+            serde_json::json!({"directory_callback_entries":entries,"directory_guard_rejections":rejected,
+                "directory_callbacks":callbacks,"last_directory_param_size":param_size,
+                "placeholder_entries_submitted":submitted,"first_failed_hresult":first_failed_hresult})
+        }
+        pub fn prepare_namespace_directory<'a>(
+            &'a self,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            parent_components: &[&str],
+            name: &str,
+            authorization: super::namespace_intent::CapturedAuthorization,
+            generation: u64,
+        ) -> Result<super::PreparedNamespaceDirectory<'a>, Error> {
+            self.0.prepare_namespace_directory(
+                backend,
+                parent_components,
+                name,
+                authorization,
+                generation,
+            )
+        }
+        #[cfg(all(test, debug_assertions))]
+        pub fn namespace_directory_fixture_observation(
+            &self,
+            components: &[&str],
+        ) -> Result<super::NamespaceDirectoryObservation, Error> {
+            self.0
+                .inner
+                .namespace_directory_fixture_observation(components)
+        }
+        pub fn attach_namespace_observer(&mut self) -> Result<super::NamespaceObservation, Error> {
+            self.0.attach_namespace_observer()
+        }
+        pub fn poll_namespace_observer(
+            &mut self,
+            wait: std::time::Duration,
+        ) -> Result<super::NamespaceObservation, Error> {
+            self.0.poll_namespace_observer(wait)
+        }
+        pub fn stop_namespace_observer(&mut self, wait: std::time::Duration) -> Result<(), Error> {
+            self.0.stop_namespace_observer(wait)
+        }
+        pub fn namespace_observer_fixture_file(
+            &self,
+        ) -> Result<(super::LocalFileIdentity, u32, u32, u64), Error> {
+            self.0.namespace_observer_fixture_file()
+        }
+        pub fn disconnect_in_place(&mut self) -> Result<(), Error> {
+            self.0.disconnect_in_place()
+        }
         /// Drain callbacks and disconnect while retaining registration.
         pub fn disconnect(self) -> Result<(), Error> {
             self.0.disconnect()
@@ -1004,8 +2032,23 @@ pub struct SyntheticEntry {
     pub len: u64,
 }
 
+#[cfg(all(test, not(windows)))]
+#[path = "native_namespace_scan_parser.rs"]
+mod native_namespace_scan_parser;
+#[cfg(all(test, not(windows)))]
+#[path = "native_plain_file_capture_checks.rs"]
+mod native_plain_file_capture_checks;
+
 #[cfg(test)]
 mod tests {
+    #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+    mod native_namespace_directory_tests {
+        include!("native_namespace_directory_tests.rs");
+    }
+    #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+    mod connected_namespace_observer_tests {
+        include!("connected_namespace_observer_tests.rs");
+    }
     use super::{
         BackendError, ConfiguredRootIdentity, EditRecoveryProvider, Error, LocalFileIdentity,
         OpenCloudPlaceholderBackend, PlaceholderEditBinding, PreparedEditRecovery, ProviderScope,
@@ -2617,5 +3660,85 @@ mod tests {
             );
         }
         panic!("unexpected request to synthetic DAV fixture: {request}");
+    }
+}
+
+#[cfg(windows)]
+pub use opencloud::vault_child_create::{
+    VaultCachedChildCreateRecord, VaultChildCreateDescriptor, VaultChildCreateRecord,
+    VaultChildCreateRemoteProof, VaultChildCreateSource,
+};
+
+#[cfg(windows)]
+pub use native::native_vault_child_create::{
+    VaultChildCreateReply, VaultChildCreateStep, VaultChildCreateTask,
+};
+#[cfg(windows)]
+impl ConfiguredRootConnection {
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_reconcile_fresh_vault_file_rename(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        old: &[String],
+        new: &[String],
+        file: LocalFileIdentity,
+        auth: namespace_intent::CapturedAuthorization,
+        generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<bool, Error> {
+        self.inner
+            .try_vault_file_rename(backend, old, new, file, auth, generation, current, false)
+    }
+    pub fn try_reconcile_fresh_vault_directory_rename(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        old: &[String],
+        new: &[String],
+        file: LocalFileIdentity,
+        auth: namespace_intent::CapturedAuthorization,
+        generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<bool, Error> {
+        self.inner
+            .try_vault_file_rename(backend, old, new, file, auth, generation, current, true)
+    }
+    pub fn begin_fresh_vault_child_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parents: &[&str],
+        name: &str,
+        kind: namespace_intent::NamespaceObjectKind,
+        auth: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+        owner_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<VaultChildCreateStep, Error> {
+        self.inner.begin_vault_child_create(
+            backend,
+            parents,
+            name,
+            kind,
+            auth,
+            generation,
+            job,
+            current,
+            owner_generation,
+        )
+    }
+    pub fn advance_fresh_vault_child_create(
+        &self,
+        reply: VaultChildCreateReply,
+    ) -> Result<VaultChildCreateStep, Error> {
+        self.inner.advance_vault_child_create(reply)
+    }
+    pub fn close_fresh_vault_child_create(&self) -> bool {
+        self.inner.close_vault_child_create()
     }
 }

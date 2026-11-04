@@ -30,6 +30,11 @@ use url::Url;
 
 use crate::vault::VaultDavEntry;
 
+#[cfg(windows)]
+mod windows_pending;
+#[cfg(windows)]
+pub(crate) use windows_pending::PendingBodyReadSeek;
+
 const LISTING_ID_PREFIX: &str = "raiun-vault-listing-v1:";
 const LISTING_ETAG_PREFIX: &str = "raiun-vault-sealed-metadata-v2:";
 const FILE_ETAG_PREFIX: &str = "raiun-vault-file-ciphertext-v1:";
@@ -246,6 +251,7 @@ pub(crate) struct VaultPendingDeleteRequest<'a> {
     pub body_len: u64,
 }
 
+#[cfg(not(windows))]
 struct DecodedPendingEnvelope {
     metadata: VaultPendingEditMetadata,
     _private: tempfile::TempDir,
@@ -499,6 +505,204 @@ impl VaultOfflineCache {
     /// framed and encrypted with the verified vault session before the generic
     /// cache sees it; only the random ID, revision, size, and lifecycle state
     /// are stored outside the ciphertext.
+    #[cfg(windows)]
+    pub(crate) fn queue_create_reader<R: Read>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        epoch: &raiun_vault::session::VaultSessionEpoch,
+        source: &mut R,
+        request: VaultPendingCreateRequest<'_>,
+        directory: bool,
+        expected_sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_create_reader_existing(
+            sessions,
+            epoch,
+            source,
+            request,
+            directory,
+            expected_sha,
+            cancelled,
+            None,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_create_reader_existing<R: Read>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        epoch: &raiun_vault::session::VaultSessionEpoch,
+        source: &mut R,
+        request: VaultPendingCreateRequest<'_>,
+        directory: bool,
+        expected_sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+        expected_revision: Option<u64>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        if (request.existing_id.is_some() != expected_revision.is_some())
+            || (directory && request.existing_id.is_some())
+            || request.state != CiphertextWriteState::NeverAttempted
+            || (directory && request.body_len != 0)
+        {
+            return Err(invalid("encrypted cached create request is invalid"));
+        }
+        self.queue_operation_inner_encoded(
+            sessions,
+            source,
+            VaultPendingOperationRequest {
+                integrity_token: request.integrity_token,
+                encoded_target: request.encoded_target,
+                operation: if directory {
+                    VaultPendingOperationKind::CreateDirectory
+                } else {
+                    VaultPendingOperationKind::CreateFile
+                },
+                base: WriteCondition::Absent,
+                base_resource_id: None,
+                parent_resource_id: request.parent_resource_id,
+                parent_etag: request.parent_etag,
+                parent_ref: Some(request.parent_ref),
+                destination_target: None,
+                destination_parent_resource_id: None,
+                destination_parent_etag: None,
+                source_size: None,
+                source_ciphertext_sha256: None,
+                copy_source: None,
+                existing_id: request.existing_id,
+                body_len: request.body_len,
+                state: request.state,
+                receipt_resource_id: None,
+                receipt_etag: None,
+                receipt_for_revision: None,
+            },
+            None,
+            |source, metadata, length, path| {
+                if let Some(previous) = expected_revision {
+                    let value: serde_json::Value = serde_json::from_slice(metadata)
+                        .map_err(|_| invalid("encrypted edit metadata is invalid"))?;
+                    if previous.checked_add(1)
+                        != value.get("revision").and_then(serde_json::Value::as_u64)
+                    {
+                        return Err(conflict(
+                            "encrypted edit revision changed before encryption",
+                        ));
+                    }
+                }
+                let prefix = envelope_prefix(metadata, length)?;
+                let mut body = windows_pending::ExactDigestReader::new(
+                    source,
+                    length,
+                    expected_sha,
+                    cancelled,
+                );
+                let mut chain = io::Cursor::new(&*prefix).chain(&mut body);
+                sessions
+                    .encrypt_file_transactional_at_epoch(
+                        &self.scope,
+                        epoch,
+                        &mut chain,
+                        path,
+                        prefix.len() as u64 + length,
+                        MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                    )
+                    .map_err(vault_error)
+            },
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_edit_reader<R: Read>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        epoch: &raiun_vault::session::VaultSessionEpoch,
+        source: &mut R,
+        request: VaultPendingEditRequest<'_>,
+        expected_sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_edit_reader_exact(
+            sessions,
+            epoch,
+            source,
+            request,
+            expected_sha,
+            cancelled,
+            None,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_edit_reader_exact<R: Read>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        epoch: &raiun_vault::session::VaultSessionEpoch,
+        source: &mut R,
+        request: VaultPendingEditRequest<'_>,
+        expected_sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+        expected_revision: Option<u64>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_operation_inner_encoded(
+            sessions,
+            source,
+            VaultPendingOperationRequest {
+                integrity_token: request.integrity_token,
+                encoded_target: request.encoded_target,
+                operation: VaultPendingOperationKind::Overwrite,
+                base: WriteCondition::Match(request.base_etag.to_owned()),
+                base_resource_id: Some(request.base_resource_id),
+                parent_resource_id: None,
+                parent_etag: None,
+                parent_ref: None,
+                destination_target: None,
+                destination_parent_resource_id: None,
+                destination_parent_etag: None,
+                source_size: None,
+                source_ciphertext_sha256: None,
+                copy_source: None,
+                existing_id: request.existing_id,
+                body_len: request.body_len,
+                state: CiphertextWriteState::Pending,
+                receipt_resource_id: None,
+                receipt_etag: None,
+                receipt_for_revision: None,
+            },
+            None,
+            |source, metadata, length, path| {
+                if let Some(previous) = expected_revision {
+                    let value: serde_json::Value = serde_json::from_slice(metadata)
+                        .map_err(|_| invalid("encrypted edit metadata is invalid"))?;
+                    if previous.checked_add(1)
+                        != value.get("revision").and_then(serde_json::Value::as_u64)
+                    {
+                        return Err(conflict(
+                            "encrypted edit revision changed before encryption",
+                        ));
+                    }
+                }
+                let prefix = envelope_prefix(metadata, length)?;
+                let mut body = windows_pending::ExactDigestReader::new(
+                    source,
+                    length,
+                    expected_sha,
+                    cancelled,
+                );
+                let mut chain = io::Cursor::new(&*prefix).chain(&mut body);
+                sessions
+                    .encrypt_file_transactional_at_epoch(
+                        &self.scope,
+                        epoch,
+                        &mut chain,
+                        path,
+                        prefix.len() as u64 + length,
+                        MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                    )
+                    .map_err(vault_error)
+            },
+        )
+    }
+
     pub(crate) fn queue_edit<R: Read + Seek>(
         &self,
         sessions: &VaultSessionCoordinator,
@@ -655,11 +859,124 @@ impl VaultOfflineCache {
         )
     }
 
+    #[cfg(windows)]
+    pub(crate) fn queue_delete_from_cached_source(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut PendingBodyReadSeek<'_>,
+        request: VaultPendingDeleteRequest<'_>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_delete_from_cached_source_with_state(
+            sessions,
+            source,
+            request,
+            CiphertextWriteState::Pending,
+        )
+    }
+
+    /// Move source removal is born fenced from generic delete replay. The
+    /// current move call may make one guarded conditional attempt; any
+    /// unresolved result remains Conflict for explicit destination review.
+    #[cfg(windows)]
+    pub(crate) fn queue_move_source_delete_from_cached_source(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut PendingBodyReadSeek<'_>,
+        request: VaultPendingDeleteRequest<'_>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_delete_from_cached_source_with_state(
+            sessions,
+            source,
+            request,
+            CiphertextWriteState::Conflict,
+        )
+    }
+
+    #[cfg(windows)]
+    fn queue_delete_from_cached_source_with_state(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut PendingBodyReadSeek<'_>,
+        request: VaultPendingDeleteRequest<'_>,
+        state: CiphertextWriteState,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        if request.body_len != request.source_size || source.len() != request.body_len {
+            return Err(invalid("encrypted delete recovery body length is invalid"));
+        }
+        let Some((original, digest)) = &source.cached_source else {
+            return Err(conflict(
+                "encrypted delete source is not an authenticated cached file",
+            ));
+        };
+        if original.id != request.source_resource_id
+            || original.etag != request.source_etag
+            || original.size != request.source_size
+            || digest != request.source_ciphertext_sha256
+        {
+            return Err(conflict("encrypted delete source identity changed"));
+        }
+        self.queue_operation_inner_encoded(
+            sessions,
+            source,
+            VaultPendingOperationRequest {
+                integrity_token: request.integrity_token,
+                encoded_target: request.encoded_target,
+                operation: VaultPendingOperationKind::DeleteFile,
+                base: WriteCondition::Match(request.source_etag.to_owned()),
+                base_resource_id: Some(request.source_resource_id),
+                parent_resource_id: Some(request.parent_resource_id),
+                parent_etag: Some(request.parent_etag),
+                parent_ref: None,
+                destination_target: None,
+                destination_parent_resource_id: None,
+                destination_parent_etag: None,
+                source_size: Some(request.source_size),
+                source_ciphertext_sha256: Some(request.source_ciphertext_sha256),
+                copy_source: None,
+                existing_id: None,
+                body_len: request.body_len,
+                state,
+                receipt_resource_id: None,
+                receipt_etag: None,
+                receipt_for_revision: None,
+            },
+            None,
+            |body, metadata, length, path| {
+                let prefix = envelope_prefix(metadata, length)?;
+                body.encrypt_envelope_to_ciphertext(
+                    &prefix,
+                    path,
+                    MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                )
+            },
+        )
+    }
+
     pub(crate) fn queue_delete<R: Read + Seek>(
         &self,
         sessions: &VaultSessionCoordinator,
         source: &mut R,
         request: VaultPendingDeleteRequest<'_>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_delete_with_state(sessions, source, request, CiphertextWriteState::Pending)
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn queue_move_source_delete<R: Read + Seek>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut R,
+        request: VaultPendingDeleteRequest<'_>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_delete_with_state(sessions, source, request, CiphertextWriteState::Conflict)
+    }
+
+    fn queue_delete_with_state<R: Read + Seek>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut R,
+        request: VaultPendingDeleteRequest<'_>,
+        state: CiphertextWriteState,
     ) -> Result<VaultPendingEditMetadata, CloudError> {
         if request.body_len != request.source_size {
             return Err(invalid("encrypted delete recovery body length is invalid"));
@@ -684,7 +1001,7 @@ impl VaultOfflineCache {
                 copy_source: None,
                 existing_id: None,
                 body_len: request.body_len,
-                state: CiphertextWriteState::Pending,
+                state,
                 receipt_resource_id: None,
                 receipt_etag: None,
                 receipt_for_revision: None,
@@ -818,6 +1135,40 @@ impl VaultOfflineCache {
             source,
             request,
             Some((old_encoded_target, expected_revision)),
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_retargeted_create_from_pending(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut PendingBodyReadSeek<'_>,
+        request: VaultPendingOperationRequest<'_>,
+        old_encoded_target: &str,
+        expected_revision: u64,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        if request.operation != VaultPendingOperationKind::CreateFile
+            || request.state != CiphertextWriteState::NeverAttempted
+            || request.existing_id.is_none()
+        {
+            return Err(conflict("encrypted create retarget request is invalid"));
+        }
+        self.queue_operation_inner_encoded(
+            sessions,
+            source,
+            request,
+            Some((old_encoded_target, expected_revision)),
+            |body, metadata, length, path| {
+                if body.len() != length {
+                    return Err(invalid("encrypted edit source length changed"));
+                }
+                let prefix = envelope_prefix(metadata, length)?;
+                body.encrypt_envelope_to_ciphertext(
+                    &prefix,
+                    path,
+                    MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                )
+            },
         )
     }
 
@@ -987,6 +1338,7 @@ impl VaultOfflineCache {
         let mut encrypted_lengths = Vec::with_capacity(requests.len());
         let mut output_metadata = Vec::with_capacity(requests.len());
         for ((request, previous), build) in requests.iter().zip(&previous_rows).zip(&builds) {
+            #[cfg(not(windows))]
             let envelope = self.open_pending_envelope(
                 sessions,
                 &self
@@ -994,22 +1346,20 @@ impl VaultOfflineCache {
                     .ciphertext_write_info(&self.cache_scope, &request.id)
                     .map_err(cache_error)?,
             )?;
-            if envelope.metadata.revision != request.expected_revision
-                || envelope.metadata.path != request.old_path
-                || envelope.metadata.state != CiphertextWriteState::NeverAttempted
+            #[cfg(not(windows))]
+            let envelope_metadata = &envelope.metadata;
+            #[cfg(windows)]
+            let (envelope_metadata, mut body) =
+                self.open_pending_body_reader(sessions, &request.id, request.expected_revision)?;
+            if envelope_metadata.revision != request.expected_revision
+                || envelope_metadata.path != request.old_path
+                || envelope_metadata.state != CiphertextWriteState::NeverAttempted
             {
                 return Err(conflict(
                     "queued subtree member changed while being resealed",
                 ));
             }
             let row_dir = tempdir_in(private.path()).map_err(io_error)?;
-            let plain_path = row_dir.path().join("retarget-envelope.tmp");
-            let mut output = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&plain_path)
-                .map_err(io_error)?;
-            set_private_file(&output)?;
             let metadata = serde_json::json!({
                 "version": 9,
                 "operation": match previous.operation {
@@ -1056,41 +1406,63 @@ impl VaultOfflineCache {
                 .checked_add(metadata.len() as u64)
                 .and_then(|len| len.checked_add(previous.plaintext_len))
                 .ok_or_else(|| invalid("queued subtree envelope size overflowed"))?;
-            output.write_all(&EDIT_MAGIC).map_err(io_error)?;
-            output
-                .write_all(&EDIT_VERSION.to_be_bytes())
-                .map_err(io_error)?;
-            output
-                .write_all(&(metadata.len() as u32).to_be_bytes())
-                .map_err(io_error)?;
-            output
-                .write_all(&previous.plaintext_len.to_be_bytes())
-                .map_err(io_error)?;
-            output.write_all(&metadata).map_err(io_error)?;
-            let mut body = File::open(&envelope.path).map_err(io_error)?;
-            body.seek(SeekFrom::Start(envelope.body_offset))
-                .map_err(io_error)?;
-            let digest = copy_exact_hash(&mut body, &mut output, previous.plaintext_len)?;
-            output.flush().map_err(io_error)?;
-            output.sync_all().map_err(io_error)?;
-            drop(output);
-            if !sessions.is_unlocked(&self.scope).map_err(vault_error)? {
-                return Err(CloudError::new(
-                    ErrorKind::Forbidden,
-                    "vault session is locked",
-                ));
-            }
             let ciphertext_path = row_dir.path().join("retarget-ciphertext.tmp");
-            let mut plaintext = File::open(&plain_path).map_err(io_error)?;
-            let encrypted_len = sessions
-                .encrypt_file_transactional(
-                    &self.scope,
-                    &mut plaintext,
+            #[cfg(windows)]
+            let (digest, encrypted_len) = {
+                let prefix = envelope_prefix(&metadata, previous.plaintext_len)?;
+                let digest = body.sha256().to_owned();
+                let length = body.encrypt_envelope_to_ciphertext(
+                    &prefix,
                     &ciphertext_path,
-                    envelope_len,
                     MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
-                )
-                .map_err(vault_error)?;
+                )?;
+                (digest, length)
+            };
+            #[cfg(not(windows))]
+            let (digest, encrypted_len) = {
+                let plain_path = row_dir.path().join("retarget-envelope.tmp");
+                let mut output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&plain_path)
+                    .map_err(io_error)?;
+                set_private_file(&output)?;
+                output.write_all(&EDIT_MAGIC).map_err(io_error)?;
+                output
+                    .write_all(&EDIT_VERSION.to_be_bytes())
+                    .map_err(io_error)?;
+                output
+                    .write_all(&(metadata.len() as u32).to_be_bytes())
+                    .map_err(io_error)?;
+                output
+                    .write_all(&previous.plaintext_len.to_be_bytes())
+                    .map_err(io_error)?;
+                output.write_all(&metadata).map_err(io_error)?;
+                let mut body = File::open(&envelope.path).map_err(io_error)?;
+                body.seek(SeekFrom::Start(envelope.body_offset))
+                    .map_err(io_error)?;
+                let digest = copy_exact_hash(&mut body, &mut output, previous.plaintext_len)?;
+                output.flush().map_err(io_error)?;
+                output.sync_all().map_err(io_error)?;
+                drop(output);
+                if !sessions.is_unlocked(&self.scope).map_err(vault_error)? {
+                    return Err(CloudError::new(
+                        ErrorKind::Forbidden,
+                        "vault session is locked",
+                    ));
+                }
+                let mut plaintext = File::open(&plain_path).map_err(io_error)?;
+                let encrypted_len = sessions
+                    .encrypt_file_transactional(
+                        &self.scope,
+                        &mut plaintext,
+                        &ciphertext_path,
+                        envelope_len,
+                        MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                    )
+                    .map_err(vault_error)?;
+                (digest, encrypted_len)
+            };
             let ciphertext = File::open(&ciphertext_path).map_err(io_error)?;
             let cipher_len = ciphertext.metadata().map_err(io_error)?.len();
             if encrypted_len != envelope_len || cipher_len == 0 {
@@ -1180,12 +1552,111 @@ impl VaultOfflineCache {
         Ok(retarget)
     }
 
+    #[cfg(not(windows))]
+    fn encrypt_pending_envelope_file<R: Read + Seek>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut R,
+        metadata: &[u8],
+        body_len: u64,
+        ciphertext_path: &Path,
+    ) -> Result<u64, CloudError> {
+        let envelope_len = EDIT_HEADER_BYTES + metadata.len() as u64 + body_len;
+        let private = tempdir().map_err(io_error)?;
+        let envelope_path = private.path().join("edit-envelope.tmp");
+        let mut envelope = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&envelope_path)
+            .map_err(io_error)?;
+        set_private_file(&envelope)?;
+        envelope.write_all(&EDIT_MAGIC).map_err(io_error)?;
+        envelope
+            .write_all(&EDIT_VERSION.to_be_bytes())
+            .map_err(io_error)?;
+        envelope
+            .write_all(&(metadata.len() as u32).to_be_bytes())
+            .map_err(io_error)?;
+        envelope
+            .write_all(&body_len.to_be_bytes())
+            .map_err(io_error)?;
+        envelope.write_all(&metadata).map_err(io_error)?;
+        source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+        copy_exact_bounded(source, &mut envelope, body_len)?;
+        let mut extra = [0u8; 1];
+        if source.read(&mut extra).map_err(io_error)? != 0 {
+            return Err(invalid("encrypted edit source exceeds its declared size"));
+        }
+        envelope.flush().map_err(io_error)?;
+        envelope.sync_all().map_err(io_error)?;
+        drop(envelope);
+
+        let mut plaintext = File::open(&envelope_path).map_err(io_error)?;
+        sessions
+            .encrypt_file_transactional(
+                &self.scope,
+                &mut plaintext,
+                ciphertext_path,
+                envelope_len,
+                MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+            )
+            .map_err(vault_error)
+    }
+
     fn queue_operation_inner<R: Read + Seek>(
         &self,
         sessions: &VaultSessionCoordinator,
         source: &mut R,
         request: VaultPendingOperationRequest<'_>,
         retarget_create: Option<(&str, u64)>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_operation_inner_encoded(
+            sessions,
+            source,
+            request,
+            retarget_create,
+            |source, metadata, body_len, destination| {
+                #[cfg(windows)]
+                {
+                    let epoch = sessions
+                        .capture_session_epoch(&self.scope)
+                        .map_err(vault_error)?;
+                    source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+                    let prefix = envelope_prefix(metadata, body_len)?;
+                    let length = prefix.len() as u64 + body_len;
+                    let mut chain = io::Cursor::new(&*prefix).chain(source);
+                    sessions
+                        .encrypt_file_transactional_at_epoch(
+                            &self.scope,
+                            &epoch,
+                            &mut chain,
+                            destination,
+                            length,
+                            MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                        )
+                        .map_err(vault_error)
+                }
+                #[cfg(not(windows))]
+                {
+                    self.encrypt_pending_envelope_file(
+                        sessions,
+                        source,
+                        metadata,
+                        body_len,
+                        destination,
+                    )
+                }
+            },
+        )
+    }
+
+    fn queue_operation_inner_encoded<R: Read>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut R,
+        request: VaultPendingOperationRequest<'_>,
+        retarget_create: Option<(&str, u64)>,
+        encode: impl FnOnce(&mut R, &[u8], u64, &Path) -> Result<u64, CloudError>,
     ) -> Result<VaultPendingEditMetadata, CloudError> {
         let VaultPendingOperationRequest {
             integrity_token,
@@ -1209,6 +1680,12 @@ impl VaultOfflineCache {
             receipt_etag,
             receipt_for_revision,
         } = request;
+        // The Windows copy admission is deliberately bounded and does not use
+        // the generic plaintext tempfile path used by other queued operations.
+        #[cfg(windows)]
+        if operation == VaultPendingOperationKind::CopyFile && body_len > 16 * 1024 * 1024 {
+            return Err(invalid("cross-vault copy exceeds the 16 MiB limit"));
+        }
         let mut base_resource_id = base_resource_id.map(str::to_owned);
         let mut parent_resource_id = parent_resource_id.map(str::to_owned);
         let mut parent_etag = parent_etag.map(str::to_owned);
@@ -1642,46 +2119,11 @@ impl VaultOfflineCache {
             .checked_add(metadata.len() as u64)
             .and_then(|length| length.checked_add(body_len))
             .ok_or_else(|| invalid("encrypted edit size overflowed"))?;
+        #[cfg(windows)]
+        let metadata = zeroize::Zeroizing::new(metadata);
         let private = tempdir().map_err(io_error)?;
-        let envelope_path = private.path().join("edit-envelope.tmp");
-        let mut envelope = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&envelope_path)
-            .map_err(io_error)?;
-        set_private_file(&envelope)?;
-        envelope.write_all(&EDIT_MAGIC).map_err(io_error)?;
-        envelope
-            .write_all(&EDIT_VERSION.to_be_bytes())
-            .map_err(io_error)?;
-        envelope
-            .write_all(&(metadata.len() as u32).to_be_bytes())
-            .map_err(io_error)?;
-        envelope
-            .write_all(&body_len.to_be_bytes())
-            .map_err(io_error)?;
-        envelope.write_all(&metadata).map_err(io_error)?;
-        source.seek(SeekFrom::Start(0)).map_err(io_error)?;
-        copy_exact_bounded(source, &mut envelope, body_len)?;
-        let mut extra = [0u8; 1];
-        if source.read(&mut extra).map_err(io_error)? != 0 {
-            return Err(invalid("encrypted edit source exceeds its declared size"));
-        }
-        envelope.flush().map_err(io_error)?;
-        envelope.sync_all().map_err(io_error)?;
-        drop(envelope);
-
         let ciphertext_path = private.path().join("edit-ciphertext.tmp");
-        let mut plaintext = File::open(&envelope_path).map_err(io_error)?;
-        let encrypted_len = sessions
-            .encrypt_file_transactional(
-                &self.scope,
-                &mut plaintext,
-                &ciphertext_path,
-                envelope_len,
-                MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
-            )
-            .map_err(vault_error)?;
+        let encrypted_len = encode(source, &metadata, body_len, &ciphertext_path)?;
         if encrypted_len != envelope_len {
             return Err(invalid("encrypted edit length did not match its envelope"));
         }
@@ -2209,7 +2651,9 @@ impl VaultOfflineCache {
                 }
                 if matches!(
                     metadata.state,
-                    CiphertextWriteState::Pending | CiphertextWriteState::Uncertain
+                    CiphertextWriteState::Pending
+                        | CiphertextWriteState::Uncertain
+                        | CiphertextWriteState::Conflict
                 ) {
                     deletes.push(metadata);
                 }
@@ -2315,38 +2759,55 @@ impl VaultOfflineCache {
         revision: u64,
         destination: &Path,
     ) -> Result<VaultPendingEditMetadata, CloudError> {
-        let row = self
-            .cache
-            .ciphertext_write_info(&self.cache_scope, id)
-            .map_err(cache_error)?;
-        if row.revision != revision {
-            return Err(CloudError::new(
-                ErrorKind::NotFound,
-                "encrypted edit revision is unavailable",
-            ));
+        #[cfg(windows)]
+        {
+            let (metadata, mut input) = self.open_pending_body_reader(sessions, id, revision)?;
+            let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+            let mut output = NamedTempFile::new_in(parent).map_err(io_error)?;
+            copy_exact_bounded(&mut input, &mut output, metadata.plaintext_len)?;
+            output.flush().map_err(io_error)?;
+            output.as_file().sync_all().map_err(io_error)?;
+            input.check_current()?;
+            output
+                .persist_noclobber(destination)
+                .map_err(|e| io_error(e.error))?;
+            Ok(metadata)
         }
-        let envelope = self.open_pending_envelope(sessions, &row)?;
-        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-        // Keep the original private tempfile inode throughout publication.
-        // Recreating it would apply the process umask and could expose plaintext.
-        let mut output = NamedTempFile::new_in(parent).map_err(io_error)?;
-        let mut input = File::open(&envelope.path).map_err(io_error)?;
-        input
-            .seek(SeekFrom::Start(envelope.body_offset))
-            .map_err(io_error)?;
-        copy_exact_bounded(&mut input, &mut output, envelope.metadata.plaintext_len)?;
-        output.flush().map_err(io_error)?;
-        output.as_file().sync_all().map_err(io_error)?;
-        if !sessions.is_unlocked(&self.scope).map_err(vault_error)? {
-            return Err(CloudError::new(
-                ErrorKind::Forbidden,
-                "vault session is locked",
-            ));
+        #[cfg(not(windows))]
+        {
+            let row = self
+                .cache
+                .ciphertext_write_info(&self.cache_scope, id)
+                .map_err(cache_error)?;
+            if row.revision != revision {
+                return Err(CloudError::new(
+                    ErrorKind::NotFound,
+                    "encrypted edit revision is unavailable",
+                ));
+            }
+            let envelope = self.open_pending_envelope(sessions, &row)?;
+            let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+            // Keep the original private tempfile inode throughout publication.
+            // Recreating it would apply the process umask and could expose plaintext.
+            let mut output = NamedTempFile::new_in(parent).map_err(io_error)?;
+            let mut input = File::open(&envelope.path).map_err(io_error)?;
+            input
+                .seek(SeekFrom::Start(envelope.body_offset))
+                .map_err(io_error)?;
+            copy_exact_bounded(&mut input, &mut output, envelope.metadata.plaintext_len)?;
+            output.flush().map_err(io_error)?;
+            output.as_file().sync_all().map_err(io_error)?;
+            if !sessions.is_unlocked(&self.scope).map_err(vault_error)? {
+                return Err(CloudError::new(
+                    ErrorKind::Forbidden,
+                    "vault session is locked",
+                ));
+            }
+            output
+                .persist_noclobber(destination)
+                .map_err(|error| io_error(error.error))?;
+            Ok(envelope.metadata)
         }
-        output
-            .persist_noclobber(destination)
-            .map_err(|error| io_error(error.error))?;
-        Ok(envelope.metadata)
     }
 
     pub fn set_pending_edit_state(
@@ -2560,6 +3021,36 @@ impl VaultOfflineCache {
             .map_err(cache_error)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn begin_cancelled_directory_receipt(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        id: &str,
+        revision: u64,
+        expected_target: &str,
+    ) -> Result<(), CloudError> {
+        let operation = self.pending_operation(sessions, id, revision)?;
+        if operation.operation != VaultPendingOperationKind::CreateDirectory
+            || !matches!(
+                operation.state,
+                CiphertextWriteState::NeverAttempted | CiphertextWriteState::CancelledReceipt
+            )
+            || operation.base != WriteCondition::Absent
+            || operation.encoded_target != expected_target
+            || operation.plaintext_len != 0
+        {
+            return Err(conflict("queued directory cancellation changed"));
+        }
+        self.cache
+            .begin_ciphertext_directory_cancel_receipt(
+                &self.cache_scope,
+                id,
+                revision,
+                expected_target,
+            )
+            .map_err(cache_error)
+    }
+
     pub(crate) fn cancel_never_attempted_file_create(
         &self,
         sessions: &VaultSessionCoordinator,
@@ -2602,13 +3093,59 @@ impl VaultOfflineCache {
         plaintext_len: u64,
         plaintext_sha256: &str,
     ) -> Result<(), CloudError> {
+        self.acknowledge_cancelled_create_for(
+            sessions,
+            id,
+            revision,
+            expected_target,
+            plaintext_len,
+            plaintext_sha256,
+            false,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn acknowledge_cancelled_directory_create(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        id: &str,
+        revision: u64,
+        expected_target: &str,
+    ) -> Result<(), CloudError> {
+        self.acknowledge_cancelled_create_for(
+            sessions,
+            id,
+            revision,
+            expected_target,
+            0,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn acknowledge_cancelled_create_for(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        id: &str,
+        revision: u64,
+        expected_target: &str,
+        plaintext_len: u64,
+        plaintext_sha256: &str,
+        directory: bool,
+    ) -> Result<(), CloudError> {
         if !is_sha256_digest(plaintext_sha256) || plaintext_len > MAX_EDIT_BYTES {
             return Err(invalid("encrypted cancellation digest is invalid"));
         }
         let current = self
             .pending_operation_current(sessions, id)?
             .ok_or_else(|| conflict("encrypted create cancellation receipt is missing"))?;
-        if current.operation != VaultPendingOperationKind::CreateFile
+        if current.operation
+            != (if directory {
+                VaultPendingOperationKind::CreateDirectory
+            } else {
+                VaultPendingOperationKind::CreateFile
+            })
             || current.base != WriteCondition::Absent
             || current.encoded_target != expected_target
         {
@@ -2637,15 +3174,22 @@ impl VaultOfflineCache {
             return Err(conflict("encrypted create cancellation receipt is stale"));
         }
 
-        let build = self
-            .cache
-            .begin_ciphertext_cancel_ack_compaction(
+        let build = if directory {
+            self.cache.begin_ciphertext_directory_cancel_ack_compaction(
                 &self.cache_scope,
                 id,
                 revision,
                 expected_target,
             )
-            .map_err(cache_error)?;
+        } else {
+            self.cache.begin_ciphertext_cancel_ack_compaction(
+                &self.cache_scope,
+                id,
+                revision,
+                expected_target,
+            )
+        }
+        .map_err(cache_error)?;
         let parent_ref = current.parent_ref.as_ref().map(|parent| match parent {
             VaultPendingParentRef::Stable { resource_id } => serde_json::json!({
                 "kind": "stable",
@@ -2659,7 +3203,7 @@ impl VaultOfflineCache {
         });
         let compact = serde_json::json!({
             "version": 10,
-            "operation": "create_file",
+            "operation": if directory { "create_directory" } else { "create_file" },
             "id": id,
             "revision": build.revision(),
             "account_id": self.scope.account_id(),
@@ -2700,37 +3244,58 @@ impl VaultOfflineCache {
             .checked_add(metadata.len() as u64)
             .ok_or_else(|| invalid("encrypted cancellation envelope size overflowed"))?;
         let private = tempdir().map_err(io_error)?;
-        let envelope_path = private.path().join("cancel-ack-envelope.tmp");
-        let mut envelope = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&envelope_path)
-            .map_err(io_error)?;
-        set_private_file(&envelope)?;
-        envelope.write_all(&EDIT_MAGIC).map_err(io_error)?;
-        envelope
-            .write_all(&EDIT_VERSION.to_be_bytes())
-            .map_err(io_error)?;
-        envelope
-            .write_all(&(metadata.len() as u32).to_be_bytes())
-            .map_err(io_error)?;
-        envelope.write_all(&0u64.to_be_bytes()).map_err(io_error)?;
-        envelope.write_all(&metadata).map_err(io_error)?;
-        envelope.flush().map_err(io_error)?;
-        envelope.sync_all().map_err(io_error)?;
-        drop(envelope);
-
         let ciphertext_path = private.path().join("cancel-ack-ciphertext.tmp");
-        let mut plaintext = File::open(&envelope_path).map_err(io_error)?;
-        let encrypted_len = sessions
-            .encrypt_file_transactional(
-                &self.scope,
-                &mut plaintext,
-                &ciphertext_path,
-                envelope_len,
-                EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
-            )
-            .map_err(vault_error)?;
+        #[cfg(windows)]
+        let encrypted_len = {
+            let prefix = envelope_prefix(&metadata, 0)?;
+            let epoch = sessions
+                .capture_session_epoch(&self.scope)
+                .map_err(vault_error)?;
+            sessions
+                .encrypt_file_transactional_at_epoch(
+                    &self.scope,
+                    &epoch,
+                    &mut io::Cursor::new(&*prefix),
+                    &ciphertext_path,
+                    envelope_len,
+                    EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                )
+                .map_err(vault_error)?
+        };
+        #[cfg(not(windows))]
+        let encrypted_len = {
+            let envelope_path = private.path().join("cancel-ack-envelope.tmp");
+            let mut envelope = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&envelope_path)
+                .map_err(io_error)?;
+            set_private_file(&envelope)?;
+            envelope.write_all(&EDIT_MAGIC).map_err(io_error)?;
+            envelope
+                .write_all(&EDIT_VERSION.to_be_bytes())
+                .map_err(io_error)?;
+            envelope
+                .write_all(&(metadata.len() as u32).to_be_bytes())
+                .map_err(io_error)?;
+            envelope.write_all(&0u64.to_be_bytes()).map_err(io_error)?;
+            envelope.write_all(&metadata).map_err(io_error)?;
+            envelope.flush().map_err(io_error)?;
+            envelope.sync_all().map_err(io_error)?;
+            drop(envelope);
+
+            let ciphertext_path = private.path().join("cancel-ack-ciphertext.tmp");
+            let mut plaintext = File::open(&envelope_path).map_err(io_error)?;
+            sessions
+                .encrypt_file_transactional(
+                    &self.scope,
+                    &mut plaintext,
+                    &ciphertext_path,
+                    envelope_len,
+                    EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                )
+                .map_err(vault_error)?
+        };
         if encrypted_len != envelope_len {
             return Err(invalid("encrypted cancellation proof length changed"));
         }
@@ -2834,6 +3399,81 @@ impl VaultOfflineCache {
             .map_err(cache_error)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn open_pending_body_reader<'a>(
+        &'a self,
+        sessions: &'a VaultSessionCoordinator,
+        id: &str,
+        revision: u64,
+    ) -> Result<(VaultPendingEditMetadata, PendingBodyReadSeek<'a>), CloudError> {
+        self.open_pending_body_reader_cancellable(
+            sessions,
+            id,
+            revision,
+            std::sync::Arc::new(|| false),
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn open_pending_body_reader_cancellable<'a>(
+        &'a self,
+        sessions: &'a VaultSessionCoordinator,
+        id: &str,
+        revision: u64,
+        cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(VaultPendingEditMetadata, PendingBodyReadSeek<'a>), CloudError> {
+        let row = self
+            .cache
+            .ciphertext_write_info(&self.cache_scope, id)
+            .map_err(cache_error)?;
+        if row.revision != revision {
+            return Err(CloudError::new(
+                ErrorKind::NotFound,
+                "encrypted edit revision is unavailable",
+            ));
+        }
+        let ciphertext = self
+            .cache
+            .open_ciphertext_write(&self.cache_scope, id, revision)
+            .map_err(cache_error)?;
+        let mut reader =
+            PendingBodyReadSeek::new(ciphertext, sessions, &self.scope, row.byte_len, cancelled)?;
+        let envelope_len = reader.len();
+        if envelope_len < EDIT_HEADER_BYTES {
+            return Err(invalid("encrypted edit envelope is truncated"));
+        }
+        let mut prefix = zeroize::Zeroizing::new(vec![
+            0u8;
+            envelope_len.min(EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64)
+                as usize
+        ]);
+        reader.read_exact(&mut prefix).map_err(io_error)?;
+        let metadata = reader.with_verified_session(|session| {
+            self.parse_pending_prefix(session, &row, &prefix, envelope_len)
+        })?;
+        let metadata_len = u32::from_be_bytes(prefix[10..14].try_into().unwrap()) as u64;
+        let body_len = u64::from_be_bytes(prefix[14..22].try_into().unwrap());
+        reader.set_body(EDIT_HEADER_BYTES + metadata_len, body_len)?;
+        // The immutable opened body must still describe the exact current row.
+        let current = self
+            .cache
+            .ciphertext_write_info(&self.cache_scope, id)
+            .map_err(cache_error)?;
+        if current.id != row.id
+            || current.revision != revision
+            || current.state != row.state
+            || current.byte_len != row.byte_len
+            || current.plaintext_len != row.plaintext_len
+            || current.operation != row.operation
+            || current.target_key != row.target_key
+            || current.retry_generation != row.retry_generation
+        {
+            return Err(conflict("encrypted edit changed while being opened"));
+        }
+        Ok((metadata, reader))
+    }
+
+    #[cfg(not(windows))]
     fn open_pending_envelope(
         &self,
         sessions: &VaultSessionCoordinator,
@@ -2970,6 +3610,16 @@ impl VaultOfflineCache {
                 MAX_EDIT_METADATA_BYTES + EDIT_HEADER_BYTES as usize,
             )
             .map_err(vault_error)?;
+        self.parse_pending_prefix(session, row, &prefix, plaintext_len)
+    }
+
+    fn parse_pending_prefix(
+        &self,
+        session: &raiun_vault::VerifiedVaultSession,
+        row: &CiphertextWriteInfo,
+        prefix: &[u8],
+        plaintext_len: u64,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
         if prefix.len() < EDIT_HEADER_BYTES as usize {
             return Err(invalid("encrypted edit envelope is truncated"));
         }
@@ -3640,6 +4290,80 @@ impl VaultOfflineCache {
         Ok(record.sha256)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn open_cached_body_reader<'a>(
+        &'a self,
+        sessions: &'a VaultSessionCoordinator,
+        expected: &RemoteEntry,
+        cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<PendingBodyReadSeek<'a>, CloudError> {
+        let path = &expected.path;
+        self.ensure_unlocked(sessions)?;
+        let cache_epoch = self.ciphertext_epoch()?;
+        let entry = self.stat(sessions, path)?;
+        if entry.directory {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot download a cached vault directory",
+            ));
+        }
+        if expected.id != entry.id
+            || expected.path != entry.path
+            || expected.size != entry.size
+            || expected.etag != entry.etag
+        {
+            return Err(conflict("cached vault file version does not match"));
+        }
+        let raw = self.find_raw_entry(sessions, path)?;
+        let etag = raw
+            .etag
+            .as_deref()
+            .ok_or_else(|| invalid("cached vault file omitted its ETag"))?;
+        let expected_ciphertext = raw.ciphertext_len;
+        let ciphertext = if let Some(pin) = &self.pin {
+            self.cache
+                .open_ciphertext_pin_content(
+                    &self.cache_scope,
+                    &pin.id,
+                    &file_version_for_pin_parts(
+                        &raw.resource_id,
+                        etag,
+                        &pin.id,
+                        pin.generation,
+                        cache_epoch,
+                    ),
+                )
+                .map_err(cache_error)?
+        } else {
+            self.cache
+                .open_content(
+                    &self.cache_scope,
+                    &file_version(&raw.resource_id, etag, cache_epoch),
+                )
+                .map_err(cache_error)?
+        };
+        let actual_len = ciphertext.metadata().map_err(io_error)?.len();
+        if actual_len != expected_ciphertext {
+            return Err(conflict("cached vault ciphertext length changed"));
+        }
+
+        let mut reader = PendingBodyReadSeek::new(
+            ciphertext,
+            sessions,
+            &self.scope,
+            expected_ciphertext,
+            cancelled,
+        )?;
+        if reader.len() != expected.size || reader.len() > MAX_PLAINTEXT_BYTES {
+            return Err(conflict("cached vault plaintext length is invalid"));
+        }
+        reader.set_body(0, expected.size)?;
+        let digest = self.ciphertext_sha256(sessions, path, &expected.id, &expected.etag)?;
+        reader.cached_source = Some((expected.clone(), digest));
+        self.ensure_epoch(cache_epoch)?;
+        Ok(reader)
+    }
+
     /// Decrypt an exact cached ciphertext version to a new destination. The
     /// destination must be temporary/private when used for mounted reads; this
     /// API itself does not provide secure disk erasure or crash cleanup.
@@ -4125,6 +4849,26 @@ fn join_path(parent: &str, name: &str) -> String {
     }
 }
 
+#[cfg(windows)]
+fn envelope_prefix(
+    metadata: &[u8],
+    body_len: u64,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, CloudError> {
+    if metadata.is_empty() || metadata.len() > MAX_EDIT_METADATA_BYTES || body_len > MAX_EDIT_BYTES
+    {
+        return Err(invalid("encrypted edit envelope lengths are invalid"));
+    }
+    let mut prefix = zeroize::Zeroizing::new(Vec::with_capacity(
+        EDIT_HEADER_BYTES as usize + metadata.len(),
+    ));
+    prefix.extend_from_slice(&EDIT_MAGIC);
+    prefix.extend_from_slice(&EDIT_VERSION.to_be_bytes());
+    prefix.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
+    prefix.extend_from_slice(&body_len.to_be_bytes());
+    prefix.extend_from_slice(metadata);
+    Ok(prefix)
+}
+
 fn plaintext_len_from_ciphertext(ciphertext_size: u64) -> Result<u64, CloudError> {
     const HEADER: u64 = 32;
     const PLAIN_BLOCK: u64 = 65_536;
@@ -4380,13 +5124,20 @@ fn parse_pending_metadata(
     };
     if state == CiphertextWriteState::AcknowledgedReceipt {
         if version < 10
-            || operation != VaultPendingOperationKind::CreateFile
+            || !matches!(
+                operation,
+                VaultPendingOperationKind::CreateFile | VaultPendingOperationKind::CreateDirectory
+            )
             || base != WriteCondition::Absent
             || plaintext_len != 0
             || cancelled_revision == 0
             || cancelled_revision >= revision
             || cancelled_plaintext_len > MAX_EDIT_BYTES
             || !is_sha256_digest(&cancelled_plaintext_sha256)
+            || (operation == VaultPendingOperationKind::CreateDirectory
+                && (cancelled_plaintext_len != 0
+                    || cancelled_plaintext_sha256
+                        != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
         {
             return Err(invalid(
                 "encrypted cancellation acknowledgement is incomplete",

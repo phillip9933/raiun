@@ -1037,11 +1037,10 @@ mod tests {
 
         fs::write(&authority_path, b"not valid metadata").unwrap();
         assert!(store.load(&item).is_err());
-        assert!(revoke_profile_with_executable(
-            temp.path(),
-            "profile-authority",
-            &store.executable,
-        ).is_err());
+        assert!(
+            revoke_profile_with_executable(temp.path(), "profile-authority", &store.executable,)
+                .is_err()
+        );
         assert_eq!(fs::read(&authority_path).unwrap(), b"not valid metadata");
         assert!(
             !marker.exists(),

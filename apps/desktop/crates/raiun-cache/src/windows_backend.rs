@@ -35,12 +35,14 @@ impl Cache {
             database.borrow_cache_connection(),
             schema::JournalMode::PinnedRollback,
         )?;
+        let quota_bytes =
+            super::load_or_seed_quota(database.borrow_cache_connection(), quota_bytes)?;
         let cache = Self {
             inner: Arc::new(Inner {
                 root: root_path,
                 content_dir: content_path,
                 db: Mutex::new(DbOwner::Windows(database)),
-                quota_bytes,
+                quota_bytes: std::sync::atomic::AtomicU64::new(quota_bytes),
                 windows_root: lock_root,
                 windows_content: super::windows_blob::WindowsBlobStore {
                     directory: Arc::new(content),

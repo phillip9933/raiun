@@ -416,6 +416,7 @@ try {
             }
         }
         payloads = $payloadManifest.payloads
+        noticeInventory = $payloadManifest.noticeInventory
     }
     if ($updaterArtifacts) {
         $packageManifest.updaterArtifact = [ordered]@{

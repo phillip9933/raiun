@@ -7,6 +7,7 @@ export type WindowsRecoveryRootStatus = {
 
 export type WindowsRecoveryAgentStatus = {
   connected?: boolean;
+  windows_recovery_retry_supported?: unknown;
   profile_id?: string | null;
   auth_generation?: unknown;
   root_configuration?: WindowsRecoveryRootStatus | null;
@@ -211,4 +212,57 @@ export function validateWindowsRecoveryPage(
     next_after: value.next_after,
     read_only: true
   };
+}
+
+export type WindowsRecoveryRetryResult = {
+  profile_id: string;
+  auth_generation: number;
+  recovery_scope_token: string;
+  state: 'verified_applied' | 'conflict' | 'outcome_unknown' | 'not_completed';
+  retained: true;
+  remote_verified: boolean;
+  local_completion: 'completed' | 'uncertain' | 'unavailable';
+  attempts?: number;
+  reason?: string;
+};
+
+const RETRY_REASONS = new Set([
+  'invalid_record', 'scope_mismatch', 'missing_baseline', 'remote_missing',
+  'remote_changed', 'remote_not_writable', 'content_mismatch', 'response_inconsistent'
+]);
+
+export function validateWindowsRecoveryRetryResult(
+  value: unknown, expectation: WindowsRecoveryPageExpectation
+): WindowsRecoveryRetryResult {
+  const keys = ['profile_id', 'auth_generation', 'recovery_scope_token', 'state',
+    'retained', 'remote_verified', 'local_completion'];
+  if (isRecord(value) && value.state === 'verified_applied') keys.push('attempts');
+  if (isRecord(value) && value.state === 'conflict') keys.push('reason');
+  if (!isRecord(value) || !hasExactKeys(value, keys.sort()) ||
+      !validWindowsProfileId(expectation.profileId) || !safePositiveInteger(expectation.authGeneration) ||
+      !validRecoveryScopeToken(expectation.recoveryScopeToken) ||
+      value.profile_id !== expectation.profileId || value.auth_generation !== expectation.authGeneration ||
+      value.recovery_scope_token !== expectation.recoveryScopeToken || value.retained !== true ||
+      typeof value.remote_verified !== 'boolean' ||
+      (typeof value.local_completion !== 'string' || !['completed', 'uncertain', 'unavailable'].includes(value.local_completion)) ||
+      (typeof value.state !== 'string' || !['verified_applied', 'conflict', 'outcome_unknown', 'not_completed'].includes(value.state)) ||
+      (value.state === 'verified_applied' && (!safePositiveInteger(value.attempts) || value.attempts > 255)) ||
+      (value.state === 'conflict' && (typeof value.reason !== 'string' || !RETRY_REASONS.has(value.reason))) ||
+      (value.remote_verified && value.state !== 'verified_applied') ||
+      (value.local_completion !== 'unavailable' && (!value.remote_verified || value.state !== 'verified_applied'))) {
+    throw new Error('The agent returned an invalid or stale saved-edit retry result.');
+  }
+  return { ...value } as WindowsRecoveryRetryResult;
+}
+
+export function windowsRecoveryRetryMessage(result: WindowsRecoveryRetryResult): string {
+  if (result.state === 'verified_applied' && result.remote_verified) {
+    return result.local_completion === 'completed'
+      ? 'Cloud save verified and local completion confirmed. The original recovery record is retained.'
+      : 'Cloud save verified. Local completion is not confirmed; the original recovery record is retained.';
+  }
+  if (result.state === 'conflict') {
+    return 'Retry refused because the saved edit or cloud baseline needs review. The original saved edit is retained.';
+  }
+  return 'Cloud save is not confirmed. The original saved edit is retained; review it before trying again.';
 }

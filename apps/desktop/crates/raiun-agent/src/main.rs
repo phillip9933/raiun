@@ -1,12 +1,35 @@
-// The complete mount-capable agent remains a Unix implementation until a
-// native Windows Cloud Files provider is available. Windows builds use the
-// separate named-pipe entry point, which reports the missing provider instead
-// of simulating a drive.
+// Platform entry points share protocol helpers; native capabilities are
+// implemented and validated by their respective Unix and Windows adapters.
 #[cfg(any(unix, windows))]
 mod account_avatar_wire;
+#[cfg(any(unix, windows))]
+mod guest_sharing_wire;
+#[cfg(any(unix, windows))]
+mod sharing_wire;
+#[cfg(any(unix, windows))]
+mod vault_operation_wire;
+
+#[cfg(any(unix, windows))]
+mod runtime_mode;
+
+#[cfg(any(unix, windows))]
+mod headless_runtime;
+
+#[cfg(windows)]
+#[allow(dead_code)]
+mod vault_edit_jobs;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod vault_pin_jobs;
+
+#[cfg(windows)]
+use agent_windows::auth;
 
 #[cfg(unix)]
 include!("agent_unix.rs");
+
+#[cfg(any(windows, test))]
+mod windows_recovery_request;
 
 #[cfg(windows)]
 mod agent_windows;
@@ -24,3 +47,15 @@ fn main() {
     eprintln!("Raiun: This target is not supported");
     std::process::exit(1);
 }
+
+#[cfg(all(test, not(windows)))]
+#[path = "windows_file_rename_producer.rs"]
+mod windows_file_rename_producer;
+
+#[cfg(all(test, not(windows)))]
+#[path = "windows_namespace_dispatcher.rs"]
+mod windows_namespace_dispatcher;
+
+#[cfg(all(test, not(windows)))]
+#[path = "windows_create_executor.rs"]
+mod windows_create_executor;

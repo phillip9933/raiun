@@ -109,6 +109,13 @@ pub struct PendingInitialEdit {
 }
 
 impl PendingInitialEdit {
+    pub fn recovery_job(&self) -> Option<&crate::StreamedRecoveryJob> {
+        self.receipt.recovery_job()
+    }
+    pub fn link_recovery_revocation(&mut self, revoked: Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.receipt.link_recovery_revocation(revoked);
+    }
+
     pub fn location(&self) -> Option<&InitialEditLocation> {
         self.location.as_ref()
     }
@@ -129,6 +136,9 @@ impl PendingInitialEdit {
         self,
         remote: &dyn RecoveryRemote,
     ) -> Result<InitialEditDispatch, JournalError> {
+        if self.recovery_job().is_some_and(|job| job.is_stopped()) {
+            return Err(JournalError::InvalidState);
+        }
         let (outcome, proof) = self
             .recovery
             .dispatch_initial_receipt_verified(self.receipt, remote)?;
@@ -145,6 +155,9 @@ impl PendingInitialEdit {
         self,
         remote: &dyn RecoveryRemote,
     ) -> Result<ReconciliationOutcome, JournalError> {
+        if self.recovery_job().is_some_and(|job| job.is_stopped()) {
+            return Err(JournalError::InvalidState);
+        }
         self.recovery.dispatch_initial_receipt(self.receipt, remote)
     }
 }

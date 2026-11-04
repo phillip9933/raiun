@@ -349,7 +349,11 @@ fn independent_cache_charges_live_reservation_and_database_remains_available() {
 
 #[test]
 fn encrypted_directory_ciphertext_scope_and_oversized_inputs_fail_before_reserving() {
-    let (_state, cache) = cache(MAX_STAGED_PLAINTEXT_BYTES + 1);
+    // The configured cache quota cannot exceed the shared content-size ceiling.
+    // Use its valid inclusive maximum so the entry limit below, rather than
+    // Cache::open, rejects the oversized remote metadata.
+    let (_state, cache) = cache(MAX_STAGED_PLAINTEXT_BYTES);
+    assert_eq!(cache.quota_bytes(), MAX_STAGED_PLAINTEXT_BYTES);
     let scope = scope();
     let regular = entry("regular-file", "/regular.txt", "etag-a", 1);
     let mut encrypted = entry("encrypted-file", "/encrypted", "etag-b", 1);

@@ -7,7 +7,7 @@
 //! never runs while the coordinator holds its session lock.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
@@ -49,11 +49,41 @@ use crate::{
     },
 };
 
+#[cfg(windows)]
+mod cached_namespace;
+#[cfg(windows)]
+pub use cached_namespace::{VaultCachedChildTarget, VaultCachedEditTarget};
 mod copy;
+mod r#move;
+pub use r#move::{VaultMoveOutcome, VaultMoveReviewReason};
+mod directory_create;
+#[cfg(windows)]
+mod file_delete;
+mod file_rename;
+#[cfg(windows)]
+pub use file_delete::{
+    VaultFileDeleteOutcome, VaultFileDeleteRequest, VaultFileDeleteTarget, VaultVerifiedFileDelete,
+};
+pub use file_rename::{
+    VaultDirectoryRenameOutcome, VaultDirectoryRenameTarget, VaultFileRenameOutcome,
+    VaultFileRenameRequest, VaultFileRenameTarget, VaultVerifiedDirectoryRename,
+    VaultVerifiedFileRename,
+};
+mod file_create;
+pub use directory_create::{
+    VaultChildDirectoryCreateOutcome, VaultChildDirectoryCreateRequest,
+    VaultChildDirectoryCreateTarget, VaultVerifiedChildDirectory,
+};
+pub use file_create::{
+    VaultChildFileCreateOutcome, VaultChildFileCreateRequest, VaultChildFileCreateTarget,
+    VaultVerifiedChildFile,
+};
+mod streamed_overwrite;
 pub use copy::{
     VaultCopyOutcome, VaultCopyReconciliationReason, VaultCopyRequest, VaultCopyResolutionOutcome,
     VaultCopyResolutionReason,
 };
+pub use streamed_overwrite::MAX_GUARDED_VAULT_STREAMED_OVERWRITE_BYTES;
 
 const MAX_VAULT_PLAINTEXT_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MAX_VAULT_PIN_ENTRIES: usize = 100_000;
@@ -169,10 +199,12 @@ struct ExistingOverwriteGuard<'a> {
     request: &'a VaultExistingOverwriteRequest<'a>,
     plaintext_len: u64,
     private_ciphertext_directory: &'a Path,
+    maximum_plaintext_len: u64,
+    expected_plaintext_sha256: Option<[u8; 32]>,
     dispatched: Cell<bool>,
 }
 impl ExistingOverwriteGuard<'_> {
-    fn check(&self, backend: &VaultBackend) -> Result<(), CloudError> {
+    fn check_local(&self, backend: &VaultBackend) -> Result<(), CloudError> {
         let request = self.request;
         if (request.cancelled)() {
             return Err(CloudError::new(
@@ -189,6 +221,11 @@ impl ExistingOverwriteGuard<'_> {
                 "encrypted overwrite generation changed",
             ));
         }
+        Ok(())
+    }
+    fn check(&self, backend: &VaultBackend) -> Result<(), CloudError> {
+        self.check_local(backend)?;
+        let request = self.request;
         // A busy registry is fail-closed, not an excuse to block a network
         // watchdog on local crypto. The short opaque lease is dropped here.
         backend
@@ -209,7 +246,166 @@ impl ExistingOverwriteGuard<'_> {
         Ok(())
     }
 }
+/// Sealed positive remote readback for one original journal operation. Plain
+/// metadata cannot construct this proof. The native owner still qualifies its
+/// original physical root/FileID and commits its own factual completion.
+pub struct VaultReconciledPending {
+    metadata: VaultPendingEditMetadata,
+    entry: Option<RemoteEntry>,
+    body_len: u64,
+    body_sha256: Option<[u8; 32]>,
+    scope: VaultSessionScope,
+    epoch: VaultSessionEpoch,
+    token: Arc<AtomicU64>,
+    token_generation: u64,
+    provider: Arc<AtomicU64>,
+    provider_generation: u64,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+impl VaultReconciledPending {
+    pub fn matches_provider(&self, provider: &Arc<AtomicU64>, generation: u64) -> bool {
+        Arc::ptr_eq(&self.provider, provider)
+            && self.provider_generation == generation
+            && self.provider_current()
+    }
+    pub fn matches_client(&self, client: &OpenCloudClient) -> bool {
+        Arc::ptr_eq(&self.token, &client.token_generation)
+            && client.token_generation() == self.token_generation
+            && self.provider_current()
+    }
+    pub fn metadata(&self) -> &VaultPendingEditMetadata {
+        &self.metadata
+    }
+    /// None proves the captured logical delete target was actually NotFound
+    /// under the original root; it grants no authority over another path.
+    pub fn entry(&self) -> Option<&RemoteEntry> {
+        self.entry.as_ref()
+    }
+    pub fn plaintext_len(&self) -> u64 {
+        self.body_len
+    }
+    pub fn plaintext_sha256(&self) -> Option<[u8; 32]> {
+        self.body_sha256
+    }
+    pub fn scope(&self) -> &VaultSessionScope {
+        &self.scope
+    }
+    pub fn matches_epoch(&self, epoch: &VaultSessionEpoch) -> bool {
+        self.epoch.same_identity(epoch)
+    }
+    pub fn token_generation(&self) -> u64 {
+        self.token_generation
+    }
+    /// Pure local freshness only; caller holds its original opaque epoch fence.
+    pub fn provider_current(&self) -> bool {
+        self.provider.load(Ordering::Acquire) == self.provider_generation
+            && self.token.load(Ordering::Acquire) == self.token_generation
+            && !(self.cancelled)()
+    }
+}
+pub enum VaultPendingReconcileOutcome {
+    Verified(VaultReconciledPending),
+    NeedsReconciliation { reason: ErrorKind },
+}
+struct PendingReconcileGuard<'a> {
+    backend: &'a VaultBackend,
+    epoch: &'a VaultSessionEpoch,
+    metadata: VaultPendingEditMetadata,
+    provider: Arc<AtomicU64>,
+    expected_provider: u64,
+    token_generation: u64,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    body_sha256: Option<[u8; 32]>,
+    proof: RefCell<Option<VaultReconciledPending>>,
+}
+impl PendingReconcileGuard<'_> {
+    fn check(&self) -> Result<(), CloudError> {
+        if self.provider.load(Ordering::Acquire) != self.expected_provider
+            || self.backend.client.token_generation() != self.token_generation
+            || (self.cancelled)()
+        {
+            return Err(conflict("original reconciliation context changed"));
+        }
+        self.backend
+            .sessions
+            .try_lock_session_epoch(&self.backend.scope, self.epoch)
+            .map_err(vault_error)?
+            .ok_or_else(|| conflict("original reconciliation epoch is unavailable"))?;
+        Ok(())
+    }
+    fn record(&self, entry: Option<&RemoteEntry>) -> Result<(), CloudError> {
+        self.check()?;
+        let operation = self.metadata.operation;
+        let body_len = if matches!(
+            operation,
+            VaultPendingOperationKind::RenameFile | VaultPendingOperationKind::DeleteFile
+        ) {
+            self.metadata.source_size
+        } else {
+            self.metadata.plaintext_len
+        };
+        match entry {
+            None if operation == VaultPendingOperationKind::DeleteFile => {}
+            Some(actual) if operation != VaultPendingOperationKind::DeleteFile => {
+                let path = if operation == VaultPendingOperationKind::RenameFile {
+                    &self.metadata.destination_path
+                } else {
+                    &self.metadata.path
+                };
+                if actual.path != *path
+                    || actual.id.is_empty()
+                    || actual.directory != (operation == VaultPendingOperationKind::CreateDirectory)
+                    // Directory size may be an aggregate; its journal has no
+                    // file body. Every regular-file proof keeps exact length.
+                    || (!actual.directory && actual.size != body_len)
+                    || (matches!(
+                        operation,
+                        VaultPendingOperationKind::Overwrite
+                            | VaultPendingOperationKind::RenameFile
+                    ) && actual.id != self.metadata.base_resource_id)
+                {
+                    return Err(conflict(
+                        "reconciliation readback does not match original operation",
+                    ));
+                }
+                validate_existing_overwrite_etag(&actual.etag)?;
+            }
+            _ => return Err(conflict("reconciliation has no qualified remote readback")),
+        }
+        let mut proof = self.proof.borrow_mut();
+        if proof.is_some() {
+            return Err(conflict("reconciliation proof was already consumed"));
+        }
+        *proof = Some(VaultReconciledPending {
+            metadata: self.metadata.clone(),
+            entry: entry.cloned(),
+            body_len,
+            body_sha256: self.body_sha256,
+            scope: self.backend.scope.clone(),
+            epoch: self.epoch.clone(),
+            token: self.backend.client.token_generation.clone(),
+            token_generation: self.token_generation,
+            provider: self.provider.clone(),
+            provider_generation: self.expected_provider,
+            cancelled: self.cancelled.clone(),
+        });
+        Ok(())
+    }
+}
+fn check_pending_reconcile(guard: Option<&PendingReconcileGuard<'_>>) -> Result<(), CloudError> {
+    guard.map_or(Ok(()), PendingReconcileGuard::check)
+}
+fn record_pending_reconcile(
+    guard: Option<&PendingReconcileGuard<'_>>,
+    entry: Option<&RemoteEntry>,
+) -> Result<(), CloudError> {
+    guard.map_or(Ok(()), |g| g.record(entry))
+}
+
 struct VaultPutOptions<'a, 'g> {
+    // Pending readers remain bound to their original unlock after local
+    // encryption; an unlocked replacement session cannot authorize sending.
+    pending_epoch: Option<&'a VaultSessionEpoch>,
     expectation: VaultPutExpectation<'a>,
     guarded: Option<&'g ExistingOverwriteGuard<'g>>,
 }
@@ -328,6 +524,49 @@ fn sha256_file(path: &Path) -> Result<String, CloudError> {
         digest.update(&buffer[..read]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+#[cfg(windows)]
+fn sha256_pending_reader<R: Read>(reader: &mut R, expected: u64) -> Result<String, CloudError> {
+    let mut digest = Sha256::new();
+    let mut buffer = Zeroizing::new([0u8; 64 * 1024]);
+    let mut total = 0u64;
+    loop {
+        let read = reader.read(&mut *buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .filter(|n| *n <= expected)
+            .ok_or_else(|| conflict("pending encrypted body length changed"))?;
+        digest.update(&buffer[..read]);
+    }
+    if total != expected {
+        return Err(conflict("pending encrypted body length changed"));
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+#[cfg(windows)]
+struct PendingReadbackDigest {
+    digest: Sha256,
+    bytes: u64,
+    expected: u64,
+}
+#[cfg(windows)]
+impl Write for PendingReadbackDigest {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len() as u64)
+            .filter(|n| *n <= self.expected)
+            .ok_or_else(|| io::Error::other("encrypted readback length changed"))?;
+        self.digest.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn parse_pending_etag(etag: &str) -> Option<(&str, u64)> {
@@ -474,6 +713,34 @@ pub struct VaultCancelledCreateReceipt {
     pub current_revision: u64,
     pub plaintext_len: u64,
     pub plaintext_sha256: String,
+}
+
+/// Local-only cancellation of an exact never-attempted directory reservation.
+/// The SDK retains its journal row as a cancellation receipt. This value is
+/// minted only after the same cache transaction excludes dispatch and children;
+/// native absence and durable custody remain separate requirements.
+pub struct VaultCancelledPendingDirectory {
+    scope: VaultSessionScope,
+    epoch: VaultSessionEpoch,
+    original: VaultPendingEditMetadata,
+    receipt: VaultPendingEditMetadata,
+}
+impl VaultCancelledPendingDirectory {
+    pub fn scope(&self) -> &VaultSessionScope {
+        &self.scope
+    }
+    pub fn matches_epoch(&self, epoch: &VaultSessionEpoch) -> bool {
+        self.epoch.same_identity(epoch)
+    }
+    pub fn original(&self) -> &VaultPendingEditMetadata {
+        &self.original
+    }
+    pub fn receipt(&self) -> &VaultPendingEditMetadata {
+        &self.receipt
+    }
+    pub fn matches_scope(&self, scope: &VaultSessionScope) -> bool {
+        &self.scope == scope
+    }
 }
 
 impl std::fmt::Debug for VaultCancelledCreateReceipt {
@@ -1179,6 +1446,7 @@ impl VaultBackend {
             &root_token,
             parent_resource_id.as_deref().unwrap_or_default(),
             parent_etag.as_deref().unwrap_or_default(),
+            None,
         ) {
             Ok(entry) => {
                 let stable_parent_ref = parent_ref.clone();
@@ -1272,6 +1540,134 @@ impl VaultBackend {
             ));
         }
         cache.cancel_never_attempted_directory_create(&self.sessions, write_id, revision, &path)
+    }
+
+    /// Retained Windows-native cancellation. Unlike the legacy FUSE call,
+    /// this keeps an authenticated CancelledReceipt until exact native absence
+    /// and custody are recorded; it never performs a DAV mutation.
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn cancel_never_attempted_directory_create_retained(
+        &self,
+        virtual_path: &str,
+        write_id: &str,
+        revision: u64,
+        expected_entry_id: &str,
+        expected_entry_etag: &str,
+        epoch: &VaultSessionEpoch,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultCancelledPendingDirectory, CloudError> {
+        if cancelled() || !self.offline_only {
+            return Err(conflict("queued directory cancellation context changed"));
+        }
+        self.sessions
+            .try_lock_session_epoch(&self.scope, epoch)
+            .map_err(vault_error)?
+            .ok_or_else(|| conflict("queued directory unlock changed"))?;
+        let path = normalize_virtual_path(virtual_path)?;
+        validate_virtual_path(&path)?;
+        if path == "/" {
+            return Err(conflict("vault root cannot be cancelled"));
+        }
+        let cache = self
+            .offline_cache
+            .as_ref()
+            .ok_or_else(|| conflict("directory journal unavailable"))?;
+        let original = cache.pending_operation(&self.sessions, write_id, revision)?;
+        let expected = pending_directory_entry(&original);
+        if original.operation != VaultPendingOperationKind::CreateDirectory
+            || !matches!(
+                original.state,
+                CiphertextWriteState::NeverAttempted | CiphertextWriteState::CancelledReceipt
+            )
+            || original.base != WriteCondition::Absent
+            || original.path != path
+            || original.plaintext_len != 0
+            || expected.id != expected_entry_id
+            || expected.etag != expected_entry_etag
+            || self.decode_target_path(&original.encoded_target)? != path
+            || cancelled()
+        {
+            return Err(conflict("queued directory cancellation identity changed"));
+        }
+        cache.begin_cancelled_directory_receipt(
+            &self.sessions,
+            write_id,
+            revision,
+            &original.encoded_target,
+        )?;
+        let receipt = cache.pending_operation(&self.sessions, write_id, revision)?;
+        if receipt.id != original.id
+            || receipt.revision != original.revision
+            || receipt.path != original.path
+            || receipt.operation != original.operation
+            || receipt.state != CiphertextWriteState::CancelledReceipt
+            || receipt.root_integrity_token != original.root_integrity_token
+        {
+            return Err(conflict("queued directory cancellation receipt changed"));
+        }
+        self.sessions
+            .try_lock_session_epoch(&self.scope, epoch)
+            .map_err(vault_error)?
+            .ok_or_else(|| conflict("queued directory unlock changed"))?;
+        if cancelled() {
+            return Err(conflict("queued directory cancellation owner changed"));
+        }
+        Ok(VaultCancelledPendingDirectory {
+            scope: self.scope.clone(),
+            epoch: epoch.clone(),
+            original,
+            receipt,
+        })
+    }
+
+    /// Compact the retained cancellation only after exact native absence and
+    /// durable terminal custody. The compact sealed receipt remains available
+    /// across a crash until the caller safely retires its custody record.
+    #[cfg(windows)]
+    pub fn acknowledge_cancelled_directory_create_retained(
+        &self,
+        receipt: &VaultCancelledPendingDirectory,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), CloudError> {
+        if cancelled() || !self.offline_only || !receipt.matches_scope(&self.scope) {
+            return Err(conflict("queued directory cancellation owner changed"));
+        }
+        self.sessions
+            .try_lock_session_epoch(&self.scope, &receipt.epoch)
+            .map_err(vault_error)?
+            .ok_or_else(|| conflict("queued directory unlock changed"))?;
+        let current = self
+            .offline_cache
+            .as_ref()
+            .ok_or_else(|| conflict("directory journal unavailable"))?
+            .pending_operation_current(&self.sessions, &receipt.original.id)?
+            .ok_or_else(|| conflict("directory cancellation receipt disappeared"))?;
+        if current.operation != VaultPendingOperationKind::CreateDirectory
+            || current.path != receipt.original.path
+            || current.encoded_target != receipt.original.encoded_target
+            || current.root_integrity_token != receipt.original.root_integrity_token
+            || !matches!(
+                current.state,
+                CiphertextWriteState::CancelledReceipt | CiphertextWriteState::AcknowledgedReceipt
+            )
+            || (current.state == CiphertextWriteState::CancelledReceipt
+                && current.revision != receipt.original.revision)
+            || (current.state == CiphertextWriteState::AcknowledgedReceipt
+                && (current.revision != receipt.original.revision + 1
+                    || current.cancelled_revision != receipt.original.revision))
+        {
+            return Err(conflict("directory cancellation receipt changed"));
+        }
+        self.offline_cache
+            .as_ref()
+            .expect("checked above")
+            .acknowledge_cancelled_directory_create(
+                &self.sessions,
+                &receipt.original.id,
+                receipt.original.revision,
+                &receipt.original.encoded_target,
+            )
     }
 
     /// Move an empty queued directory reservation to a different encrypted
@@ -2066,26 +2462,66 @@ impl VaultBackend {
         )
     }
 
+    #[cfg(windows)]
+    fn pending_body_cancelled(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let cancellation = self.client.transfer_budget().cancellation();
+        let generation = self.client.token_generation.clone();
+        let expected = self.client.token_generation();
+        let context = crate::ACTIVE_RANGE_CONTEXT.with(Cell::get);
+        Arc::new(move || {
+            cancellation.is_cancelled()
+                || generation.load(Ordering::Acquire) != expected
+                || context
+                    .is_some_and(|c| Instant::now() >= c.deadline || c.token_generation != expected)
+        })
+    }
+
+    fn verified_pending_body_digest(
+        &self,
+        cache: &VaultOfflineCache,
+        id: &str,
+        revision: u64,
+    ) -> Result<(VaultPendingEditMetadata, String), CloudError> {
+        #[cfg(windows)]
+        {
+            let (metadata, mut body) = cache.open_pending_body_reader_cancellable(
+                &self.sessions,
+                id,
+                revision,
+                self.pending_body_cancelled(),
+            )?;
+            if body.len() != metadata.plaintext_len {
+                return Err(conflict("pending encrypted body length changed"));
+            }
+            let digest = body.sha256().to_owned();
+            body.check_current()?;
+            Ok((metadata, digest))
+        }
+        #[cfg(not(windows))]
+        {
+            let private = tempdir().map_err(io_error)?;
+            let path = private.path().join("pending-body-verify.bin");
+            let metadata = cache.download_pending_edit(&self.sessions, id, revision, &path)?;
+            if File::open(&path)
+                .and_then(|f| f.metadata())
+                .map_err(io_error)?
+                .len()
+                != metadata.plaintext_len
+            {
+                return Err(conflict("pending encrypted body length changed"));
+            }
+            let digest = sha256_file(&path)?;
+            Ok((metadata, digest))
+        }
+    }
+
     fn verify_cancelled_create_body(
         &self,
         cache: &VaultOfflineCache,
         write_id: &str,
         revision: u64,
     ) -> Result<(VaultPendingEditMetadata, String), CloudError> {
-        let private = tempdir().map_err(io_error)?;
-        let body_path = private.path().join("cancelled-create-verify.bin");
-        let downloaded =
-            cache.download_pending_edit(&self.sessions, write_id, revision, &body_path)?;
-        let size = File::open(&body_path)
-            .and_then(|file| file.metadata())
-            .map_err(io_error)?
-            .len();
-        if size != downloaded.plaintext_len {
-            return Err(conflict(
-                "encrypted file-create body length changed during cancellation",
-            ));
-        }
-        let digest = sha256_file(&body_path)?;
+        let (downloaded, digest) = self.verified_pending_body_digest(cache, write_id, revision)?;
         let current = cache
             .pending_operation_current(&self.sessions, write_id)?
             .ok_or_else(|| conflict("encrypted file-create journal disappeared"))?;
@@ -2519,38 +2955,64 @@ impl VaultBackend {
             VaultPendingParentRef::PendingCreate { .. } => (None, None),
         };
 
+        #[cfg(not(windows))]
         let private = tempdir().map_err(io_error)?;
+        #[cfg(not(windows))]
         let body_path = private.path().join("pending-create-body.bin");
+        #[cfg(not(windows))]
         cache.download_pending_edit(&self.sessions, id, revision, &body_path)?;
+        #[cfg(not(windows))]
         let mut body = File::open(&body_path).map_err(io_error)?;
-        let mut metadata = cache.queue_retargeted_create(
+        #[cfg(windows)]
+        let (downloaded, mut body) = cache.open_pending_body_reader_cancellable(
+            &self.sessions,
+            id,
+            revision,
+            self.pending_body_cancelled(),
+        )?;
+        #[cfg(windows)]
+        if downloaded != previous {
+            return Err(conflict("pending create changed before retargeting"));
+        }
+        let request = VaultPendingOperationRequest {
+            integrity_token: &previous.root_integrity_token,
+            encoded_target: &encoded_target,
+            operation: VaultPendingOperationKind::CreateFile,
+            base: WriteCondition::Absent,
+            base_resource_id: None,
+            parent_resource_id: parent_resource_id.as_deref(),
+            parent_etag: parent_etag.as_deref(),
+            parent_ref: Some(destination_parent_ref),
+            destination_target: None,
+            destination_parent_resource_id: None,
+            destination_parent_etag: None,
+            source_size: None,
+            source_ciphertext_sha256: None,
+            copy_source: None,
+            existing_id: Some(id),
+            body_len: previous.plaintext_len,
+            state: CiphertextWriteState::NeverAttempted,
+            receipt_resource_id: None,
+            receipt_etag: None,
+            receipt_for_revision: None,
+        };
+        #[cfg(windows)]
+        let mut metadata = cache.queue_retargeted_create_from_pending(
             &self.sessions,
             &mut body,
-            VaultPendingOperationRequest {
-                integrity_token: &previous.root_integrity_token,
-                encoded_target: &encoded_target,
-                operation: VaultPendingOperationKind::CreateFile,
-                base: WriteCondition::Absent,
-                base_resource_id: None,
-                parent_resource_id: parent_resource_id.as_deref(),
-                parent_etag: parent_etag.as_deref(),
-                parent_ref: Some(destination_parent_ref),
-                destination_target: None,
-                destination_parent_resource_id: None,
-                destination_parent_etag: None,
-                source_size: None,
-                source_ciphertext_sha256: None,
-                copy_source: None,
-                existing_id: Some(id),
-                body_len: previous.plaintext_len,
-                state: CiphertextWriteState::NeverAttempted,
-                receipt_resource_id: None,
-                receipt_etag: None,
-                receipt_for_revision: None,
-            },
+            request,
             &previous.encoded_target,
             revision,
         )?;
+        #[cfg(not(windows))]
+        let mut metadata = cache.queue_retargeted_create(
+            &self.sessions,
+            &mut body,
+            request,
+            &previous.encoded_target,
+            revision,
+        )?;
+
         // Returning the authenticated target and ParentRef lets FUSE update
         // the existing private working-copy manifest without copying or
         // deleting its plaintext recovery bytes.
@@ -2606,29 +3068,13 @@ impl VaultBackend {
         }
 
         let plaintext_sha256 = if metadata.state == CiphertextWriteState::NeverAttempted {
-            let private = tempdir().map_err(io_error)?;
-            let body_path = private.path().join("queued-create-recovery.bin");
-            let downloaded = cache.download_pending_edit(
-                &self.sessions,
-                write_id,
-                metadata.revision,
-                &body_path,
-            )?;
+            let (downloaded, digest) =
+                self.verified_pending_body_digest(cache, write_id, metadata.revision)?;
             if downloaded != metadata {
                 return Err(conflict(
                     "encrypted create changed while its recovery body was verified",
                 ));
             }
-            let size = File::open(&body_path)
-                .and_then(|file| file.metadata())
-                .map_err(io_error)?
-                .len();
-            if size != metadata.plaintext_len {
-                return Err(conflict(
-                    "encrypted create recovery body length does not match its metadata",
-                ));
-            }
-            let digest = sha256_file(&body_path)?;
             let current = cache
                 .pending_operation_current(&self.sessions, write_id)?
                 .ok_or_else(|| conflict("encrypted create disappeared during recovery"))?;
@@ -2864,26 +3310,13 @@ impl VaultBackend {
         let mut rows = Vec::with_capacity(current.len());
         for metadata in current {
             let plaintext_sha256 = if metadata.operation == VaultPendingOperationKind::CreateFile {
-                let private = tempdir().map_err(io_error)?;
-                let body_path = private.path().join("subtree-recovery-body.bin");
-                let downloaded = cache.download_pending_edit(
-                    &self.sessions,
-                    &metadata.id,
-                    metadata.revision,
-                    &body_path,
-                )?;
-                if downloaded != metadata
-                    || File::open(&body_path)
-                        .and_then(|file| file.metadata())
-                        .map_err(io_error)?
-                        .len()
-                        != metadata.plaintext_len
-                {
+                let (downloaded, digest) =
+                    self.verified_pending_body_digest(cache, &metadata.id, metadata.revision)?;
+                if downloaded != metadata {
                     return Err(conflict(
                         "queued subtree recovery body changed during verification",
                     ));
                 }
-                let digest = sha256_file(&body_path)?;
                 if cache
                     .pending_operation_current(&self.sessions, &metadata.id)?
                     .as_ref()
@@ -3003,15 +3436,23 @@ impl VaultBackend {
             // Hash bytes from a fresh verified remote download. A cached
             // content key may have been reused by a server with a broken or
             // malicious ETag, so it is not sufficient evidence here.
-            let private = tempfile::tempdir().map_err(io_error)?;
-            let plaintext = private.path().join("rename-source-verify.bin");
-            self.download_vault_with_ciphertext_digest(
-                state,
-                &from,
-                Some(&source.etag),
-                &plaintext,
-            )?
-            .1
+            #[cfg(windows)]
+            {
+                self.verify_vault_ciphertext_digest(state, &from, &source.etag)?
+                    .1
+            }
+            #[cfg(not(windows))]
+            {
+                let private = tempfile::tempdir().map_err(io_error)?;
+                let plaintext = private.path().join("rename-source-verify.bin");
+                self.download_vault_with_ciphertext_digest(
+                    state,
+                    &from,
+                    Some(&source.etag),
+                    &plaintext,
+                )?
+                .1
+            }
         } else {
             cache.ciphertext_sha256(&self.sessions, &from, &source.id, &source.etag)?
         };
@@ -3094,6 +3535,29 @@ impl VaultBackend {
         expected_source_id: &str,
         expected_source_etag: &str,
     ) -> Result<VaultDeleteOutcome, CloudError> {
+        self.delete_file_with_queue_inner(path, expected_source_id, expected_source_etag, false)
+    }
+
+    /// One-shot source removal for a verified cross-vault Move. Its recovery
+    /// row is born in Conflict so generic delete reconciliation can never
+    /// replay it without revalidating the destination. The current call may
+    /// make one guarded conditional attempt; unresolved rows remain fenced.
+    pub(crate) fn delete_file_for_move_with_queue(
+        &self,
+        path: &str,
+        expected_source_id: &str,
+        expected_source_etag: &str,
+    ) -> Result<VaultDeleteOutcome, CloudError> {
+        self.delete_file_with_queue_inner(path, expected_source_id, expected_source_etag, true)
+    }
+
+    fn delete_file_with_queue_inner(
+        &self,
+        path: &str,
+        expected_source_id: &str,
+        expected_source_etag: &str,
+        move_fenced: bool,
+    ) -> Result<VaultDeleteOutcome, CloudError> {
         let path = normalize_virtual_path(path)?;
         validate_virtual_path(&path)?;
         if path == "/" {
@@ -3163,36 +3627,24 @@ impl VaultBackend {
             )?,
         };
 
-        let private = tempdir().map_err(io_error)?;
-        let plaintext_path = private.path().join("delete-recovery-plaintext.bin");
-        let source_ciphertext_sha256 = if let Some(state) = &state {
-            let (verified_source, digest) = self.download_vault_with_ciphertext_digest(
-                state,
-                &path,
-                Some(expected_source_etag),
-                &plaintext_path,
-            )?;
-            if verified_source.id != source.id || verified_source.size != source.size {
-                return Err(conflict("encrypted delete source length changed"));
-            }
-            digest
-        } else {
-            let recovered = cache.download(
+        #[cfg(windows)]
+        let mut metadata = {
+            let source_ciphertext_sha256 = if let Some(state) = &state {
+                let (verified, digest) =
+                    self.verify_vault_ciphertext_digest(state, &path, expected_source_etag)?;
+                if verified.id != source.id || verified.size != source.size {
+                    return Err(conflict("encrypted delete source changed"));
+                }
+                digest
+            } else {
+                cache.ciphertext_sha256(&self.sessions, &path, &source.id, &source.etag)?
+            };
+            let mut reader = cache.open_cached_body_reader(
                 &self.sessions,
-                &path,
-                Some(expected_source_etag),
-                &plaintext_path,
+                &source,
+                self.pending_body_cancelled(),
             )?;
-            if recovered.id != source.id || recovered.size != source.size {
-                return Err(conflict("cached encrypted delete source changed"));
-            }
-            cache.ciphertext_sha256(&self.sessions, &path, &source.id, &source.etag)?
-        };
-        let mut plaintext = File::open(&plaintext_path).map_err(io_error)?;
-        let mut metadata = cache.queue_delete(
-            &self.sessions,
-            &mut plaintext,
-            VaultPendingDeleteRequest {
+            let request = VaultPendingDeleteRequest {
                 integrity_token: &root_token,
                 encoded_target: &encoded_target,
                 source_resource_id: expected_source_id,
@@ -3202,16 +3654,75 @@ impl VaultBackend {
                 source_size: source.size,
                 source_ciphertext_sha256: &source_ciphertext_sha256,
                 body_len: source.size,
-            },
-        )?;
+            };
+            if move_fenced {
+                cache.queue_move_source_delete_from_cached_source(
+                    &self.sessions,
+                    &mut reader,
+                    request,
+                )?
+            } else {
+                cache.queue_delete_from_cached_source(&self.sessions, &mut reader, request)?
+            }
+        };
+        #[cfg(not(windows))]
+        let mut metadata = {
+            let private = tempdir().map_err(io_error)?;
+            let plaintext_path = private.path().join("delete-recovery-plaintext.bin");
+            let source_ciphertext_sha256 = if let Some(state) = &state {
+                let (verified_source, digest) = self.download_vault_with_ciphertext_digest(
+                    state,
+                    &path,
+                    Some(expected_source_etag),
+                    &plaintext_path,
+                )?;
+                if verified_source.id != source.id || verified_source.size != source.size {
+                    return Err(conflict("encrypted delete source length changed"));
+                }
+                digest
+            } else {
+                let recovered = cache.download(
+                    &self.sessions,
+                    &path,
+                    Some(expected_source_etag),
+                    &plaintext_path,
+                )?;
+                if recovered.id != source.id || recovered.size != source.size {
+                    return Err(conflict("cached encrypted delete source changed"));
+                }
+                cache.ciphertext_sha256(&self.sessions, &path, &source.id, &source.etag)?
+            };
+            let mut plaintext = File::open(&plaintext_path).map_err(io_error)?;
+            let request = VaultPendingDeleteRequest {
+                integrity_token: &root_token,
+                encoded_target: &encoded_target,
+                source_resource_id: expected_source_id,
+                source_etag: expected_source_etag,
+                parent_resource_id: &parent_binding.0,
+                parent_etag: &parent_binding.1,
+                source_size: source.size,
+                source_ciphertext_sha256: &source_ciphertext_sha256,
+                body_len: source.size,
+            };
+            if move_fenced {
+                cache.queue_move_source_delete(&self.sessions, &mut plaintext, request)?
+            } else {
+                cache.queue_delete(&self.sessions, &mut plaintext, request)?
+            }
+        };
         let Some(_state) = state else {
             return Ok(VaultDeleteOutcome::Queued {
                 write_id: metadata.id,
                 revision: metadata.revision,
-                uncertain: false,
+                uncertain: move_fenced,
             });
         };
-        match self.reconcile_pending_delete(&metadata.id, metadata.revision) {
+        let attempt = if move_fenced {
+            self.reconcile_pending_delete_move_once(&metadata.id, metadata.revision)
+        } else {
+            self.reconcile_pending_delete(&metadata.id, metadata.revision)
+        };
+        match attempt {
             Ok(()) => Ok(VaultDeleteOutcome::Committed),
             Err(error) if matches!(error.kind, ErrorKind::Offline | ErrorKind::Io) => {
                 if let Ok(current) =
@@ -3222,7 +3733,23 @@ impl VaultBackend {
                 Ok(VaultDeleteOutcome::Queued {
                     write_id: metadata.id,
                     revision: metadata.revision,
-                    uncertain: metadata.state == CiphertextWriteState::Uncertain,
+                    uncertain: move_fenced || metadata.state == CiphertextWriteState::Uncertain,
+                })
+            }
+            Err(_error) if move_fenced => {
+                let current =
+                    cache.pending_operation(&self.sessions, &metadata.id, metadata.revision)?;
+                if current.state != CiphertextWriteState::Conflict {
+                    cache.set_pending_edit_state(
+                        &metadata.id,
+                        metadata.revision,
+                        CiphertextWriteState::Conflict,
+                    )?;
+                }
+                Ok(VaultDeleteOutcome::Queued {
+                    write_id: metadata.id,
+                    revision: metadata.revision,
+                    uncertain: true,
                 })
             }
             Err(error) => Err(error),
@@ -3391,6 +3918,15 @@ impl VaultBackend {
         id: &str,
         revision: u64,
     ) -> Result<RemoteEntry, CloudError> {
+        self.reconcile_pending_edit_inner(id, revision, None)
+    }
+    fn reconcile_pending_edit_inner(
+        &self,
+        id: &str,
+        revision: u64,
+        guard: Option<&PendingReconcileGuard<'_>>,
+    ) -> Result<RemoteEntry, CloudError> {
+        check_pending_reconcile(guard)?;
         let cache = self.offline_cache.as_ref().ok_or_else(|| {
             CloudError::new(ErrorKind::Offline, "encrypted edit cache is unavailable")
         })?;
@@ -3408,6 +3944,7 @@ impl VaultBackend {
         if current.etag != edit.base_etag {
             match self.pending_matches_remote(&state, &edit, &current) {
                 Ok(true) => {
+                    record_pending_reconcile(guard, Some(&current))?;
                     cache.retire_pending_edit(id, revision)?;
                     return Ok(current);
                 }
@@ -3422,10 +3959,36 @@ impl VaultBackend {
             }
         }
 
+        #[cfg(not(windows))]
         let plaintext_dir = tempdir().map_err(io_error)?;
+        #[cfg(not(windows))]
         let plaintext_path = plaintext_dir.path().join("pending-plaintext.bin");
+        #[cfg(not(windows))]
         cache.download_pending_edit(&self.sessions, id, revision, &plaintext_path)?;
+        #[cfg(not(windows))]
         let mut plaintext = File::open(&plaintext_path).map_err(io_error)?;
+        #[cfg(windows)]
+        let (downloaded, mut plaintext) = cache.open_pending_body_reader_cancellable(
+            &self.sessions,
+            id,
+            revision,
+            self.pending_body_cancelled(),
+        )?;
+        #[cfg(windows)]
+        if downloaded != edit {
+            return Err(conflict("pending encrypted body changed before upload"));
+        }
+        #[cfg(windows)]
+        let put = self.put_vault_pending_reader(
+            &state,
+            &edit.path,
+            &mut plaintext,
+            edit.plaintext_len,
+            WriteCondition::Match(edit.base_etag.clone()),
+            VaultPutExpectation::target(&edit.encoded_target),
+            guard,
+        );
+        #[cfg(not(windows))]
         let put = self.put_vault_reader(
             &state,
             &edit.path,
@@ -3492,6 +4055,7 @@ impl VaultBackend {
                 return Err(error);
             }
         }
+        record_pending_reconcile(guard, Some(&readback))?;
         cache.retire_pending_edit(id, revision)?;
         Ok(readback)
     }
@@ -3518,7 +4082,7 @@ impl VaultBackend {
             return self.reconcile_pending_edit(id, revision);
         }
         if operation.operation == VaultPendingOperationKind::RenameFile {
-            return self.reconcile_pending_rename(id, revision, operation);
+            return self.reconcile_pending_rename(id, revision, operation, None);
         }
         if operation.operation == VaultPendingOperationKind::DeleteFile {
             return Err(CloudError::new(
@@ -3535,7 +4099,127 @@ impl VaultBackend {
         if operation.operation == VaultPendingOperationKind::CreateDirectory {
             return self.reconcile_pending_directory_create(id, revision);
         }
-        self.reconcile_pending_file_create(id, revision, None)
+        self.reconcile_pending_file_create(id, revision, None, None)
+    }
+
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_pending_operation_guarded(
+        &self,
+        id: &str,
+        revision: u64,
+        epoch: &VaultSessionEpoch,
+        provider_generation: Arc<AtomicU64>,
+        expected_provider_generation: u64,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<VaultPendingReconcileOutcome, CloudError> {
+        let token_generation = self.client.token_generation();
+        if expected_provider_generation == 0
+            || token_generation == 0
+            || self.offline_only
+            || cancelled()
+            || provider_generation.load(Ordering::Acquire) != expected_provider_generation
+        {
+            return Err(conflict("original reconciliation context is unavailable"));
+        }
+        self.sessions
+            .with_session_epoch(&self.scope, epoch, || ())
+            .map_err(vault_error)?;
+        let cache = self
+            .offline_cache
+            .as_ref()
+            .ok_or_else(|| invalid("original reconciliation journal is unavailable"))?;
+        let metadata = cache.pending_operation(&self.sessions, id, revision)?;
+        if matches!(
+            metadata.state,
+            CiphertextWriteState::Building
+                | CiphertextWriteState::CancelledReceipt
+                | CiphertextWriteState::CommittedReceipt
+        ) {
+            return Err(conflict(
+                "journal operation is not admitted for reconciliation",
+            ));
+        }
+        if metadata.operation == VaultPendingOperationKind::CopyFile {
+            return Err(conflict(
+                "copy reconciliation needs its source-specific proof",
+            ));
+        }
+        let digest = if matches!(
+            metadata.operation,
+            VaultPendingOperationKind::Overwrite
+                | VaultPendingOperationKind::CreateFile
+                | VaultPendingOperationKind::DeleteFile
+        ) {
+            let (body, mut reader) = cache.open_pending_body_reader_cancellable(
+                &self.sessions,
+                id,
+                revision,
+                cancelled.clone(),
+            )?;
+            if body != metadata || reader.len() != metadata.plaintext_len {
+                return Err(conflict("original reconciliation body changed"));
+            }
+            let text = reader.sha256().as_bytes();
+            let mut digest = [0u8; 32];
+            if text.len() != 64 {
+                return Err(invalid("original reconciliation body digest is invalid"));
+            }
+            for (i, pair) in text.chunks_exact(2).enumerate() {
+                let pair = std::str::from_utf8(pair).map_err(|_| invalid("invalid body digest"))?;
+                digest[i] =
+                    u8::from_str_radix(pair, 16).map_err(|_| invalid("invalid body digest"))?;
+            }
+            reader.check_current()?;
+            Some(digest)
+        } else {
+            None
+        };
+        let guard = PendingReconcileGuard {
+            backend: self,
+            epoch,
+            metadata: metadata.clone(),
+            provider: provider_generation,
+            expected_provider: expected_provider_generation,
+            token_generation,
+            cancelled,
+            body_sha256: digest,
+            proof: RefCell::new(None),
+        };
+        guard.check()?;
+        let result = match metadata.operation {
+            VaultPendingOperationKind::Overwrite => self
+                .reconcile_pending_edit_inner(id, revision, Some(&guard))
+                .map(|_| ()),
+            VaultPendingOperationKind::CreateFile => self
+                .reconcile_pending_file_create(id, revision, None, Some(&guard))
+                .map(|_| ()),
+            VaultPendingOperationKind::CreateDirectory => self
+                .reconcile_pending_directory_create_inner(id, revision, Some(&guard))
+                .map(|_| ()),
+            VaultPendingOperationKind::DeleteFile => {
+                self.reconcile_pending_delete_inner(id, revision, Some(&guard))
+            }
+            VaultPendingOperationKind::RenameFile => self
+                .reconcile_pending_rename(id, revision, metadata, Some(&guard))
+                .map(|_| ()),
+            VaultPendingOperationKind::CopyFile => unreachable!(),
+        };
+        if let Err(error) = result {
+            return Ok(VaultPendingReconcileOutcome::NeedsReconciliation { reason: error.kind });
+        }
+        if guard.check().is_err() {
+            return Ok(VaultPendingReconcileOutcome::NeedsReconciliation {
+                reason: ErrorKind::Forbidden,
+            });
+        }
+        let proof = guard.proof.borrow_mut().take();
+        Ok(match proof {
+            Some(proof) => VaultPendingReconcileOutcome::Verified(proof),
+            None => VaultPendingReconcileOutcome::NeedsReconciliation {
+                reason: ErrorKind::Conflict,
+            },
+        })
     }
 
     /// Retry a CreateFile left in an interrupted dispatch state. This entry
@@ -3562,6 +4246,7 @@ impl VaultBackend {
             id,
             revision,
             Some((expected_retry_state, expected_retry_generation)),
+            None,
         )
     }
 
@@ -3570,7 +4255,9 @@ impl VaultBackend {
         id: &str,
         revision: u64,
         explicit_retry: Option<(CiphertextWriteState, u64)>,
+        guard: Option<&PendingReconcileGuard<'_>>,
     ) -> Result<RemoteEntry, CloudError> {
+        check_pending_reconcile(guard)?;
         let cache = self.offline_cache.as_ref().ok_or_else(|| {
             CloudError::new(ErrorKind::Offline, "encrypted edit cache is unavailable")
         })?;
@@ -3657,10 +4344,25 @@ impl VaultBackend {
             Err(error) => return Err(error),
         }
 
+        #[cfg(not(windows))]
         let plaintext_dir = tempdir().map_err(io_error)?;
+        #[cfg(not(windows))]
         let plaintext_path = plaintext_dir.path().join("pending-create-plaintext.bin");
+        #[cfg(not(windows))]
         cache.download_pending_edit(&self.sessions, id, revision, &plaintext_path)?;
+        #[cfg(not(windows))]
         let mut plaintext = File::open(&plaintext_path).map_err(io_error)?;
+        #[cfg(windows)]
+        let (downloaded, mut plaintext) = cache.open_pending_body_reader_cancellable(
+            &self.sessions,
+            id,
+            revision,
+            self.pending_body_cancelled(),
+        )?;
+        #[cfg(windows)]
+        if downloaded != operation {
+            return Err(conflict("pending encrypted body changed before upload"));
+        }
         let claimed_retry = if let Some((expected, generation)) = explicit_retry {
             let next_generation = cache.claim_interrupted_file_create_retry(
                 &self.sessions,
@@ -3695,6 +4397,23 @@ impl VaultBackend {
                 cache.set_pending_edit_state(id, revision, state)
             }
         };
+        #[cfg(windows)]
+        let put = self.put_vault_pending_reader(
+            &state,
+            &operation.path,
+            &mut plaintext,
+            operation.plaintext_len,
+            WriteCondition::Absent,
+            VaultPutExpectation {
+                encoded_target: Some(&operation.encoded_target),
+                parent_binding: Some((&parent_id, &parent_etag)),
+                expected_token_generation: None,
+                external_token_generation: None,
+                caller_cancelled: None,
+            },
+            guard,
+        );
+        #[cfg(not(windows))]
         let put = self.put_vault_reader(
             &state,
             &operation.path,
@@ -3742,6 +4461,7 @@ impl VaultBackend {
         );
         match confirmed {
             Ok(true) => {
+                record_pending_reconcile(guard, Some(&uploaded))?;
                 if let Some((state, generation)) = claimed_retry {
                     cache.retire_interrupted_file_create_retry(
                         &self.sessions,
@@ -3781,6 +4501,15 @@ impl VaultBackend {
         id: &str,
         revision: u64,
     ) -> Result<RemoteEntry, CloudError> {
+        self.reconcile_pending_directory_create_inner(id, revision, None)
+    }
+    fn reconcile_pending_directory_create_inner(
+        &self,
+        id: &str,
+        revision: u64,
+        guard: Option<&PendingReconcileGuard<'_>>,
+    ) -> Result<RemoteEntry, CloudError> {
+        check_pending_reconcile(guard)?;
         let cache = self.offline_cache.as_ref().ok_or_else(|| {
             CloudError::new(
                 ErrorKind::Offline,
@@ -3856,12 +4585,14 @@ impl VaultBackend {
             &operation.root_integrity_token,
             &parent_id,
             &parent_etag,
+            guard,
         ) {
             Ok(entry) => {
                 if entry.path != operation.path || !entry.directory || entry.id.is_empty() {
                     cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
                     return Err(conflict("encrypted directory readback identity changed"));
                 }
+                record_pending_reconcile(guard, Some(&entry))?;
                 let receipt = cache.commit_directory_receipt(
                     &self.sessions,
                     &operation,
@@ -3904,6 +4635,7 @@ impl VaultBackend {
         integrity_token: &str,
         expected_parent_id: &str,
         expected_parent_etag: &str,
+        guard: Option<&PendingReconcileGuard<'_>>,
     ) -> Result<RemoteEntry, CloudError> {
         let state = self.revalidate_root()?;
         if state.integrity_token != integrity_token
@@ -3948,10 +4680,11 @@ impl VaultBackend {
             .client
             .request(Method::from_bytes(b"MKCOL").expect("static method"), &url)?;
         let parent_url = self.target_url(&state, &logical_parent(path))?;
-        let parent_condition = format!("<{parent_url}> [{expected_parent_etag}]");
+        let parent_condition = format!("<{parent_url}> ([{expected_parent_etag}])");
         let request = request
             .header(IF_NONE_MATCH, "*")
             .header("If", parent_condition);
+        check_pending_reconcile(guard)?;
         checked(
             request.send().map_err(network)?,
             &[StatusCode::CREATED],
@@ -3981,6 +4714,31 @@ impl VaultBackend {
     /// before the request. A 404 retires without another request, whereas a
     /// replacement remains a conflict and retains its recovery body.
     pub fn reconcile_pending_delete(&self, id: &str, revision: u64) -> Result<(), CloudError> {
+        self.reconcile_pending_delete_inner(id, revision, None)
+    }
+    fn reconcile_pending_delete_move_once(
+        &self,
+        id: &str,
+        revision: u64,
+    ) -> Result<(), CloudError> {
+        self.reconcile_pending_delete_inner_with_mode(id, revision, None, true)
+    }
+    fn reconcile_pending_delete_inner(
+        &self,
+        id: &str,
+        revision: u64,
+        guard: Option<&PendingReconcileGuard<'_>>,
+    ) -> Result<(), CloudError> {
+        self.reconcile_pending_delete_inner_with_mode(id, revision, guard, false)
+    }
+    fn reconcile_pending_delete_inner_with_mode(
+        &self,
+        id: &str,
+        revision: u64,
+        guard: Option<&PendingReconcileGuard<'_>>,
+        move_fenced: bool,
+    ) -> Result<(), CloudError> {
+        check_pending_reconcile(guard)?;
         let cache = self.offline_cache.as_ref().ok_or_else(|| {
             CloudError::new(ErrorKind::Offline, "encrypted delete cache is unavailable")
         })?;
@@ -3990,9 +4748,17 @@ impl VaultBackend {
         {
             return Err(conflict("encrypted delete is not retryable"));
         }
-        if operation.state == CiphertextWriteState::Conflict {
+        if operation.state == CiphertextWriteState::Conflict && !move_fenced {
             return Err(conflict("encrypted delete requires conflict resolution"));
         }
+        if move_fenced && operation.state != CiphertextWriteState::Conflict {
+            return Err(conflict("move source delete is missing its replay fence"));
+        }
+        let unresolved_state = if move_fenced {
+            CiphertextWriteState::Conflict
+        } else {
+            CiphertextWriteState::Uncertain
+        };
         let state = match self.revalidate_root() {
             Ok(state) => state,
             Err(error) if error.kind == ErrorKind::Conflict => {
@@ -4000,7 +4766,7 @@ impl VaultBackend {
                 return Err(error);
             }
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -4011,11 +4777,12 @@ impl VaultBackend {
         }
         match self.stat_raw(&state, &operation.path) {
             Err(error) if error.kind == ErrorKind::NotFound => {
+                record_pending_reconcile(guard, None)?;
                 cache.retire_pending_edit(id, revision)?;
                 return Ok(());
             }
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -4040,7 +4807,7 @@ impl VaultBackend {
         let parent = match self.current_parent_binding(&operation.path) {
             Ok(parent) => parent,
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) if matches!(error.kind, ErrorKind::Conflict | ErrorKind::NotFound) => {
@@ -4070,7 +4837,7 @@ impl VaultBackend {
         let current_state = match self.revalidate_root() {
             Ok(state) => state,
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -4088,11 +4855,12 @@ impl VaultBackend {
         let current_source = match self.stat_raw(&current_state, &operation.path) {
             Ok(source) => source,
             Err(error) if error.kind == ErrorKind::NotFound => {
+                record_pending_reconcile(guard, None)?;
                 cache.retire_pending_edit(id, revision)?;
                 return Ok(());
             }
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -4100,7 +4868,7 @@ impl VaultBackend {
         let current_parent = match self.current_parent_binding(&operation.path) {
             Ok(parent) => parent,
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) if matches!(error.kind, ErrorKind::Conflict | ErrorKind::NotFound) => {
@@ -4120,10 +4888,11 @@ impl VaultBackend {
             return Err(conflict("encrypted delete target changed before request"));
         }
         let (request, token) = self.client.request(Method::DELETE, &url)?;
+        check_pending_reconcile(guard)?;
         let response = match request.header(IF_MATCH, &operation.base_etag).send() {
             Ok(response) => response,
             Err(error) => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(network(error));
             }
         };
@@ -4131,24 +4900,25 @@ impl VaultBackend {
             if error.kind == ErrorKind::Conflict {
                 cache.set_pending_edit_state(id, revision, CiphertextWriteState::Conflict)?;
             } else if matches!(error.kind, ErrorKind::Offline | ErrorKind::Io) {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
             }
             return Err(error);
         }
         let fresh_state = match self.revalidate_root() {
             Ok(state) => state,
             Err(error) => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
         };
         match self.stat_raw(&fresh_state, &operation.path) {
             Err(error) if error.kind == ErrorKind::NotFound => {
+                record_pending_reconcile(guard, None)?;
                 cache.retire_pending_edit(id, revision)?;
                 Ok(())
             }
             Ok(current) if current.id == operation.base_resource_id => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 Err(CloudError::new(
                     ErrorKind::Offline,
                     "encrypted delete was accepted but source readback is unresolved",
@@ -4161,7 +4931,7 @@ impl VaultBackend {
                 ))
             }
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 Err(error)
             }
             Err(error) => Err(error),
@@ -4177,7 +4947,9 @@ impl VaultBackend {
         id: &str,
         revision: u64,
         operation: VaultPendingEditMetadata,
+        guard: Option<&PendingReconcileGuard<'_>>,
     ) -> Result<RemoteEntry, CloudError> {
+        check_pending_reconcile(guard)?;
         let cache = self.offline_cache.as_ref().ok_or_else(|| {
             CloudError::new(ErrorKind::Offline, "encrypted rename cache is unavailable")
         })?;
@@ -4219,6 +4991,7 @@ impl VaultBackend {
             {
                 match self.rename_content_matches(&state, &operation, entry) {
                     Ok(true) => {
+                        record_pending_reconcile(guard, Some(entry))?;
                         cache.retire_pending_edit(id, revision)?;
                         return Ok(entry.clone());
                     }
@@ -4282,7 +5055,7 @@ impl VaultBackend {
             Err(error) if error.kind == ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        self.perform_pending_rename(&state, id, revision, &operation)
+        self.perform_pending_rename(&state, id, revision, &operation, guard)
     }
 
     fn perform_pending_rename(
@@ -4291,6 +5064,7 @@ impl VaultBackend {
         id: &str,
         revision: u64,
         operation: &VaultPendingEditMetadata,
+        guard: Option<&PendingReconcileGuard<'_>>,
     ) -> Result<RemoteEntry, CloudError> {
         let cache = self.offline_cache.as_ref().ok_or_else(|| {
             CloudError::new(ErrorKind::Offline, "encrypted rename cache is unavailable")
@@ -4300,6 +5074,7 @@ impl VaultBackend {
         cache.invalidate_before_remote_mutation()?;
         let move_method = Method::from_bytes(b"MOVE").expect("static HTTP method");
         let (request, token) = self.client.request(move_method, &source)?;
+        check_pending_reconcile(guard)?;
         let response = match request
             .header(IF_MATCH, &operation.base_etag)
             .header("Destination", destination.as_str())
@@ -4385,6 +5160,7 @@ impl VaultBackend {
                 return Err(error);
             }
         }
+        record_pending_reconcile(guard, Some(&moved))?;
         cache.retire_pending_edit(id, revision)?;
         Ok(moved)
     }
@@ -4401,14 +5177,20 @@ impl VaultBackend {
         {
             return Ok(false);
         }
-        let private = tempfile::tempdir().map_err(io_error)?;
+        #[cfg(not(windows))]
+        let private = tempdir().map_err(io_error)?;
+        #[cfg(not(windows))]
         let plaintext = private.path().join("rename-readback.bin");
+        #[cfg(not(windows))]
         let (downloaded, digest) = self.download_vault_with_ciphertext_digest(
             state,
             &operation.destination_path,
             Some(&entry.etag),
             &plaintext,
         )?;
+        #[cfg(windows)]
+        let (downloaded, digest) =
+            self.verify_vault_ciphertext_digest(state, &operation.destination_path, &entry.etag)?;
         Ok(!downloaded.directory
             && downloaded.id == operation.base_resource_id
             && downloaded.size == operation.source_size
@@ -4430,21 +5212,53 @@ impl VaultBackend {
         let cache = self.offline_cache.as_ref().ok_or_else(|| {
             CloudError::new(ErrorKind::Offline, "encrypted edit cache is unavailable")
         })?;
-        let private = tempdir().map_err(io_error)?;
-        let expected_path = private.path().join("expected.bin");
-        let actual_path = private.path().join("actual.bin");
-        cache.download_pending_edit(&self.sessions, &edit.id, edit.revision, &expected_path)?;
-        self.download_vault_inner(
-            state,
-            &edit.path,
-            Some(&remote.etag),
-            &actual_path,
-            None,
-            None,
-        )?;
-        let mut expected = File::open(&expected_path).map_err(io_error)?;
-        let mut actual = File::open(&actual_path).map_err(io_error)?;
-        compare_reader_to_file(&mut expected, &mut actual, edit.plaintext_len)
+        #[cfg(windows)]
+        {
+            let (metadata, expected_digest) =
+                self.verified_pending_body_digest(cache, &edit.id, edit.revision)?;
+            let mut original = edit.clone();
+            original.state = metadata.state;
+            original.retry_generation = metadata.retry_generation;
+            if original != metadata {
+                return Err(conflict("pending encrypted body changed during readback"));
+            }
+            let private = tempdir().map_err(io_error)?;
+            let mut output = PendingReadbackDigest {
+                digest: Sha256::new(),
+                bytes: 0,
+                expected: edit.plaintext_len,
+            };
+            let actual = self.download_vault_inner_with_private_output(
+                state,
+                &edit.path,
+                Some(&remote.etag),
+                &private.path().join("unused-plaintext.bin"),
+                (None, None),
+                Some(&mut output),
+            )?;
+            Ok(actual.id == edit.base_resource_id
+                && actual.size == edit.plaintext_len
+                && output.bytes == edit.plaintext_len
+                && format!("{:x}", output.digest.finalize()) == expected_digest)
+        }
+        #[cfg(not(windows))]
+        {
+            let private = tempdir().map_err(io_error)?;
+            let expected_path = private.path().join("expected.bin");
+            let actual_path = private.path().join("actual.bin");
+            cache.download_pending_edit(&self.sessions, &edit.id, edit.revision, &expected_path)?;
+            self.download_vault_inner(
+                state,
+                &edit.path,
+                Some(&remote.etag),
+                &actual_path,
+                None,
+                None,
+            )?;
+            let mut expected = File::open(&expected_path).map_err(io_error)?;
+            let mut actual = File::open(&actual_path).map_err(io_error)?;
+            compare_reader_to_file(&mut expected, &mut actual, edit.plaintext_len)
+        }
     }
 
     fn resolve_pending_condition(
@@ -4949,6 +5763,109 @@ impl VaultBackend {
         }
     }
 
+    /// Queue an existing cached file body from original protected native
+    /// custody. This never sends HTTP or adopts a replacement unlock session.
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_existing_cached_reader<R: Read>(
+        &self,
+        original: &RemoteEntry,
+        source: &mut R,
+        plaintext_len: u64,
+        expected_sha256: [u8; 32],
+        existing_write_id: Option<&str>,
+        epoch: &VaultSessionEpoch,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultUploadOutcome, CloudError> {
+        if !self.offline_only
+            || cancelled()
+            || original.directory
+            || original.id.is_empty()
+            || plaintext_len > MAX_VAULT_PLAINTEXT_BYTES
+        {
+            return Err(invalid("cached existing-file capture is unavailable"));
+        }
+        self.check_put_epoch(Some(epoch))?;
+        validate_virtual_path(&original.path)?;
+        let current = self.cached_stat(
+            &original.path,
+            invalid("offline vault metadata is unavailable"),
+        )?;
+        if current.directory
+            || !current.writable
+            || current.id != original.id
+            || current.path != original.path
+            || current.etag != original.etag
+            || current.size != original.size
+        {
+            return Err(conflict("cached existing-file original changed"));
+        }
+        let (condition, pending) = self.resolve_pending_condition(
+            &original.path,
+            &WriteCondition::Match(original.etag.clone()),
+        )?;
+        if let (Some(requested), Some(pending)) = (existing_write_id, pending.as_ref()) {
+            if requested != pending.id {
+                return Err(conflict("cached pending edit identity changed"));
+            }
+        }
+        let base = self.cached_base_entry(&original.path, &condition)?;
+        let WriteCondition::Match(base_etag) = condition else {
+            return Err(conflict("cached edit requires its original version"));
+        };
+        if base.directory || base.id != original.id || base.etag != base_etag {
+            return Err(conflict("cached edit base changed"));
+        }
+        validate_existing_overwrite_etag(&base_etag)?;
+        let cache = self
+            .offline_cache
+            .as_ref()
+            .ok_or_else(|| invalid("cached edit journal is unavailable"))?;
+        let root = cache.cached_root_snapshot(&self.sessions)?;
+        let encoded = self.encoded_file_target_from_cache(
+            &original.path,
+            &WriteCondition::Match(base_etag.clone()),
+        )?;
+        let id = pending
+            .as_ref()
+            .map(|p| p.id.as_str())
+            .or(existing_write_id);
+        if cancelled() {
+            return Err(conflict("cached edit capture was cancelled"));
+        }
+        self.check_put_epoch(Some(epoch))?;
+        let metadata = cache.queue_edit_reader(
+            &self.sessions,
+            epoch,
+            source,
+            VaultPendingEditRequest {
+                integrity_token: &root.integrity_token,
+                encoded_target: &encoded,
+                base_resource_id: &base.id,
+                base_etag: &base_etag,
+                existing_id: id,
+                body_len: plaintext_len,
+            },
+            expected_sha256,
+            cancelled,
+        )?;
+        self.check_put_epoch(Some(epoch))?;
+        if cancelled() {
+            return Err(conflict("cached edit capture was cancelled"));
+        }
+        let mut entry = base;
+        entry.size = plaintext_len;
+        entry.etag = pending_etag(&metadata.id, metadata.revision);
+        // Presentation follows the verified cached base; no online write
+        // capability is minted by this local journal receipt.
+        Ok(VaultUploadOutcome::Queued {
+            entry,
+            write_id: metadata.id,
+            revision: metadata.revision,
+            uncertain: false,
+        })
+    }
+
     fn queue_offline_edit<R: Read + Seek>(
         &self,
         encoded_target: &str,
@@ -5017,19 +5934,45 @@ impl VaultBackend {
         if uploaded.directory || uploaded.size != expected_len || uploaded.etag.is_empty() {
             return Ok(false);
         }
-        let private = tempdir().map_err(io_error)?;
-        let readback_path = private.path().join("readback.bin");
-        self.download_vault_inner(
-            state,
-            path,
-            Some(&uploaded.etag),
-            &readback_path,
-            None,
-            None,
-        )?;
-        source.seek(SeekFrom::Start(0)).map_err(io_error)?;
-        let mut readback = File::open(&readback_path).map_err(io_error)?;
-        compare_reader_to_file(source, &mut readback, expected_len)
+        #[cfg(windows)]
+        {
+            source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+            let expected = sha256_pending_reader(source, expected_len)?;
+            let private = tempdir().map_err(io_error)?;
+            let mut output = PendingReadbackDigest {
+                digest: Sha256::new(),
+                bytes: 0,
+                expected: expected_len,
+            };
+            let actual = self.download_vault_inner_with_private_output(
+                state,
+                path,
+                Some(&uploaded.etag),
+                &private.path().join("unused-plaintext.bin"),
+                (None, None),
+                Some(&mut output),
+            )?;
+            Ok(actual.id == uploaded.id
+                && actual.size == expected_len
+                && output.bytes == expected_len
+                && format!("{:x}", output.digest.finalize()) == expected)
+        }
+        #[cfg(not(windows))]
+        {
+            let private = tempdir().map_err(io_error)?;
+            let readback_path = private.path().join("readback.bin");
+            self.download_vault_inner(
+                state,
+                path,
+                Some(&uploaded.etag),
+                &readback_path,
+                None,
+                None,
+            )?;
+            source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+            let mut readback = File::open(&readback_path).map_err(io_error)?;
+            compare_reader_to_file(source, &mut readback, expected_len)
+        }
     }
 
     fn encoded_file_target_from_cache(
@@ -5205,6 +6148,8 @@ impl VaultBackend {
             request,
             plaintext_len,
             private_ciphertext_directory,
+            maximum_plaintext_len: MAX_GUARDED_VAULT_OVERWRITE_BYTES,
+            expected_plaintext_sha256: None,
             dispatched: Cell::new(false),
         };
         let result = (|| {
@@ -5247,6 +6192,7 @@ impl VaultBackend {
                 plaintext_len,
                 condition,
                 VaultPutOptions {
+                    pending_epoch: None,
                     expectation: VaultPutExpectation {
                         encoded_target: Some(request.encoded_target),
                         parent_binding: None,
@@ -5436,6 +6382,7 @@ impl VaultBackend {
                     return Err(conflict("encrypted file changed while it was being pinned"));
                 }
                 check_pin_cancelled(cancelled)?;
+                #[cfg(not(windows))]
                 fs::remove_file(&plain_path).map_err(io_error)?;
                 progress_snapshot.bytes_done = plaintext_bytes;
                 progress(progress_snapshot);
@@ -5963,6 +6910,7 @@ impl VaultBackend {
             plaintext_size,
             condition,
             VaultPutOptions {
+                pending_epoch: None,
                 expectation,
                 guarded: None,
             },
@@ -5978,10 +6926,128 @@ impl VaultBackend {
         condition: WriteCondition,
         options: VaultPutOptions<'_, '_>,
     ) -> Result<RemoteEntry, CloudError> {
+        let guarded = options.guarded;
+        self.put_vault_encoded_body_inner_with_reconcile(
+            state,
+            virtual_path,
+            plaintext_size,
+            condition,
+            options,
+            None,
+            |ciphertext_path| {
+                if let Some(guard) = guarded {
+                    if let Some(expected) = guard.expected_plaintext_sha256 {
+                        // Hash exactly the bytes consumed by the existing encoder, not
+                        // a prior pass over an input that could subsequently change.
+                        let mut verified =
+                            streamed_overwrite::DigestReader::new(source, self, guard);
+                        self.sessions
+                            .encrypt_file_transactional_at_epoch(
+                                &self.scope,
+                                guard.request.epoch,
+                                &mut verified,
+                                ciphertext_path,
+                                plaintext_size,
+                                guard.maximum_plaintext_len,
+                            )
+                            .map_err(vault_error)?;
+                        verified.verify(expected)?;
+                    } else {
+                        self.sessions
+                            .encrypt_file_transactional_at_epoch(
+                                &self.scope,
+                                guard.request.epoch,
+                                source,
+                                ciphertext_path,
+                                plaintext_size,
+                                guard.maximum_plaintext_len,
+                            )
+                            .map_err(vault_error)?;
+                    }
+                    guard.check(self)?;
+                } else {
+                    self.sessions
+                        .encrypt_file_transactional(
+                            &self.scope,
+                            source,
+                            ciphertext_path,
+                            plaintext_size,
+                            MAX_VAULT_PLAINTEXT_BYTES,
+                        )
+                        .map_err(vault_error)?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    #[cfg(windows)]
+    fn put_vault_pending_reader(
+        &self,
+        state: &RootState,
+        path: &str,
+        source: &mut super::vault_cache::PendingBodyReadSeek<'_>,
+        size: u64,
+        condition: WriteCondition,
+        expectation: VaultPutExpectation<'_>,
+        guard: Option<&PendingReconcileGuard<'_>>,
+    ) -> Result<RemoteEntry, CloudError> {
+        let epoch = self
+            .sessions
+            .capture_session_epoch(&self.scope)
+            .map_err(vault_error)?;
+        source.check_current()?;
+        if source.len() != size {
+            return Err(conflict("pending encrypted body length changed"));
+        }
+        self.put_vault_encoded_body_inner_with_reconcile(
+            state,
+            path,
+            size,
+            condition,
+            VaultPutOptions {
+                pending_epoch: Some(&epoch),
+                expectation,
+                guarded: None,
+            },
+            guard,
+            |destination| {
+                source.encrypt_to_ciphertext(destination, MAX_VAULT_PLAINTEXT_BYTES)?;
+                Ok(())
+            },
+        )
+    }
+
+    fn check_put_epoch(&self, epoch: Option<&VaultSessionEpoch>) -> Result<(), CloudError> {
+        if let Some(epoch) = epoch {
+            self.sessions
+                .try_lock_session_epoch(&self.scope, epoch)
+                .map_err(vault_error)?
+                .ok_or_else(|| conflict("original upload epoch is unavailable"))?;
+        }
+        Ok(())
+    }
+
+    fn put_vault_encoded_body_inner_with_reconcile<F>(
+        &self,
+        state: &RootState,
+        virtual_path: &str,
+        plaintext_size: u64,
+        condition: WriteCondition,
+        options: VaultPutOptions<'_, '_>,
+        reconcile: Option<&PendingReconcileGuard<'_>>,
+        encode: F,
+    ) -> Result<RemoteEntry, CloudError>
+    where
+        F: FnOnce(&Path) -> Result<(), CloudError>,
+    {
         let VaultPutOptions {
+            pending_epoch,
             expectation,
             guarded,
         } = options;
+        self.check_put_epoch(pending_epoch)?;
+        check_pending_reconcile(reconcile)?;
         if let Some(guard) = guarded {
             guard.check(self)?;
         }
@@ -6043,29 +7109,9 @@ impl VaultBackend {
             None => tempdir().map_err(io_error)?,
         };
         let ciphertext_path = temp.path().join("ciphertext.bin");
-        if let Some(guard) = guarded {
-            self.sessions
-                .encrypt_file_transactional_at_epoch(
-                    &self.scope,
-                    guard.request.epoch,
-                    source,
-                    &ciphertext_path,
-                    plaintext_size,
-                    MAX_GUARDED_VAULT_OVERWRITE_BYTES,
-                )
-                .map_err(vault_error)?;
-            guard.check(self)?;
-        } else {
-            self.sessions
-                .encrypt_file_transactional(
-                    &self.scope,
-                    source,
-                    &ciphertext_path,
-                    plaintext_size,
-                    MAX_VAULT_PLAINTEXT_BYTES,
-                )
-                .map_err(vault_error)?;
-        }
+        encode(&ciphertext_path)?;
+        self.check_put_epoch(pending_epoch)?;
+        check_pending_reconcile(reconcile)?;
         let ciphertext = File::open(&ciphertext_path).map_err(io_error)?;
         let ciphertext_size = ciphertext.metadata().map_err(io_error)?.len();
         let transfer_budget = self.client.transfer_budget();
@@ -6132,9 +7178,15 @@ impl VaultBackend {
                 deadline: Instant::now() + total_timeout,
                 token_generation,
             });
+        let mutation_url = match guarded {
+            Some(guard) if guard.expected_plaintext_sha256.is_some() => {
+                self.streamed_overwrite_resource_url(&fresh_state, guard)?
+            }
+            _ => url,
+        };
         let (mut request, token) =
             self.client
-                .request_async_with_context(Method::PUT, &url, request_context)?;
+                .request_async_with_context(Method::PUT, &mutation_url, request_context)?;
         request = request
             .header(CONTENT_LENGTH, ciphertext_size)
             .header(CONTENT_TYPE, "application/octet-stream");
@@ -6172,7 +7224,9 @@ impl VaultBackend {
             self.client.body_idle_timeout(),
             total_timeout,
             || {
-                guarded.is_some_and(|guard| guard.check(self).is_err())
+                self.check_put_epoch(pending_epoch).is_err()
+                    || check_pending_reconcile(reconcile).is_err()
+                    || guarded.is_some_and(|guard| guard.check(self).is_err())
                     || caller_cancelled.is_some_and(|cancelled| cancelled())
                     || watchdog_cancellation.is_cancelled()
                     || expected_token_generation.is_some_and(|expected| {
@@ -6200,6 +7254,8 @@ impl VaultBackend {
                     },
                     progress,
                 );
+                self.check_put_epoch(pending_epoch)?;
+                check_pending_reconcile(reconcile)?;
                 if let Some(guard) = guarded {
                     guard.check(self)?;
                     guard.dispatched.set(true);
@@ -6223,6 +7279,7 @@ impl VaultBackend {
             trace_vault_upload_stage("put_response_rejected", Some(error.kind));
             return Err(error);
         }
+        self.check_put_epoch(pending_epoch)?;
         if expected_token_generation
             .is_some_and(|expected| self.client.token_generation() != expected)
         {
@@ -6360,6 +7417,27 @@ impl VaultBackend {
         self.download_vault_inner(state, virtual_path, expected_etag, destination, None, None)
     }
 
+    #[cfg(windows)]
+    fn verify_vault_ciphertext_digest(
+        &self,
+        state: &RootState,
+        path: &str,
+        etag: &str,
+    ) -> Result<(RemoteEntry, String), CloudError> {
+        let private = tempdir().map_err(io_error)?;
+        let mut digest = String::new();
+        let mut sink = io::sink();
+        let entry = self.download_vault_inner_with_private_output(
+            state,
+            path,
+            Some(etag),
+            &private.path().join("unused-plaintext.bin"),
+            (None, Some(&mut digest)),
+            Some(&mut sink),
+        )?;
+        Ok((entry, digest))
+    }
+
     fn download_vault_with_ciphertext_digest(
         &self,
         state: &RootState,
@@ -6387,14 +7465,28 @@ impl VaultBackend {
         destination: &Path,
         build: &CiphertextPinBuild,
     ) -> Result<RemoteEntry, CloudError> {
-        self.download_vault_inner(
-            state,
-            virtual_path,
-            expected_etag,
-            destination,
-            Some(build),
-            None,
-        )
+        #[cfg(windows)]
+        {
+            self.download_vault_inner_with_private_output(
+                state,
+                virtual_path,
+                expected_etag,
+                destination,
+                (Some(build), None),
+                Some(&mut io::sink()),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            self.download_vault_inner(
+                state,
+                virtual_path,
+                expected_etag,
+                destination,
+                Some(build),
+                None,
+            )
+        }
     }
 
     fn download_vault_inner(
@@ -6495,7 +7587,12 @@ impl VaultBackend {
                 cache.preflight_ciphertext_space(ciphertext_len)?;
             }
         }
-        let url = self.target_url(state, virtual_path)?;
+        let url = match guarded {
+            Some(guard) if guard.expected_plaintext_sha256.is_some() => {
+                self.streamed_overwrite_resource_url(state, guard)?
+            }
+            _ => self.target_url(state, virtual_path)?,
+        };
         let destination_parent = destination
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -6595,7 +7692,7 @@ impl VaultBackend {
                         guard.request.epoch,
                         &mut input,
                         output,
-                        MAX_GUARDED_VAULT_OVERWRITE_BYTES,
+                        guard.maximum_plaintext_len,
                         before.size,
                     )
                     .map_err(vault_error)?

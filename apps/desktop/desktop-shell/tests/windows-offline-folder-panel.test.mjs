@@ -133,8 +133,8 @@ test('lost start reply keeps its known job ID pollable and cancellable without a
   panel.select(key);
   await panel.run('start');
   assert.match(panel.render(), /reply could not be confirmed/i);
-  assert.match(panel.render(), /Check folder status/);
-  assert.match(panel.render(), /Cancel folder download/);
+  assert.match(panel.render(), /Check status/);
+  assert.match(panel.render(), /Cancel download/);
   await panel.run('poll');
   await panel.run('cancel');
   assert.deepEqual(calls.map(({ action }) => action), [

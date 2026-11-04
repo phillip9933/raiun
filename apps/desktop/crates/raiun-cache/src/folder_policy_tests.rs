@@ -530,7 +530,7 @@ fn schema_seven_upgrade_preserves_dirty_bytes_without_inventing_folder_intent() 
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, CACHE_VERSION as i64);
     let intents: i64 = db
         .query_row("SELECT COUNT(*) FROM folder_cloud_only_intents", [], |r| {
             r.get(0)

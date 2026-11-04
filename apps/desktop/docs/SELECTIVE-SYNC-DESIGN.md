@@ -1,5 +1,7 @@
 # Selective folder sync implementation contract
 
+Current implementation amendment, 4 November 2026: the typed path/glob/extension rules and current limits are documented in `SYNC-FOLDERS.md`; the exact-path-only limits below describe the original design. Windows now serializes local-only offline settings after draining its active folder worker, without granting network authority. Encrypted online folder pairs use the shared vault backend and exact unlocked account/vault scope. Validation follows the reduced scope in `COMPLETION-CHECKLIST.md`.
+
 Status: core/engine filtering, profile persistence/dispatch fencing, and native
 folder controls are implemented in the current source candidate, 13 October
 2026 JST. The controls let users add or remove exact relative paths, including

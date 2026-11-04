@@ -319,9 +319,13 @@ impl Cache {
         let used = total_content_bytes(&tx)?
             .saturating_add(inventory.unindexed_bytes)
             .max(inventory.physical_bytes);
+        let quota_bytes = super::configured_quota_bytes(&tx)?;
+        self.inner
+            .quota_bytes
+            .store(quota_bytes, std::sync::atomic::Ordering::Release);
         if used
             .checked_add(entry.size)
-            .is_none_or(|total| total > self.inner.quota_bytes)
+            .is_none_or(|total| total > quota_bytes)
         {
             return Err(CacheError::InsufficientSpace);
         }

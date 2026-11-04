@@ -63,15 +63,43 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct DpapiSessionStore {
     root: PathBuf,
-    // Derived profile stores retain exact private directory/ancestor pins.
+    // Headless base admission is separate from terminal/profile restrictions.
+    // Retain their exact private ACLs and ancestor pins in every derived store.
+    base_directory: Option<Arc<crate::PrivateDirectory>>,
+    // Terminal explicit bindings and derived profiles cannot derive profiles
+    // or access the base registry; retain their exact directory/ancestor pins.
     // Their OI/CI policy is verified, never rewritten by legacy root repair.
     profile_directory: Option<Arc<crate::PrivateDirectory>>,
 }
 
 impl DpapiSessionStore {
-    /// Locate the current user's `%LOCALAPPDATA%` and prepare Raiun's private
-    /// session directory. The path is obtained from the environment, never IPC.
+    /// Bind protection to an already admitted private directory without
+    /// consulting environment paths, creating directories or repairing ACLs.
+    /// This terminal recovery binding cannot derive profiles or use the
+    /// base session registry; it grants only the admitted directory's storage.
+    pub fn from_existing_private_directory(
+        directory: Arc<crate::PrivateDirectory>,
+    ) -> io::Result<Self> {
+        directory.verify_path()?;
+        Ok(Self {
+            root: directory.path().to_path_buf(),
+            base_directory: None,
+            profile_directory: Some(directory),
+        })
+    }
+
+    /// Prepare private sessions in the admitted headless process context, or
+    /// preserve Desktop's `%LOCALAPPDATA%/Raiun/sessions` default. Paths come
+    /// from the process environment, never IPC.
     pub fn current_user() -> io::Result<Self> {
+        if let Some(context) = crate::headless_context()? {
+            let directory = context.session_directory()?;
+            return Ok(Self {
+                root: directory.path().to_path_buf(),
+                base_directory: Some(directory),
+                profile_directory: None,
+            });
+        }
         let local = env::var_os("LOCALAPPDATA")
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
@@ -107,6 +135,7 @@ impl DpapiSessionStore {
         let root = local.join("Raiun").join("sessions");
         let store = Self {
             root,
+            base_directory: None,
             profile_directory: None,
         };
         store.ensure_private_root()?;
@@ -125,6 +154,9 @@ impl DpapiSessionStore {
                 io::ErrorKind::InvalidInput,
                 "Derive profiles from the base store",
             ));
+        }
+        if let Some(directory) = &self.base_directory {
+            directory.verify_path()?;
         }
         if profile == "default" {
             return Ok(self.clone());
@@ -148,6 +180,7 @@ impl DpapiSessionStore {
         child.verify_path()?;
         Ok(Self {
             root: child.path().to_path_buf(),
+            base_directory: self.base_directory.clone(),
             profile_directory: Some(Arc::new(child)),
         })
     }
@@ -740,6 +773,22 @@ impl DpapiSessionStore {
                 "Local edit directory is outside the private state root",
             ));
         }
+        // Headless and derived profile roots already have an admitted,
+        // inheritable private policy. Legacy journal protection must not
+        // replace it with a non-inheritable DACL and invalidate later opens.
+        if path == self.root {
+            if let Some(directory) = &self.base_directory {
+                directory.verify_path()?;
+            }
+        }
+        if path == self.root
+            && let Some(directory) = self
+                .profile_directory
+                .as_ref()
+                .or(self.base_directory.as_ref())
+        {
+            return directory.verify_path();
+        }
         let sid = super::win32::current_user_sid_for_storage()?;
         let descriptor = security_descriptor(&wide(&format!("D:P(A;;FA;;;{sid})")))?;
         let handle = open_directory(path)?;
@@ -1166,7 +1215,14 @@ impl DpapiSessionStore {
     }
 
     fn ensure_private_root(&self) -> io::Result<()> {
-        if let Some(directory) = &self.profile_directory {
+        if let Some(directory) = &self.base_directory {
+            directory.verify_path()?;
+        }
+        if let Some(directory) = self
+            .profile_directory
+            .as_ref()
+            .or(self.base_directory.as_ref())
+        {
             return directory.verify_path();
         }
         let sid = super::win32::current_user_sid_for_storage()?;
@@ -1188,7 +1244,14 @@ impl DpapiSessionStore {
     }
 
     fn ensure_existing_private_root(&self) -> io::Result<bool> {
-        if let Some(directory) = &self.profile_directory {
+        if let Some(directory) = &self.base_directory {
+            directory.verify_path()?;
+        }
+        if let Some(directory) = self
+            .profile_directory
+            .as_ref()
+            .or(self.base_directory.as_ref())
+        {
             directory.verify_path()?;
             return Ok(true);
         }
@@ -1883,6 +1946,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recovery_protection_preserves_explicit_private_root_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-admitted-recovery-policy-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let parent = crate::PinnedDirectory::open(&root).unwrap();
+        let private = crate::PrivateDirectory::create_or_open_under(
+            &parent,
+            std::ffi::OsStr::new("sessions"),
+        )
+        .unwrap();
+        let base = DpapiSessionStore::from_existing_private_directory(Arc::new(private)).unwrap();
+        assert!(base.for_profile("default").is_err());
+        assert!(
+            base.for_profile("profile-11111111111111111111111111111111")
+                .is_err()
+        );
+        assert!(base.profile_registry_directory().is_err());
+        for _ in 0..2 {
+            base.protect_local_edit_directory(&base.root).unwrap();
+            base.ensure_private_root().unwrap();
+            crate::PrivateDirectory::open_under(&parent, base.root.file_name().unwrap())
+                .expect("recovery must preserve admitted inheritable private ACLs");
+        }
+        // Alter only this synthetic root; an admitted store must refuse the
+        // changed policy rather than silently applying legacy root repair.
+        let sid = super::super::win32::current_user_sid_for_storage().unwrap();
+        let descriptor = security_descriptor(&wide(&format!("D:P(A;;FA;;;{sid})"))).unwrap();
+        let handle = open_directory(&base.root).unwrap();
+        secure_handle_dacl(handle.as_raw_handle() as HANDLE, descriptor.dacl).unwrap();
+        drop(handle);
+        assert!(base.protect_local_edit_directory(&base.root).is_err());
+        assert!(base.ensure_private_root().is_err());
+        let base_path = base.root.clone();
+        drop(base);
+        drop(parent);
+        std::fs::remove_dir(base_path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_protection_preserves_admitted_base_and_profile_directory_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-recovery-root-policy-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let parent = crate::PinnedDirectory::open(&root).unwrap();
+        let private = crate::PrivateDirectory::create_or_open_under(
+            &parent,
+            std::ffi::OsStr::new("sessions"),
+        )
+        .unwrap();
+        let base = DpapiSessionStore {
+            root: private.path().to_path_buf(),
+            base_directory: Some(Arc::new(private)),
+            profile_directory: None,
+        };
+        let profile = base
+            .for_profile("profile-11111111111111111111111111111111")
+            .unwrap();
+        for store in [&base, &profile] {
+            for _ in 0..2 {
+                store.protect_local_edit_directory(&store.root).unwrap();
+                store.ensure_private_root().unwrap();
+                // Exercise the exact strict admission used on a later open,
+                // not only an already-held handle's directory identity.
+                let parent = crate::PinnedDirectory::open(store.root.parent().unwrap()).unwrap();
+                crate::PrivateDirectory::open_under(&parent, store.root.file_name().unwrap())
+                    .expect("recovery must preserve inheritable private ACL");
+            }
+            let child = store.root.join("synthetic-journal");
+            std::fs::create_dir(&child).unwrap();
+            store.protect_local_edit_directory(&child).unwrap();
+            store.ensure_private_root().unwrap();
+            std::fs::remove_dir(&child).unwrap();
+        }
+        // Deliberately alter only this synthetic root to the former journal
+        // policy. Protection must reject it, not silently repair admission.
+        let sid = super::super::win32::current_user_sid_for_storage().unwrap();
+        let descriptor = security_descriptor(&wide(&format!("D:P(A;;FA;;;{sid})"))).unwrap();
+        let handle = open_directory(&base.root).unwrap();
+        secure_handle_dacl(handle.as_raw_handle() as HANDLE, descriptor.dacl).unwrap();
+        drop(handle);
+        assert!(base.protect_local_edit_directory(&base.root).is_err());
+        assert!(base.ensure_private_root().is_err());
+        // Success-only cleanup of exact synthetic children after releasing pins.
+        let profile_path = profile.root.clone();
+        let base_path = base.root.clone();
+        drop(profile);
+        drop(base);
+        drop(parent);
+        std::fs::remove_dir(profile_path).unwrap();
+        std::fs::remove_dir(base_path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
     fn protected_vault_credential_document_cas_reopen_and_profile_isolation() {
         assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
@@ -1900,6 +2064,7 @@ mod tests {
         // session access, vault unlock, native root, network, or startup action.
         let base = DpapiSessionStore {
             root: root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         let profile = "default";
@@ -1951,6 +2116,7 @@ mod tests {
         drop(base);
         let reopened = DpapiSessionStore {
             root: store_root,
+            base_directory: None,
             profile_directory: None,
         };
         let loaded: Zeroizing<Vec<u8>> = reopened.load_vault_credentials(profile).unwrap().unwrap();
@@ -1987,6 +2153,7 @@ mod tests {
         // LOCALAPPDATA change, startup, network or registered root access.
         let base = DpapiSessionStore {
             root: root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         let scope = b"nonsecret synthetic exact-account-vault-root-scope";
@@ -2043,6 +2210,7 @@ mod tests {
         drop(base);
         let reopened = DpapiSessionStore {
             root: store_root,
+            base_directory: None,
             profile_directory: None,
         };
         assert_eq!(
@@ -2109,6 +2277,7 @@ mod tests {
         // registered root, real vault or environment mutation.
         let base = DpapiSessionStore {
             root: root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         let scope = b"synthetic-account-vault-root-capture\0\xff";
@@ -2163,6 +2332,7 @@ mod tests {
         drop(base);
         let reopened = DpapiSessionStore {
             root: store_root,
+            base_directory: None,
             profile_directory: None,
         };
         assert_eq!(
@@ -2269,6 +2439,7 @@ mod tests {
         // create an account, decrypt a session, or touch a real profile.
         let base = DpapiSessionStore {
             root: root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         let scope_a = br#"{"profile":"default","server":"https://synthetic.invalid/","client":"synthetic-client","issuer":null,"subject":"synthetic-a"}"#;
@@ -2343,6 +2514,7 @@ mod tests {
         drop(base);
         let reopened = DpapiSessionStore {
             root: store_root,
+            base_directory: None,
             profile_directory: None,
         };
         assert_eq!(
@@ -2387,6 +2559,7 @@ mod tests {
         eprintln!("synthetic_broker_lock_fixture={}", root.display());
         let store = DpapiSessionStore {
             root: root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         let first = store.lock_profile_registry().unwrap();
@@ -2425,6 +2598,7 @@ mod tests {
         eprintln!("synthetic_root_inventory_fixture={}", root.display());
         let store = DpapiSessionStore {
             root: root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         store.ensure_private_root().unwrap();
@@ -2486,6 +2660,7 @@ mod tests {
         // Direct fixture construction, never current_user() or real LOCALAPPDATA.
         let base = DpapiSessionStore {
             root: root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         base.ensure_private_root().unwrap();
@@ -2546,6 +2721,7 @@ mod tests {
         drop(base);
         let reopened = DpapiSessionStore {
             root: store_root,
+            base_directory: None,
             profile_directory: None,
         };
         assert_eq!(
@@ -2591,6 +2767,7 @@ mod tests {
         eprintln!("synthetic_profile_store_root={}", root.display());
         let base = DpapiSessionStore {
             root: root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         base.ensure_private_root().unwrap();
@@ -2857,6 +3034,7 @@ mod tests {
             .join(format!("root-config-test-{}", std::process::id()));
         let store = DpapiSessionStore {
             root: isolated_root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         let config = br#"{"version":1,"root":"C:\\synthetic"}"#;
@@ -2908,6 +3086,7 @@ mod tests {
             .join(format!("pointer-test-{}", std::process::id()));
         let store = DpapiSessionStore {
             root: isolated_root.join("sessions"),
+            base_directory: None,
             profile_directory: None,
         };
         let profile = format!("synthetic-pointer-{}", std::process::id());

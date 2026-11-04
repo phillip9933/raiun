@@ -28,3 +28,16 @@ Tags may point to the same validated commit for a coordinated launch. Separate r
 7. Only after owner release acceptance, create platform tags and publish their pages/assets from the validated commit. Neither these workflows nor this migration publish automatically. Announce both apps together while making their different maturity clear.
 
 If either app fails its gates, retain the candidate and report the failure. Android validation does not establish desktop readiness, and a desktop beta does not replace Android device acceptance.
+
+
+## Public release-note style
+
+Write release notes for people using the app. Follow the owner's edited
+[Desktop 0.7.4 notes](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4):
+a short version/platform introduction, concise user-facing changes, then useful
+installation or update instructions. Include requirements, warnings or limits
+when they affect how someone installs or uses the release.
+
+Keep test counts, native test scenarios, validation history and internal release
+process details in pull requests, acceptance records and build provenance. Do not
+regenerate or overwrite the owner's edits to published release notes.

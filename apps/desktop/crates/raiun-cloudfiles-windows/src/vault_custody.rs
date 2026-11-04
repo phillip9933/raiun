@@ -132,6 +132,22 @@ pub struct VaultHydrationIntent {
     pub components: Vec<String>,
 }
 
+/// Authenticated latest native state for a queued cached vault operation.
+/// This is admission evidence only: it never authorizes clean dehydration or
+/// remote completion. `entry == None` is a locally deleted path.
+pub struct VaultPendingNativeIntent {
+    pub identity: [u8; 16],
+    pub file_index: u64,
+    pub usn: i64,
+    pub components: Vec<String>,
+    pub entry: Option<RemoteEntry>,
+    pub length: u64,
+    pub source_sha256: Option<[u8; 32]>,
+    pub terminal_verified: bool,
+    pub write_id: String,
+    pub revision: u64,
+}
+
 /// Immutable original existing-file baseline, constructed by the verified read
 /// binding inside its publication fence. Numeric generations are labels only;
 /// the caller's opaque epoch/token leases provide the actual live authority.
@@ -222,12 +238,173 @@ pub struct ExistingVaultEditPayload {
     pub bytes: Zeroizing<Vec<u8>>,
 }
 
+/// Additive streaming ceiling. Legacy vector payloads and records retain512KiB.
+pub const MAX_STREAMED_VAULT_EDIT_BYTES: u64 = 1 << 30;
+/// Metadata from the SAME original native source, never whole plaintext bytes.
+/// The borrowed reader/post-source proof remain lexical and cannot escape.
+pub struct ExistingVaultStreamedEditPayload {
+    pub root: ConfiguredRootIdentity,
+    pub file: LocalFileIdentity,
+    pub components: Vec<String>,
+    pub length: u64,
+    pub sha256: [u8; 32],
+}
+
 /// The trusted broker supplies a full-account/vault/root-bound implementation.
 /// Store calls must never reenter the backend, token/session coordinator, or
 /// route publication locks: the caller already holds its publication permit.
 /// Ok means durable protected write-through/readback, never permission to read
 /// or clear native incomplete history. Failure denies the pending publication.
+#[cfg(windows)]
+pub struct VaultNativeDirectoryCancellation<'a> {
+    receipt: &'a raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+    root: crate::ConfiguredRootIdentity,
+    identity: [u8; 16],
+    file: u64,
+    source_usn: i64,
+}
+#[cfg(windows)]
+impl<'a> VaultNativeDirectoryCancellation<'a> {
+    /// Only the original native publication path invokes this after its
+    /// completion callback has checked fresh absence under retained pins.
+    pub(crate) fn after_native_absence(
+        receipt: &'a raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+        root: crate::ConfiguredRootIdentity,
+        identity: [u8; 16],
+        file: u64,
+        source_usn: i64,
+    ) -> Self {
+        Self {
+            receipt,
+            root,
+            identity,
+            file,
+            source_usn,
+        }
+    }
+    pub fn receipt(&self) -> &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory {
+        self.receipt
+    }
+    pub fn root(&self) -> crate::ConfiguredRootIdentity {
+        self.root
+    }
+    pub fn identity(&self) -> [u8; 16] {
+        self.identity
+    }
+    pub fn file(&self) -> u64 {
+        self.file
+    }
+    pub fn source_usn(&self) -> i64 {
+        self.source_usn
+    }
+}
 pub trait VaultPublicationCustody: Send + Sync {
+    #[cfg(windows)]
+    fn record_cached_directory_cancel_queued(
+        &self,
+        _receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+        _identity: [u8; 16],
+        _file: u64,
+        _source_usn: i64,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    fn record_cached_directory_cancel_native(
+        &self,
+        _proof: &VaultNativeDirectoryCancellation<'_>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    fn prepare_cached_child_create(
+        &self,
+        _descriptor: &crate::VaultCachedChildCreateDescriptor,
+        _source: Option<&mut dyn std::io::Read>,
+        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<std::sync::Arc<dyn crate::VaultCachedChildCreateRecord>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    fn record_cached_retarget_queued(
+        &self,
+        _receipt: &crate::VaultCachedNamespaceQueued,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    fn record_cached_retarget_native(
+        &self,
+        _receipt: &crate::VaultCachedNamespaceQueued,
+        _nodes: &[([u8; 16], u64, i64)],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    fn retain_cached_streamed_edit(
+        &self,
+        _facts: &crate::CachedVaultEditBaselineFacts,
+        _dispatch: crate::FreshVaultCaptureDispatch,
+        _source: &mut dyn std::io::Read,
+        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    fn begin_file_delete(
+        &self,
+        _descriptor: &crate::vault_file_delete::VaultFileDeleteDescriptor,
+    ) -> Result<std::sync::Arc<dyn crate::vault_file_delete::VaultFileDeleteRecord>, BackendError>
+    {
+        Err(BackendError::Unavailable)
+    }
+
+    #[cfg(windows)]
+    fn begin_file_replace(
+        &self,
+        _descriptor: &crate::vault_file_replace::VaultFileReplaceDescriptor,
+    ) -> Result<Box<dyn crate::vault_file_replace::VaultFileReplaceCapture>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    #[cfg(windows)]
+    fn prepare_file_rename(
+        &self,
+        _descriptor: &crate::VaultFileRenameDescriptor,
+    ) -> Result<std::sync::Arc<dyn crate::VaultFileRenameRecord>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    /// Vault-specific intent/body retention only; no ordinary journal admission.
+    /// All native pins and live account/epoch authority remain with the caller.
+    #[cfg(windows)]
+    fn prepare_child_create(
+        &self,
+        _descriptor: &crate::VaultChildCreateDescriptor,
+        _source: Option<&mut dyn std::io::Read>,
+        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<std::sync::Arc<dyn crate::VaultChildCreateRecord>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    /// Stage under the original lexical route/token/unlock fences. Never
+    /// reacquire those fences or perform HTTP here. Invoke verify_source AFTER
+    /// body staging and BEFORE manifest commit; check cancelled every chunk and
+    /// during authenticated readback. Only durable committed verified retention
+    /// may produce acknowledgement/notification; no reader or callback escapes.
+    fn retain_existing_streamed_edit(
+        &self,
+        _baseline: &ExistingVaultEditBaseline,
+        _payload: ExistingVaultStreamedEditPayload,
+        _dispatch: crate::FreshVaultCaptureDispatch,
+        _source: &mut dyn std::io::Read,
+        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
     fn root_identity(&self) -> ConfiguredRootIdentity;
     /// Local protected index-first retention only. The exact live lexical
     /// fences are already held: do not acquire account/route/token/session locks
@@ -271,6 +448,17 @@ pub trait VaultPublishedHistorySource: Send + Sync {
         root: ConfiguredRootIdentity,
         registration: &str,
     ) -> Result<Vec<VaultHydrationIntent>, BackendError>;
+
+    /// A separate protected current-state ledger. Older implementations
+    /// refuse this admission rather than interpreting missing rows as clean.
+    fn current_native_intents(
+        &self,
+        _owner: &ProviderScope,
+        _root: ConfiguredRootIdentity,
+        _registration: &str,
+    ) -> Result<Vec<VaultPendingNativeIntent>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
 }
 
 #[cfg(test)]

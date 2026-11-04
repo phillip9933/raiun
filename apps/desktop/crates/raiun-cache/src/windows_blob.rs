@@ -1,6 +1,6 @@
 //! Handle-bound Windows blob storage and publication receipts.
 
-use super::{CacheError, MAX_CONTENT_BYTES, io_error};
+use super::{CacheError, MAX_CONTENT_BYTES, MAX_CONTENT_RECORDS, MAX_JOURNAL_RECORDS, io_error};
 use raiun_control_windows::PinnedFileIdentity;
 use raiun_control_windows::{
     OwnedPrivateReader, PinnedPrivateFile, PinnedPrivateFileAccess, PrivateDirectory,
@@ -530,6 +530,84 @@ impl WindowsBlobStore {
         }
         self.directory.verify_path().map_err(io_error)?;
         Ok(inventory)
+    }
+
+    // A previously unindexed residual needs exact immutable bytes and the same
+    // observed identity, not merely a fresh object at its old basename.
+    pub(super) fn prepare_verified_clean_eviction<'a>(
+        &'a self,
+        lease: &PublicationLease<'_>,
+        name: &str,
+        length: u64,
+        digest: &str,
+    ) -> Result<Option<PinnedPrivateFile<'a>>, CacheError> {
+        if !Arc::ptr_eq(lease.directory, &self.directory) {
+            return Err(CacheError::UnsafeDirectory);
+        }
+        validate_name(name)?;
+        let mut observed = match self.directory.open_owned_immutable_file(OsStr::new(name)) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_error(e)),
+        };
+        let (found_len, found_digest) = hash_bounded(&mut observed, length)?;
+        if found_len != length || found_digest != digest {
+            return Err(CacheError::Corrupt);
+        }
+        let identity = observed.identity();
+        drop(observed);
+        match self
+            .directory
+            .open_delete_candidate(OsStr::new(name), identity)
+        {
+            Ok(file) => Ok(Some(file)),
+            Err(e) if matches!(e.raw_os_error(), Some(32 | 33)) => Err(CacheError::Conflict),
+            Err(e) => Err(io_error(e)),
+        }
+    }
+    pub(super) fn verify_clean_absence(
+        &self,
+        lease: &PublicationLease<'_>,
+        name: &str,
+    ) -> Result<(), CacheError> {
+        if !Arc::ptr_eq(lease.directory, &self.directory) {
+            return Err(CacheError::UnsafeDirectory);
+        }
+        validate_name(name)?;
+        match self.directory.open_owned_immutable_file(OsStr::new(name)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(CacheError::Conflict),
+            Err(e) => Err(io_error(e)),
+        }
+    }
+    pub(super) fn clean_retry_names(
+        &self,
+        lease: &PublicationLease<'_>,
+    ) -> Result<Vec<String>, CacheError> {
+        if !Arc::ptr_eq(lease.directory, &self.directory) {
+            return Err(CacheError::UnsafeDirectory);
+        }
+        self.directory.verify_path().map_err(io_error)?;
+        let mut names = Vec::new();
+        let mut scanned = 0usize;
+        for entry in std::fs::read_dir(self.directory.path()).map_err(io_error)? {
+            scanned += 1;
+            if scanned > MAX_CONTENT_RECORDS + MAX_JOURNAL_RECORDS {
+                return Err(CacheError::LimitExceeded);
+            }
+            let name = entry
+                .map_err(io_error)?
+                .file_name()
+                .into_string()
+                .map_err(|_| CacheError::Corrupt)?;
+            if name.ends_with(".blob") {
+                validate_name(&name)?;
+                names.push(name);
+            }
+        }
+        self.directory.verify_path().map_err(io_error)?;
+        names.sort();
+        Ok(names)
     }
 
     /// Acquire deletion authority before removing metadata. A live immutable

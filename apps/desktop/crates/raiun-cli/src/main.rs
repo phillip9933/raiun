@@ -15,6 +15,9 @@ use raiun_core::{
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
+mod drive;
+pub(crate) mod startup;
+
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_MEDIA_PREVIEW_INPUT_BYTES: u64 = 1024 * 1024;
 
@@ -34,6 +37,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Control an isolated headless on-demand cloud drive agent.
+    Drive(drive::DriveArgs),
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -222,6 +227,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), String> {
     let Cli { config, command } = cli;
     let command = match command {
+        Command::Drive(args) => return drive::run(args, config),
         Command::MediaPreview { input } => return media_preview(&input),
         Command::MediaScan {
             source,
@@ -311,7 +317,7 @@ fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
-        Command::MediaPreview { .. } | Command::MediaScan { .. } => {
+        Command::Drive(_) | Command::MediaPreview { .. } | Command::MediaScan { .. } => {
             unreachable!("handled before configuration lookup")
         }
     }

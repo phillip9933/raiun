@@ -68,6 +68,10 @@ impl Scope {
     pub(crate) fn native_root(&self) -> (u32, u64) {
         (self.volume, self.root_file)
     }
+    #[cfg(windows)]
+    pub(crate) fn remote_root(&self) -> &str {
+        &self.remote_root
+    }
     /// Account bytes must be serialized ONCE from the authenticated canonical
     /// AccountScope, not rebuilt from raw session issuer spelling or request JSON.
     /// Root/registration arguments must come from retained native root proofs.
@@ -116,6 +120,23 @@ impl Scope {
             volume,
             root_file,
             registration: registration.into(),
+        })
+    }
+    #[cfg(windows)]
+    pub(crate) fn streamed_storage_scope(
+        &self,
+    ) -> Result<raiun_cloudfiles_windows::EditJournalScope> {
+        self.validate()?;
+        let account: AccountFields =
+            serde_json::from_slice(&self.account).map_err(|_| Error::Invalid)?;
+        Ok(raiun_cloudfiles_windows::EditJournalScope {
+            profile_id: self.profile.clone(),
+            server_origin: self.origin.clone(),
+            account_subject: account.subject,
+            space_id: self.space.clone(),
+            root_resource_id: self.resource.clone(),
+            root_volume_serial: self.volume,
+            root_file_index: self.root_file,
         })
     }
     /// Canonical full-scope bytes for the parent's separate custody DPAPI AAD.
@@ -308,6 +329,19 @@ impl Hydration {
         }
         Ok(())
     }
+    #[cfg(windows)]
+    pub(super) fn with_rename_components(&self, components: Vec<String>) -> Self {
+        let mut next = self.clone();
+        next.components = components;
+        next
+    }
+    #[cfg(windows)]
+    pub(super) fn with_replacement(&self, file_index: u64, length: u64) -> Self {
+        let mut next = self.clone();
+        next.file_index = file_index;
+        next.length = length;
+        next
+    }
     pub(crate) fn with_verified_length(&self, length: u64) -> Self {
         let mut next = self.clone();
         next.length = length;
@@ -327,14 +361,38 @@ impl Hydration {
     }
 }
 /// Historical discovery reference, not a session, upload or cleanup permit.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CaptureBodyFormat {
+    #[default]
+    Legacy,
+    StreamedV1,
+}
+impl CaptureBodyFormat {
+    fn is_legacy(&self) -> bool {
+        *self == Self::Legacy
+    }
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CaptureRef {
     capture_id: String,
     entry: Entry,
     frame: EncodedFrameRef,
+    #[serde(default, skip_serializing_if = "CaptureBodyFormat::is_legacy")]
+    body_format: CaptureBodyFormat,
 }
 impl CaptureRef {
+    pub(crate) fn is_streamed(&self) -> bool {
+        self.body_format == CaptureBodyFormat::StreamedV1
+    }
+    pub(crate) fn body_limit(&self) -> u64 {
+        if self.is_streamed() {
+            1 << 30
+        } else {
+            super::vault_edit_capture::MAX_BODY_BYTES as u64
+        }
+    }
     pub(crate) fn id(&self) -> &str {
         &self.capture_id
     }
@@ -346,7 +404,8 @@ impl CaptureRef {
     }
     fn matches(&self, prepared: &PreparedCapture) -> bool {
         let (opaque, etag, _, _) = prepared.existing_file_binding();
-        self.capture_id == prepared.id()
+        !self.is_streamed()
+            && self.capture_id == prepared.id()
             && self.entry.opaque == opaque
             && self.entry.etag == etag
             && self.frame == prepared.encoded_frame_ref()
@@ -359,6 +418,22 @@ pub(crate) struct FreshEnrollmentTicket {
     reference: CaptureRef,
 }
 impl FreshEnrollmentTicket {
+    #[cfg(windows)]
+    pub(crate) fn consume_streamed(
+        self,
+        scope: &Scope,
+        id: &str,
+        frame: EncodedFrameRef,
+    ) -> Result<()> {
+        if self.scope != *scope
+            || !self.reference.is_streamed()
+            || self.reference.id() != id
+            || self.reference.frame() != frame
+        {
+            return Err(Error::Foreign);
+        }
+        Ok(())
+    }
     pub(crate) fn consume(self, prepared: &PreparedCapture) -> Result<()> {
         if self.scope != *prepared.scope() || !self.reference.matches(prepared) {
             return Err(Error::Foreign);
@@ -480,7 +555,7 @@ impl Document {
                 row.descriptor().original_entry() == entry || row.verified_entry() == entry
             })
     }
-    fn validate(&self, scope: &Scope) -> Result<()> {
+    fn validate(&self, scope: &Scope, store: &impl Store) -> Result<()> {
         self.scope.validate()?;
         if &self.scope != scope {
             return Err(Error::Foreign);
@@ -613,16 +688,28 @@ impl Document {
                 .map_err(|_| Error::Invalid)?;
             if let Some(previous) = latest.insert(reference.entry().opaque(), row) {
                 if !previous.is_native_completed()
-                    || previous.verified_entry() != row.descriptor().original_entry()
-                    || previous.promoted_hydration() != row.descriptor().hydration()
+                    || store.project_rename_entry(scope, previous.verified_entry())?
+                        != store.project_rename_entry(scope, row.descriptor().original_entry())?
+                    || store.project_rename_hydration(scope, previous.promoted_hydration())?
+                        != store.project_rename_hydration(scope, row.descriptor().hydration())?
                 {
                     return Err(Error::Conflict);
                 }
             }
         }
         for row in latest.values() {
-            if !self.catalogue.contains(row.verified_entry())
-                || !self.pending.contains(row.promoted_hydration())
+            if !self
+                .catalogue
+                .iter()
+                .map(|e| store.project_rename_entry(scope, e))
+                .collect::<Result<Vec<_>>>()?
+                .contains(&store.project_rename_entry(scope, row.verified_entry())?)
+                || !self
+                    .pending
+                    .iter()
+                    .map(|h| store.project_rename_hydration(scope, h))
+                    .collect::<Result<Vec<_>>>()?
+                    .contains(&store.project_rename_hydration(scope, row.promoted_hydration())?)
             {
                 return Err(Error::Conflict);
             }
@@ -639,7 +726,7 @@ impl Document {
                 || h.file_index == 0
                 || h.length != e.length
                 || !components(&h.components)
-                || !files.insert(h.file_index)
+                || (!store.completed_deleted_hydration(scope, h)? && !files.insert(h.file_index))
                 || !hydrated_ids.insert(h.opaque)
             {
                 return Err(Error::Conflict);
@@ -671,12 +758,16 @@ fn encode(d: &Document) -> Result<Zeroizing<Vec<u8>>> {
     serde_json::to_writer(&mut b, d).map_err(|_| Error::Capacity)?;
     Ok(b.0)
 }
-fn decode(bytes: &[u8], scope: &Scope) -> Result<Document> {
+fn decode(bytes: &[u8], scope: &Scope, store: &impl Store) -> Result<Document> {
     if bytes.is_empty() || bytes.len() > MAX_BYTES {
         return Err(Error::Invalid);
     }
     let d: Document = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
-    d.validate(scope)?;
+    if d.scope != *scope {
+        return Err(Error::Foreign);
+    }
+    store.verify_location_history(scope)?;
+    d.validate(scope, store)?;
     Ok(d)
 }
 
@@ -767,6 +858,7 @@ fn validate_history(
     document: &Document,
     scope: &Scope,
     completed: &[completed_history::CompletedRow],
+    store: &impl Store,
 ) -> Result<()> {
     let mut capture_ids = BTreeSet::new();
     let mut latest = std::collections::BTreeMap::<
@@ -798,8 +890,14 @@ fn validate_history(
             .map_err(|_| Error::Invalid)?;
         if let Some(previous) = latest.insert(reference.entry().opaque(), &row.disposition) {
             if !previous.is_native_completed()
-                || previous.verified_entry() != row.disposition.descriptor().original_entry()
-                || previous.promoted_hydration() != row.disposition.descriptor().hydration()
+                || store.project_rename_entry(scope, previous.verified_entry())?
+                    != store.project_rename_entry(
+                        scope,
+                        row.disposition.descriptor().original_entry(),
+                    )?
+                || store.project_rename_hydration(scope, previous.promoted_hydration())?
+                    != store
+                        .project_rename_hydration(scope, row.disposition.descriptor().hydration())?
             {
                 return Err(Error::Conflict);
             }
@@ -827,16 +925,28 @@ fn validate_history(
     for row in document.dispositions.iter().flatten() {
         if let Some(previous) = latest.insert(row.reference().entry().opaque(), row) {
             if !previous.is_native_completed()
-                || previous.verified_entry() != row.descriptor().original_entry()
-                || previous.promoted_hydration() != row.descriptor().hydration()
+                || store.project_rename_entry(scope, previous.verified_entry())?
+                    != store.project_rename_entry(scope, row.descriptor().original_entry())?
+                || store.project_rename_hydration(scope, previous.promoted_hydration())?
+                    != store.project_rename_hydration(scope, row.descriptor().hydration())?
             {
                 return Err(Error::Conflict);
             }
         }
     }
     for row in latest.values() {
-        if !document.catalogue.contains(row.verified_entry())
-            || !document.pending.contains(row.promoted_hydration())
+        if !document
+            .catalogue
+            .iter()
+            .map(|e| store.project_rename_entry(scope, e))
+            .collect::<Result<Vec<_>>>()?
+            .contains(&store.project_rename_entry(scope, row.verified_entry())?)
+            || !document
+                .pending
+                .iter()
+                .map(|h| store.project_rename_hydration(scope, h))
+                .collect::<Result<Vec<_>>>()?
+                .contains(&store.project_rename_hydration(scope, row.promoted_hydration())?)
         {
             return Err(Error::Conflict);
         }
@@ -850,6 +960,22 @@ fn validate_history(
 /// load(None) must not create storage. Expected is full plaintext byte equality.
 /// This trait performs no DPAPI or filesystem work itself.
 pub trait Store {
+    /// Current native uniqueness only. Original historical bindings must still
+    /// validate even when a later, authenticated deletion removed that object.
+    fn completed_deleted_hydration(&self, _scope: &Scope, _row: &Hydration) -> Result<bool> {
+        Ok(false)
+    }
+    fn verify_location_history(&self, _scope: &Scope) -> Result<()> {
+        Ok(())
+    }
+
+    fn project_rename_entry(&self, _scope: &Scope, entry: &Entry) -> Result<Entry> {
+        Ok(entry.clone())
+    }
+    fn project_rename_hydration(&self, _scope: &Scope, row: &Hydration) -> Result<Hydration> {
+        Ok(row.clone())
+    }
+
     fn load(&self, scope: &Scope) -> Result<Option<Zeroizing<Vec<u8>>>>;
     fn compare_exchange(&self, scope: &Scope, expected: Option<&[u8]>, next: &[u8]) -> Result<()>;
     fn load_completed_segment(
@@ -934,15 +1060,59 @@ impl Custody {
             .load(scope)
             .map_err(|_| Error::Persistence)?
             .ok_or(Error::Missing)?;
-        let document = decode(&raw, scope)?;
+        let mut document = decode(&raw, scope, store)?;
         let completed = load_completed_history(store, scope, document.history_tip)?;
-        validate_history(&document, scope, &completed)?;
+        validate_history(&document, scope, &completed, store)?;
+        // Original document/frame/disposition and body-binding checks precede current
+        // location projection. Raw history and original encoded bindings stay
+        // unchanged; only current catalog/hydration clones are translated.
+        document.catalogue = document
+            .catalogue
+            .iter()
+            .map(|e| store.project_rename_entry(scope, e))
+            .collect::<Result<Vec<_>>>()?;
+        document.pending = document
+            .pending
+            .iter()
+            .map(|h| store.project_rename_hydration(scope, h))
+            .collect::<Result<Vec<_>>>()?;
+        document.validate(scope, store)?;
+
         Ok(Self {
             document,
             raw,
             completed,
             failed: false,
         })
+    }
+    /// Called only on the already authenticated, serially held original view
+    /// after factual native completion. Preserve raw/body history; compare the
+    /// complete original CAS bytes before updating current-location clones.
+    #[cfg(windows)]
+    pub(super) fn refresh_completed_location(&mut self, store: &impl Store) -> Result<()> {
+        if self.failed
+            || self.document.incomplete
+            || store
+                .load(&self.document.scope)?
+                .is_none_or(|v| v.as_slice() != self.raw.as_slice())
+        {
+            return Err(Error::Conflict);
+        }
+        let mut next = self.document.clone();
+        next.catalogue = next
+            .catalogue
+            .iter()
+            .map(|e| store.project_rename_entry(&next.scope, e))
+            .collect::<Result<Vec<_>>>()?;
+        next.pending = next
+            .pending
+            .iter()
+            .map(|h| store.project_rename_hydration(&next.scope, h))
+            .collect::<Result<Vec<_>>>()?;
+        next.validate(&next.scope, store)?;
+        validate_history(&next, &next.scope, &self.completed, store)?;
+        self.document = next;
+        Ok(())
     }
     /// Restored rows are only reconciliation evidence. Even an empty complete
     /// document is NOT filesystem coverage or permission to clear native unknown history.
@@ -970,11 +1140,12 @@ impl Custody {
             return Err(Error::Incomplete);
         }
         next.revision = next.revision.checked_add(1).ok_or(Error::Capacity)?;
-        next.validate(&self.document.scope)?;
+        next.validate(&self.document.scope, store)?;
         validate_history(
             &next,
             &self.document.scope,
             completed.unwrap_or(&self.completed),
+            store,
         )?;
         let mut encoded = encode(&next);
         if matches!(encoded, Err(Error::Capacity)) && completed.is_none() && !next.incomplete {
@@ -993,8 +1164,13 @@ impl Custody {
                                 .revision
                                 .checked_add(1)
                                 .ok_or(Error::Capacity)?;
-                            rebased.validate(&self.document.scope)?;
-                            validate_history(&rebased, &self.document.scope, &self.completed)?;
+                            rebased.validate(&self.document.scope, store)?;
+                            validate_history(
+                                &rebased,
+                                &self.document.scope,
+                                &self.completed,
+                                store,
+                            )?;
                             next = rebased;
                             encoded = encode(&next);
                         }
@@ -1231,13 +1407,61 @@ impl Custody {
         prepared: &PreparedCapture,
         native_components: &[String],
     ) -> Result<CaptureEnrollment> {
+        let (opaque, etag, volume, file) = prepared.existing_file_binding();
+        self.enroll_capture_metadata(
+            store,
+            prepared.scope(),
+            prepared.id(),
+            opaque,
+            etag,
+            volume,
+            file,
+            prepared.encoded_frame_ref(),
+            CaptureBodyFormat::Legacy,
+            native_components,
+        )
+    }
+    #[cfg(windows)]
+    pub(crate) fn enroll_streamed_capture(
+        &mut self,
+        store: &impl Store,
+        prepared: &super::windows_vault_streamed_edit::PreparedStreamedCapture,
+        native_components: &[String],
+    ) -> Result<CaptureEnrollment> {
+        let baseline = prepared.descriptor().baseline();
+        self.enroll_capture_metadata(
+            store,
+            prepared.descriptor().scope(),
+            prepared.descriptor().id(),
+            baseline.opaque_file(),
+            baseline.strong_etag(),
+            baseline.native_volume(),
+            baseline.native_file(),
+            prepared.frame(),
+            CaptureBodyFormat::StreamedV1,
+            native_components,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn enroll_capture_metadata(
+        &mut self,
+        store: &impl Store,
+        scope: &Scope,
+        id: &str,
+        opaque: [u8; 16],
+        etag: &str,
+        volume: u32,
+        file: u64,
+        frame: EncodedFrameRef,
+        body_format: CaptureBodyFormat,
+        native_components: &[String],
+    ) -> Result<CaptureEnrollment> {
         if self.failed || self.document.incomplete {
             return Err(Error::Incomplete);
         }
-        if prepared.scope() != &self.document.scope {
+        if scope != &self.document.scope {
             return Err(Error::Foreign);
         }
-        let (opaque, etag, volume, file) = prepared.existing_file_binding();
         let entry = self
             .document
             .catalogue
@@ -1260,9 +1484,10 @@ impl Custody {
             return Err(Error::Foreign);
         }
         let reference = CaptureRef {
-            capture_id: prepared.id().into(),
+            capture_id: id.into(),
             entry: entry.clone(),
-            frame: prepared.encoded_frame_ref(),
+            frame,
+            body_format,
         };
         if let Some(existing) = self
             .all_captures_for_reconciliation()
@@ -1419,6 +1644,16 @@ impl Custody {
         reference: &CaptureRef,
         retained: &super::vault_edit_capture::RetainedEdit,
     ) -> Result<super::vault_edit_disposition::DispositionDescriptor> {
+        let hydration = self.capture_disposition_hydration(reference)?;
+        super::vault_edit_disposition::DispositionDescriptor::from_capture(
+            &self.document.scope,
+            reference,
+            &hydration,
+            retained,
+        )
+        .map_err(|_| Error::Invalid)
+    }
+    fn capture_disposition_hydration(&self, reference: &CaptureRef) -> Result<Hydration> {
         self.require_capture(reference)?;
         let hydration =
             if let Some(archived) = self.completed.iter().find(|row| row.capture == *reference) {
@@ -1441,13 +1676,47 @@ impl Custody {
                 })
             }
             .ok_or(Error::Foreign)?;
-        super::vault_edit_disposition::DispositionDescriptor::from_capture(
+        Ok(hydration)
+    }
+    #[cfg(windows)]
+    pub(crate) fn streamed_disposition_descriptor(
+        &self,
+        reference: &CaptureRef,
+        retained: &super::windows_vault_streamed_edit::AuthenticatedStreamedCapture,
+    ) -> Result<super::vault_edit_disposition::DispositionDescriptor> {
+        let hydration = self.capture_disposition_hydration(reference)?;
+        super::vault_edit_disposition::DispositionDescriptor::from_streamed_capture(
             &self.document.scope,
             reference,
             &hydration,
             retained,
         )
         .map_err(|_| Error::Invalid)
+    }
+    #[cfg(windows)]
+    pub(crate) fn validate_reconstructed_streamed_disposition(
+        &self,
+        reference: &CaptureRef,
+        retained: &super::windows_vault_streamed_edit::AuthenticatedStreamedCapture,
+    ) -> Result<()> {
+        let descriptor = self.streamed_disposition_descriptor(reference, retained)?;
+        let row = self
+            .document
+            .dispositions
+            .iter()
+            .flatten()
+            .find(|row| row.reference() == reference)
+            .or_else(|| {
+                self.completed
+                    .iter()
+                    .find(|row| row.capture == *reference)
+                    .map(|row| &row.disposition)
+            })
+            .ok_or(Error::Foreign)?;
+        if !row.is_native_completed() || row.descriptor() != &descriptor {
+            return Err(Error::Foreign);
+        }
+        Ok(())
     }
     /// Rebuild from the already authenticated immutable body and historical
     /// hydration, rather than trusting an internally consistent stored tuple.

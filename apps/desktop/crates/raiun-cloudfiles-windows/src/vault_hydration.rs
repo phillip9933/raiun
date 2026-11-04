@@ -1,5 +1,7 @@
 //! Fresh authenticated stage provenance, never native completion or history authority.
-use crate::{BackendError, MAX_RANGE_BYTES, MAX_VAULT_EDIT_CAPTURE_BYTES};
+#[cfg(test)]
+use crate::MAX_VAULT_EDIT_CAPTURE_BYTES;
+use crate::{BackendError, MAX_RANGE_BYTES};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use zeroize::Zeroizing;
@@ -8,7 +10,7 @@ pub(crate) fn bounded_stage_sha(
     reader: &mut impl Read,
     expected: u64,
 ) -> Result<[u8; 32], BackendError> {
-    if expected > MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+    if expected > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES {
         return Err(BackendError::Unavailable);
     }
     let mut bytes = Zeroizing::new(vec![0u8; MAX_RANGE_BYTES]);
@@ -52,7 +54,7 @@ pub(crate) fn same_original(
 }
 
 pub(crate) fn ranges_cover_file(ranges: impl IntoIterator<Item = (i64, i64)>, length: u64) -> bool {
-    if length == 0 || length > MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+    if length == 0 || length > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES {
         return false;
     }
     let mut end = 0u64;
@@ -126,7 +128,7 @@ mod live {
                     .any(|part| !crate::opencloud::valid_windows_component(part))
                 || original.directory
                 || original.size != intent.length
-                || intent.length > MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+                || intent.length > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES
             {
                 return Err(BackendError::Unavailable);
             }

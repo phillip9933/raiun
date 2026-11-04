@@ -20,6 +20,21 @@ impl OpenCloudPlaceholderBackend {
             .map_err(|_| BackendError::Unavailable)
     }
 
+    /// Change the existing device store's admission allowance under its live lease.
+    /// Saving never deletes cached data, protected edits or cloud content.
+    pub fn set_device_cache_quota(&self, quota_bytes: u64) -> Result<(), BackendError> {
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        self.cache
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .set_quota_bytes(quota_bytes)
+            .map_err(|_| BackendError::Unavailable)
+    }
+
     /// Query existing cache metadata for an exact live file binding. Unknown
     /// identities never acquire a default Recent policy or count as a cache hit.
     /// This performs no network requests, cache initialization, or file reads.
@@ -372,7 +387,11 @@ impl OpenCloudPlaceholderBackend {
                     .content_record(&scope, &version)
                     .is_ok_and(|record| record.byte_len == binding.size);
                 if !already_recorded {
-                    let Some(target) = cache.quota_bytes().checked_sub(binding.size) else {
+                    let Some(target) = cache
+                        .try_quota_bytes()
+                        .map_err(|_| BackendError::Unavailable)?
+                        .checked_sub(binding.size)
+                    else {
                         return Ok(());
                     };
                     // Best effort only: Dirty/Recovery/pins stay protected and

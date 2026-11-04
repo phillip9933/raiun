@@ -4,12 +4,41 @@
 //! It never follows redirects, and keeps authorization values out of Debug output.
 
 mod async_body;
+mod blocking_reader;
+#[cfg(test)]
+mod dav_text_tests;
+#[cfg(test)]
+mod dav_upload_regressions;
+#[cfg(test)]
+mod mkdir_cancellation_tests;
+#[cfg(test)]
+mod operation_cancellation_tests;
+mod recovery_stream;
+pub use recovery_stream::{RecoveryCreateParent, RecoveryCreateReadback, RecoveryStreamReadback};
 pub mod avatar;
+pub mod guest_permissions;
+pub mod sharing_inventory;
 pub mod transfer_budget;
 pub mod vault;
 pub mod vault_backend;
 pub mod vault_cache;
 pub mod vault_create;
+
+mod conditional_delete;
+pub use conditional_delete::{ConditionalDeleteRequest, ConditionalDeleteResponse};
+
+mod conditional_directory_rename;
+mod conditional_move;
+pub use conditional_move::{ConditionalMoveRequest, ConditionalMoveResponse};
+mod conditional_rename;
+pub use conditional_rename::{ConditionalRenameRequest, ConditionalRenameResponse};
+mod ordinary_presence;
+pub use ordinary_presence::{OrdinaryPresenceRequest, OrdinaryTargetPresence};
+
+#[cfg(test)]
+mod conditional_rename_tests;
+#[cfg(test)]
+mod ordinary_presence_tests;
 
 use std::{
     cell::Cell,
@@ -23,10 +52,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use percent_encoding::percent_decode_str;
 use quick_xml::{NsReader, events::Event, name::ResolveResult};
 use raiun_core::backend::{
-    CloudBackend, CloudError, CloudSpace, ErrorKind, RemoteEntry, WriteCondition,
+    CloudBackend, CloudError, CloudSpace, ErrorKind, OperationCancellation, RemoteEntry,
+    WriteCondition,
 };
 use reqwest::{
     Method, Proxy, StatusCode,
@@ -160,6 +191,15 @@ pub struct RangeReadContext {
     pub token_generation: u64,
 }
 
+/// Outcome of one MKCOL send. A successful response is kept separate from
+/// later path observations; it contains no server-created resource identity.
+#[derive(Debug)]
+pub enum DirectoryCreateResponse {
+    Created,
+    Rejected(CloudError),
+    Uncertain(CloudError),
+}
+
 /// A token-generation lease held across a short local publish operation.
 /// The credential itself is never exposed through this type.
 pub struct TokenGenerationLease<'a> {
@@ -245,13 +285,59 @@ fn transfer_timeout_for_context(
     ))
 }
 
+/// Check captured server-origin text against the existing transport policy.
+/// This performs no I/O and creates no client, session or credential authority.
+/// Callers still enforce their canonical origin-only serialization shape.
+pub fn validate_captured_server_origin(origin: &str) -> Result<(), CloudError> {
+    if origin.len() > 2_048
+        || origin.trim() != origin
+        || origin.chars().any(char::is_control)
+        || authority_contains_userinfo(origin)
+    {
+        return Err(invalid("captured server origin is malformed"));
+    }
+    let url = Url::parse(origin).map_err(|_| invalid("captured server origin is invalid"))?;
+    validate_server(&url)
+}
+
+/// Authentication method is immutable for a client and all of its clones.
+#[derive(Clone)]
+enum Authentication {
+    Offline,
+    Bearer,
+    AppToken { username: String },
+}
+
+/// Validate an app-token origin using the same TLS policy as cloud traffic.
+pub fn validate_app_token_server(server: &str) -> Result<(), CloudError> {
+    validate_captured_server_origin(server)
+}
+
+/// Validate Basic app credentials without reflecting either value in errors.
+pub fn validate_app_token_credentials(username: &str, token: &str) -> Result<(), CloudError> {
+    if username.trim().is_empty()
+        || username.len() > 512
+        || username.trim() != username
+        || username.contains(':')
+        || username.chars().any(char::is_control)
+        || token.trim().is_empty()
+        || token.len() > 65_536
+        || token.chars().any(char::is_control)
+    {
+        return Err(invalid("app-token username or token is empty or malformed"));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct OpenCloudClient {
     server: Url,
     http: Client,
+    conditional_http: Client,
     async_http: reqwest::Client,
     body_idle_timeout: Duration,
     token: Arc<Mutex<String>>,
+    authentication: Authentication,
     token_generation: Arc<AtomicU64>,
     initiator_id: String,
     transfer_budget: TransferBudget,
@@ -267,6 +353,62 @@ impl std::fmt::Debug for OpenCloudClient {
 }
 
 impl OpenCloudClient {
+    /// A separate account-authenticated client for explicitly requested guest
+    /// sharing. Transport retries are disabled so invitations are never resent.
+    pub fn new_for_guest_sharing(
+        server: &str,
+        bearer_token: String,
+        proxy: &ProxyConfig,
+    ) -> Result<Self, CloudError> {
+        let mut client = Self::new_with_proxy(server, bearer_token, proxy)?;
+        client.http = proxy
+            .apply_to_client_builder(
+                Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .retry(reqwest::retry::never())
+                    .connect_timeout(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(15)),
+            )?
+            .build()
+            .map_err(|_| invalid("guest sharing transport is unavailable"))?;
+        Ok(client)
+    }
+
+    /// Bound synchronous guest sharing, including DAV identity resolution,
+    /// to one token generation and an absolute deadline.
+    pub fn with_guest_sharing_deadline<T>(&self, operation: impl FnOnce() -> T) -> T {
+        let _context = RangeContextGuard::enter(RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(45),
+            token_generation: self.token_generation(),
+        });
+        operation()
+    }
+
+    /// Bound synchronous encrypted-root inspection and directory metadata to
+    /// one token generation and at most twenty seconds. Nested callers retain
+    /// the outer generation and any shorter deadline. Not for payload transfers.
+    pub fn with_vault_metadata_deadline<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, CloudError>,
+    ) -> Result<T, CloudError> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let context = ACTIVE_RANGE_CONTEXT.with(Cell::get).map_or_else(
+            || RangeReadContext {
+                deadline,
+                token_generation: self.token_generation(),
+            },
+            |outer| RangeReadContext {
+                deadline: outer.deadline.min(deadline),
+                token_generation: outer.token_generation,
+            },
+        );
+        let _guard = RangeContextGuard::enter(context);
+        self.ensure_context_current(context)?;
+        let result = operation()?;
+        self.ensure_context_current(context)?;
+        Ok(result)
+    }
+
     fn validate_identity_addressed_root(
         &self,
         selected: &CloudSpace,
@@ -307,6 +449,24 @@ impl OpenCloudClient {
         Self::new_with_proxy(server, bearer_token, &ProxyConfig::System)
     }
 
+    /// Credential-free, immutable cache-only capability. No request builder
+    /// can be created, including async/conditional paths, and token replacement
+    /// refuses this mode. Online reconnect must construct a fresh client.
+    pub fn new_offline(server: &str) -> Result<Self, CloudError> {
+        Self::new_with_timeouts(
+            server,
+            String::new(),
+            Duration::from_secs(15),
+            Duration::from_secs(120),
+            &ProxyConfig::Direct,
+            TransferBudget::new(),
+            Authentication::Offline,
+        )
+    }
+    pub fn is_offline(&self) -> bool {
+        matches!(self.authentication, Authentication::Offline)
+    }
+
     /// Create a client using the caller's immutable account proxy policy.
     pub fn new_with_proxy(
         server: &str,
@@ -314,6 +474,23 @@ impl OpenCloudClient {
         proxy: &ProxyConfig,
     ) -> Result<Self, CloudError> {
         Self::new_with_proxy_and_transfer_budget(server, bearer_token, proxy, TransferBudget::new())
+    }
+
+    /// Use OpenCloud auth-app's Basic username:app-token authentication.
+    /// The credential is scoped to the configured origin; redirects stay disabled.
+    pub fn new_with_app_token(
+        server: &str,
+        username: &str,
+        app_token: String,
+        proxy: &ProxyConfig,
+    ) -> Result<Self, CloudError> {
+        validate_app_token_server(server)?;
+        validate_app_token_credentials(username, &app_token)?;
+        let mut client = Self::new_with_proxy(server, app_token, proxy)?;
+        client.authentication = Authentication::AppToken {
+            username: username.to_owned(),
+        };
+        Ok(client)
     }
 
     /// Construct an authenticated account client with a caller-owned shared
@@ -332,6 +509,7 @@ impl OpenCloudClient {
             Duration::from_secs(120),
             proxy,
             transfer_budget,
+            Authentication::Bearer,
         )
     }
 
@@ -357,6 +535,7 @@ impl OpenCloudClient {
             NAMESPACE_PROBE_TIMEOUT,
             proxy,
             TransferBudget::new(),
+            Authentication::Bearer,
         )
     }
 
@@ -395,10 +574,14 @@ impl OpenCloudClient {
         request_timeout: Duration,
         proxy: &ProxyConfig,
         transfer_budget: TransferBudget,
+        authentication: Authentication,
     ) -> Result<Self, CloudError> {
         let server = Url::parse(server).map_err(|_| invalid("server URL is invalid"))?;
         validate_server(&server)?;
-        if bearer_token.trim().is_empty() || bearer_token.chars().any(char::is_control) {
+        if (!matches!(authentication, Authentication::Offline) && bearer_token.trim().is_empty())
+            || bearer_token.chars().any(char::is_control)
+            || (matches!(authentication, Authentication::Offline) && !bearer_token.is_empty())
+        {
             return Err(invalid("bearer token is empty or malformed"));
         }
         let builder = apply_proxy(Client::builder(), proxy)?
@@ -412,9 +595,25 @@ impl OpenCloudClient {
         let http = builder.build().map_err(|_| {
             CloudError::new(ErrorKind::Offline, "could not initialize HTTPS client")
         })?;
+        let conditional_builder = apply_proxy(Client::builder(), proxy)?
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
+            .retry(reqwest::retry::never());
+        #[cfg(feature = "synthetic-test-ca")]
+        let conditional_builder = add_synthetic_test_ca(conditional_builder, &server)?;
+        #[cfg(not(feature = "synthetic-test-ca"))]
+        let _ = &server;
+        let conditional_http = conditional_builder.build().map_err(|_| {
+            CloudError::new(
+                ErrorKind::Offline,
+                "could not initialize conditional request client",
+            )
+        })?;
         let async_builder = proxy
             .apply_to_async_client_builder(reqwest::Client::builder())?
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .connect_timeout(connect_timeout)
             .read_timeout(async_body::BODY_IDLE_TIMEOUT)
             .timeout(request_timeout);
@@ -428,9 +627,11 @@ impl OpenCloudClient {
         Ok(Self {
             server: normalized_server(server),
             http,
+            conditional_http,
             async_http,
             body_idle_timeout: async_body::BODY_IDLE_TIMEOUT,
             token: Arc::new(Mutex::new(bearer_token)),
+            authentication,
             token_generation: Arc::new(AtomicU64::new(1)),
             initiator_id: format!("raiun-{}", std::process::id()),
             transfer_budget,
@@ -462,6 +663,11 @@ impl OpenCloudClient {
 
     /// Replace the in-memory bearer token after an external auth layer refreshes it.
     pub fn set_bearer_token(&self, bearer_token: String) -> Result<(), CloudError> {
+        if !matches!(self.authentication, Authentication::Bearer) {
+            return Err(invalid(
+                "an app-token client cannot accept OAuth token updates",
+            ));
+        }
         if bearer_token.trim().is_empty() || bearer_token.chars().any(char::is_control) {
             return Err(invalid("bearer token is empty or malformed"));
         }
@@ -596,6 +802,30 @@ impl OpenCloudClient {
         Ok(Some(TokenGenerationLease { _token: token }))
     }
 
+    fn authorization(&self, token: &str) -> Result<(HeaderValue, String), CloudError> {
+        let (value, redactions) = match &self.authentication {
+            Authentication::Offline => {
+                return Err(CloudError::new(
+                    ErrorKind::Offline,
+                    "cache-only client cannot issue network requests",
+                ));
+            }
+            Authentication::Bearer => (format!("Bearer {token}"), token.to_owned()),
+            Authentication::AppToken { username } => {
+                let pair = Zeroizing::new(format!("{username}:{token}"));
+                let encoded = Zeroizing::new(STANDARD.encode(pair.as_bytes()));
+                (
+                    format!("Basic {}", encoded.as_str()),
+                    format!("{token}\n{}", encoded.as_str()),
+                )
+            }
+        };
+        let mut header = HeaderValue::from_str(&value)
+            .map_err(|_| invalid("authentication header is malformed"))?;
+        header.set_sensitive(true);
+        Ok((header, redactions))
+    }
+
     fn request(
         &self,
         method: Method,
@@ -611,6 +841,12 @@ impl OpenCloudClient {
         url: &Url,
         context: Option<RangeReadContext>,
     ) -> Result<(reqwest::blocking::RequestBuilder, String), CloudError> {
+        if self.is_offline() {
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "cache-only client cannot issue network requests",
+            ));
+        }
         let context = context.or_else(|| ACTIVE_RANGE_CONTEXT.with(Cell::get));
         if !same_origin(&self.server, url) {
             return Err(invalid(
@@ -629,11 +865,11 @@ impl OpenCloudClient {
                 "authenticated provider generation changed",
             ));
         }
-        let token = token_guard.clone();
+        let (authorization, token) = self.authorization(&token_guard)?;
         let mut request = self
             .http
             .request(method, url.clone())
-            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(AUTHORIZATION, authorization)
             .header("Initiator-ID", &self.initiator_id)
             .header("X-Requested-With", "XMLHttpRequest");
         if let Some(context) = context {
@@ -656,6 +892,12 @@ impl OpenCloudClient {
         url: &Url,
         context: Option<RangeReadContext>,
     ) -> Result<(reqwest::RequestBuilder, String), CloudError> {
+        if self.is_offline() {
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "cache-only client cannot issue network requests",
+            ));
+        }
         let context = context.or_else(|| ACTIVE_RANGE_CONTEXT.with(Cell::get));
         if !same_origin(&self.server, url) {
             return Err(invalid(
@@ -674,11 +916,11 @@ impl OpenCloudClient {
                 "authenticated provider generation changed",
             ));
         }
-        let token = token_guard.clone();
+        let (authorization, token) = self.authorization(&token_guard)?;
         let mut request = self
             .async_http
             .request(method, url.clone())
-            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(AUTHORIZATION, authorization)
             .header("Initiator-ID", &self.initiator_id)
             .header("X-Requested-With", "XMLHttpRequest");
         if let Some(context) = context {
@@ -779,7 +1021,7 @@ impl OpenCloudClient {
         space: &CloudSpace,
         target_url: &Url,
         logical_path: &str,
-    ) -> Result<(), CloudError> {
+    ) -> Result<RemoteEntry, CloudError> {
         if space.encrypted {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
@@ -847,7 +1089,7 @@ impl OpenCloudClient {
                 "remote folder or item is read only",
             ));
         }
-        Ok(())
+        Ok(checked_entry)
     }
 
     /// Freshly inspect each ancestor because encryption metadata can appear
@@ -1487,14 +1729,40 @@ fn is_strong_etag(value: &str) -> bool {
             .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte))
 }
 
+fn require_directory_mutation_validator(
+    entry: &RemoteEntry,
+    logical_path: &str,
+) -> Result<(), CloudError> {
+    if entry.directory
+        && (entry.path.trim_end_matches('/') != logical_path.trim_end_matches('/')
+            || !is_strong_etag(&entry.etag))
+    {
+        return Err(invalid(
+            "conditional directory mutation requires a strong entity tag",
+        ));
+    }
+    Ok(())
+}
+
 fn recovery_target_path(root: &str, relative: &str) -> Result<String, CloudError> {
+    recovery_target_path_checked(root, relative, false)
+}
+// Only the explicit bound-parent create/readback accepts literal filename ?/#.
+// URL construction still goes exclusively through append_logical_path segments.
+fn recovery_parent_create_target_path(root: &str, relative: &str) -> Result<String, CloudError> {
+    recovery_target_path_checked(root, relative, true)
+}
+fn recovery_target_path_checked(
+    root: &str,
+    relative: &str,
+    literal_names: bool,
+) -> Result<String, CloudError> {
     const MAX_RECOVERY_PATH: usize = 32 * 1024;
     if root.is_empty()
         || root.len() > MAX_RECOVERY_PATH
         || !root.starts_with('/')
         || root.contains('\\')
-        || root.contains('?')
-        || root.contains('#')
+        || (!literal_names && (root.contains('?') || root.contains('#')))
         || root.chars().any(char::is_control)
         || root.split('/').any(|part| matches!(part, "." | ".."))
         || relative.is_empty()
@@ -1502,8 +1770,7 @@ fn recovery_target_path(root: &str, relative: &str) -> Result<String, CloudError
         || relative.starts_with('/')
         || relative.ends_with('/')
         || relative.contains('\\')
-        || relative.contains('?')
-        || relative.contains('#')
+        || (!literal_names && (relative.contains('?') || relative.contains('#')))
         || relative.chars().any(char::is_control)
         || relative
             .split('/')
@@ -1534,6 +1801,58 @@ fn validate_recovery_entry(entry: &RemoteEntry, expected_path: &str) -> Result<(
         ));
     }
     Ok(())
+}
+
+fn ensure_operation_active(operation: Option<&OperationCancellation>) -> Result<(), CloudError> {
+    if operation.is_some_and(OperationCancellation::is_cancelled) {
+        Err(CloudError::new(
+            ErrorKind::Offline,
+            "content operation was cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn transfer_metadata_boundary(error: CloudError, phase: &'static str) -> CloudError {
+    if error.kind == ErrorKind::InvalidResponse
+        && error.message == "DAV response omitted an entity tag"
+    {
+        // Both fragments are local constants. Never include server payloads,
+        // request URLs or authentication information in this diagnostic.
+        invalid(&format!("{phase}: DAV response omitted an entity tag"))
+    } else {
+        error
+    }
+}
+
+fn read_transfer_metadata(
+    operation: Option<&OperationCancellation>,
+    phase: &'static str,
+    mut read: impl FnMut() -> Result<RemoteEntry, CloudError>,
+) -> Result<RemoteEntry, CloudError> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        ensure_operation_active(operation)?;
+        match read() {
+            Err(error)
+                if error.kind == ErrorKind::InvalidResponse
+                    && error.message == "DAV response omitted an entity tag"
+                    && Instant::now() < deadline =>
+            {
+                // Only metadata reads may be repeated here. All request/root
+                // checks run again; PUT/GET bodies and journal claims remain
+                // outside this loop. Missing or changed validators never pass.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(Duration::from_millis(100)));
+                ensure_operation_active(operation)?;
+            }
+            result => {
+                ensure_operation_active(operation)?;
+                return result.map_err(|error| transfer_metadata_boundary(error, phase));
+            }
+        }
+    }
 }
 
 fn ensure_not_cancelled(is_cancelled: &impl Fn() -> bool) -> Result<(), CloudError> {
@@ -1620,6 +1939,97 @@ impl OpenCloudClient {
             ));
         }
         Ok(entry)
+    }
+
+    /// Send at most one ordinary MKCOL under an exact recovery root/context.
+    /// `Err` means no MKCOL was sent. Once send begins, transport/unknown-status
+    /// failures are uncertain. Bare 201 is not an atomic created-ID receipt.
+    pub fn mkdir_with_context(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        context: RangeReadContext,
+    ) -> Result<DirectoryCreateResponse, CloudError> {
+        self.mkdir_with_context_and_cancellation(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            context,
+            || false,
+        )
+    }
+
+    /// As `mkdir_with_context`, with the original owner's cancellation probe
+    /// checked after metadata admission and immediately before the single send.
+    /// Cancellation observed after send starts is uncertain, never a safe retry.
+    /// The probe must be local and must not perform network or journal work.
+    pub fn mkdir_with_context_and_cancellation(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        context: RangeReadContext,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<DirectoryCreateResponse, CloudError> {
+        let _guard = RangeContextGuard::enter(context);
+        ensure_not_cancelled(&is_cancelled)?;
+        self.ensure_context_current(context)?;
+        let path = recovery_target_path(remote_root_path, relative_path)?;
+        if path.trim_end_matches('/') == remote_root_path.trim_end_matches('/') {
+            return Err(invalid("cannot create a Space root"));
+        }
+        self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
+        ensure_not_cancelled(&is_cancelled)?;
+        let (selected, url) = self.transfer_url(space, &path)?;
+        self.ensure_writable_target(&selected, &url, &path)?;
+        self.ensure_context_current(context)?;
+        let (request, token) =
+            self.request(Method::from_bytes(b"MKCOL").expect("static method"), &url)?;
+        ensure_not_cancelled(&is_cancelled)?;
+        let response = match request.send() {
+            Ok(response) => response,
+            Err(error) => return Ok(DirectoryCreateResponse::Uncertain(network(error))),
+        };
+        if let Err(error) = ensure_not_cancelled(&is_cancelled) {
+            return Ok(DirectoryCreateResponse::Uncertain(error));
+        }
+        let status = response.status();
+        if status == StatusCode::CREATED {
+            return Ok(match self.ensure_context_current(context) {
+                Ok(()) => DirectoryCreateResponse::Created,
+                Err(error) => DirectoryCreateResponse::Uncertain(error),
+            });
+        }
+        if let Err(error) = self.ensure_context_current(context) {
+            return Ok(DirectoryCreateResponse::Uncertain(error));
+        }
+        let error = if status == StatusCode::METHOD_NOT_ALLOWED {
+            conflict("directory destination already exists")
+        } else {
+            checked(response, &[StatusCode::CREATED], &token)
+                .err()
+                .unwrap_or_else(|| invalid("unexpected directory create response"))
+        };
+        Ok(
+            if matches!(
+                status,
+                StatusCode::UNAUTHORIZED
+                    | StatusCode::FORBIDDEN
+                    | StatusCode::NOT_FOUND
+                    | StatusCode::CONFLICT
+                    | StatusCode::PRECONDITION_FAILED
+                    | StatusCode::METHOD_NOT_ALLOWED
+                    | StatusCode::PRECONDITION_REQUIRED
+            ) {
+                DirectoryCreateResponse::Rejected(error)
+            } else {
+                DirectoryCreateResponse::Uncertain(error)
+            },
+        )
     }
 
     /// Stat one recovered edit target beneath an exact configured remote root.
@@ -1976,6 +2386,24 @@ impl OpenCloudClient {
         Ok(root)
     }
 
+    /// Verify the authenticated identity at Graph's fixed same-origin /me route.
+    pub fn current_user_id(&self) -> Result<String, CloudError> {
+        let url = self
+            .server
+            .join("graph/v1.0/me")
+            .map_err(|_| invalid("Graph identity endpoint is invalid"))?;
+        let payload: Value = serde_json::from_slice(&self.graph_get_with_context(&url, None)?)
+            .map_err(|_| invalid("Graph identity response is invalid"))?;
+        let id = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| {
+                !id.trim().is_empty() && id.len() <= 16_384 && !id.chars().any(char::is_control)
+            })
+            .ok_or_else(|| invalid("Graph identity response has no usable user ID"))?;
+        Ok(id.to_owned())
+    }
+
     /// Discover the authenticated account's Spaces under one deadline and
     /// bearer generation. Provider namespace construction uses this to bind
     /// Personal and Spaces routes to a verified account identity.
@@ -2178,8 +2606,9 @@ impl OpenCloudClient {
                 "Space root URL cannot be used for a conditional creation",
             ));
         }
-        // RFC 4918 tagged If condition: the server checks the root revision
-        // atomically with the leaf's If-None-Match condition when applying PUT.
+        // Express the root revision as an RFC 4918 tagged If condition. This
+        // header alone does not establish atomic root/leaf preconditions; the
+        // supported server's create-only contract needs separate qualification.
         Ok(format!("<{}> ([{}])", root_url, root.etag))
     }
 
@@ -2209,18 +2638,43 @@ impl OpenCloudClient {
         destination: &Path,
         expected_root: Option<&str>,
     ) -> Result<RemoteEntry, CloudError> {
+        self.download_with_root_cancellation(
+            space,
+            path,
+            expected_etag,
+            destination,
+            expected_root,
+            None,
+        )
+    }
+
+    fn download_with_root_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        expected_etag: Option<&str>,
+        destination: &Path,
+        expected_root: Option<&str>,
+        operation: Option<&OperationCancellation>,
+    ) -> Result<RemoteEntry, CloudError> {
+        ensure_operation_active(operation)?;
         let (mut selected, url) = self.transfer_url(space, path)?;
+        ensure_operation_active(operation)?;
         if let Some(root) = expected_root {
             selected.dav_url = self
                 .validate_identity_addressed_root(&selected, root)?
                 .to_string();
         }
-        let before = if expected_root.is_some() {
-            self.check_transfer_root(&selected, path, expected_root)?;
-            self.stat_at_dav(&url, path)?
-        } else {
-            self.stat(space, path)?
-        };
+        ensure_operation_active(operation)?;
+        let before = read_transfer_metadata(operation, "Download initial metadata", || {
+            if expected_root.is_some() {
+                self.check_transfer_root(&selected, path, expected_root)?;
+                self.stat_at_dav(&url, path)
+            } else {
+                self.stat(space, path)
+            }
+        })?;
+        ensure_operation_active(operation)?;
         if before.encrypted {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
@@ -2245,14 +2699,19 @@ impl OpenCloudClient {
         let budget = self.transfer_budget.clone();
         let cancellation = budget.cancellation();
         let watchdog_cancellation = cancellation.clone();
+        let body_operation = operation.cloned();
         let expected_size = before.size;
         let total_timeout =
             transfer_timeout_with_budget(&budget, TransferDirection::Download, expected_size);
         let copied = async_body::run_body_operation_cancellable(
             self.body_idle_timeout,
             total_timeout,
-            || watchdog_cancellation.is_cancelled(),
+            || {
+                watchdog_cancellation.is_cancelled()
+                    || operation.is_some_and(OperationCancellation::is_cancelled)
+            },
             move |progress| async move {
+                ensure_operation_active(body_operation.as_ref())?;
                 let response = request
                     .timeout(total_timeout)
                     .send()
@@ -2271,7 +2730,12 @@ impl OpenCloudClient {
                     &mut output,
                     expected_size,
                     &budget,
-                    || cancellation.is_cancelled(),
+                    || {
+                        cancellation.is_cancelled()
+                            || body_operation
+                                .as_ref()
+                                .is_some_and(OperationCancellation::is_cancelled)
+                    },
                     &progress,
                 )
                 .await?;
@@ -2284,6 +2748,7 @@ impl OpenCloudClient {
                 Ok(copied)
             },
         )?;
+        ensure_operation_active(operation)?;
         if copied != expected_size {
             return Err(invalid("download size did not match Content-Length"));
         }
@@ -2292,12 +2757,16 @@ impl OpenCloudClient {
 
         // Keep the caller's destination intact until the server confirms the
         // same revision is still present after the complete body is staged.
-        let after = if expected_root.is_some() {
-            self.check_transfer_root(&selected, path, expected_root)?;
-            self.stat_at_dav(&url, path)?
-        } else {
-            self.stat(space, path)?
-        };
+        ensure_operation_active(operation)?;
+        let after = read_transfer_metadata(operation, "Download final metadata", || {
+            if expected_root.is_some() {
+                self.check_transfer_root(&selected, path, expected_root)?;
+                self.stat_at_dav(&url, path)
+            } else {
+                self.stat(space, path)
+            }
+        })?;
+        ensure_operation_active(operation)?;
         if after.etag != before.etag || after.size != copied {
             return Err(conflict("remote item changed during download"));
         }
@@ -2315,16 +2784,41 @@ impl OpenCloudClient {
         condition: WriteCondition,
         expected_root: Option<&str>,
     ) -> Result<RemoteEntry, CloudError> {
+        self.upload_with_root_cancellation(space, path, source, condition, expected_root, None)
+    }
+
+    fn upload_with_root_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        source: &Path,
+        condition: WriteCondition,
+        expected_root: Option<&str>,
+        operation: Option<&OperationCancellation>,
+    ) -> Result<RemoteEntry, CloudError> {
+        ensure_operation_active(operation)?;
         let (mut selected, url) = self.transfer_url(space, path)?;
+        ensure_operation_active(operation)?;
         if let Some(root) = expected_root {
             selected.dav_url = self
                 .validate_identity_addressed_root(&selected, root)?
                 .to_string();
         }
-        self.ensure_writable_target(&selected, &url, path)?;
+        ensure_operation_active(operation)?;
+        let target = self
+            .ensure_writable_target(&selected, &url, path)
+            .map_err(|error| transfer_metadata_boundary(error, "Upload target metadata"))?;
+        if let WriteCondition::Match(etag) = &condition {
+            if !is_strong_etag(etag) {
+                return Err(invalid("conditional upload requires a strong entity tag"));
+            }
+            require_directory_mutation_validator(&target, path)?;
+        }
+        ensure_operation_active(operation)?;
         let root_condition = expected_root
             .map(|root| self.root_write_condition(&selected, path, root))
             .transpose()?;
+        ensure_operation_active(operation)?;
         let file = File::open(source).map_err(io_error)?;
         let size = file.metadata().map_err(io_error)?.len();
         let (mut request, token) = self.request_async(Method::PUT, &url)?;
@@ -2343,18 +2837,28 @@ impl OpenCloudClient {
         let budget = self.transfer_budget.clone();
         let cancellation = budget.cancellation();
         let watchdog_cancellation = cancellation.clone();
+        let body_operation = operation.cloned();
         let total_timeout = transfer_timeout_with_budget(&budget, TransferDirection::Upload, size);
         let response_token = token.clone();
         async_body::run_body_operation_cancellable(
             self.body_idle_timeout,
             total_timeout,
-            || watchdog_cancellation.is_cancelled(),
+            || {
+                watchdog_cancellation.is_cancelled()
+                    || operation.is_some_and(OperationCancellation::is_cancelled)
+            },
             move |progress| async move {
+                ensure_operation_active(body_operation.as_ref())?;
                 let body = async_body::budgeted_upload_stream(
                     tokio::fs::File::from_std(file),
                     size,
                     budget,
-                    move || cancellation.is_cancelled(),
+                    move || {
+                        cancellation.is_cancelled()
+                            || body_operation
+                                .as_ref()
+                                .is_some_and(OperationCancellation::is_cancelled)
+                    },
                     progress,
                 );
                 let response = request
@@ -2371,12 +2875,19 @@ impl OpenCloudClient {
                 Ok(())
             },
         )?;
-        let entry = if expected_root.is_some() {
-            self.check_transfer_root(&selected, path, expected_root)?;
-            self.stat_at_dav(&url, path)?
-        } else {
-            self.stat(space, path)?
-        };
+        ensure_operation_active(operation)?;
+        // PUT is never repeated. Some servers publish a new file before its
+        // revision metadata; wait briefly for a verifiable revision instead
+        // of turning that observation into an uncertain completed upload.
+        let entry = read_transfer_metadata(operation, "Upload final metadata", || {
+            if expected_root.is_some() {
+                self.check_transfer_root(&selected, path, expected_root)?;
+                self.stat_at_dav(&url, path)
+            } else {
+                self.stat(space, path)
+            }
+        })?;
+        ensure_operation_active(operation)?;
         if entry.size != size {
             return Err(invalid("uploaded file failed size verification"));
         }
@@ -2391,6 +2902,31 @@ impl CloudBackend for OpenCloudClient {
 
     fn spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
         self.discover_spaces(None, MAX_ENTRIES)
+    }
+
+    fn space_root_metadata(&self, space: &str) -> Result<(CloudSpace, RemoteEntry), CloudError> {
+        // One metadata operation only: never store resolved Graph facts on the
+        // client or carry them into another admission/body phase.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let context = ACTIVE_RANGE_CONTEXT.with(Cell::get).map_or_else(
+            || RangeReadContext {
+                deadline,
+                token_generation: self.token_generation(),
+            },
+            |outer| RangeReadContext {
+                deadline: outer.deadline.min(deadline),
+                token_generation: outer.token_generation,
+            },
+        );
+        let _guard = RangeContextGuard::enter(context);
+        self.ensure_context_current(context)?;
+        let (selected, url) = self.resolve_dav_with_context(space, "/", Some(context))?;
+        // Preserve stat's ordinary-ancestry and exact root response checks;
+        // only its second Graph discovery is removed.
+        self.ensure_plain_ancestors_with_context(&selected, "/", false, Some(context))?;
+        let root = self.stat_at_dav(&url, "/")?;
+        self.ensure_context_current(context)?;
+        Ok((selected, root))
     }
 
     fn list(
@@ -2497,6 +3033,42 @@ impl CloudBackend for OpenCloudClient {
         self.download_with_root(space, path, expected_etag, destination, Some(expected_root))
     }
 
+    fn upload_in_root_with_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        source: &Path,
+        condition: WriteCondition,
+        expected_root: &str,
+        cancellation: &OperationCancellation,
+    ) -> Result<RemoteEntry, CloudError> {
+        self.upload_with_root_cancellation(
+            space,
+            path,
+            source,
+            condition,
+            Some(expected_root),
+            Some(cancellation),
+        )
+    }
+    fn download_in_root_with_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        expected_etag: Option<&str>,
+        destination: &Path,
+        expected_root: &str,
+        cancellation: &OperationCancellation,
+    ) -> Result<RemoteEntry, CloudError> {
+        self.download_with_root_cancellation(
+            space,
+            path,
+            expected_etag,
+            destination,
+            Some(expected_root),
+            Some(cancellation),
+        )
+    }
     fn mkdir(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
         let (selected, url) = self.transfer_url(space, path)?;
         self.ensure_writable_target(&selected, &url, path)?;
@@ -2516,8 +3088,12 @@ impl CloudBackend for OpenCloudClient {
                 "cannot delete a cloud Space root",
             ));
         }
+        if !is_strong_etag(expected_etag) {
+            return Err(invalid("conditional delete requires a strong entity tag"));
+        }
         let (selected, url) = self.transfer_url(space, path)?;
-        self.ensure_writable_target(&selected, &url, path)?;
+        let target = self.ensure_writable_target(&selected, &url, path)?;
+        require_directory_mutation_validator(&target, path)?;
         let (request, token) = self.request(Method::DELETE, &url)?;
         let response = request
             .header(IF_MATCH, expected_etag)
@@ -2534,12 +3110,27 @@ impl CloudBackend for OpenCloudClient {
         to: &str,
         expected_etag: &str,
     ) -> Result<RemoteEntry, CloudError> {
+        // Direct backend callers must not bypass the Engine's root guard.
+        // Check before discovery and before the equal-URL no-op path.
+        if [from, to]
+            .iter()
+            .any(|path| path.is_empty() || path.bytes().all(|byte| byte == b'/'))
+        {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot rename a cloud Space root or replace it",
+            ));
+        }
+        if !is_strong_etag(expected_etag) {
+            return Err(invalid("conditional move requires a strong entity tag"));
+        }
         let (selected, source) = self.transfer_url(space, from)?;
         let (_, destination) = self.transfer_url(space, to)?;
         if source == destination {
             return self.stat(space, from);
         }
-        self.ensure_writable_target(&selected, &source, from)?;
+        let target = self.ensure_writable_target(&selected, &source, from)?;
+        require_directory_mutation_validator(&target, from)?;
         self.ensure_writable_target(&selected, &destination, to)?;
         let (request, token) =
             self.request(Method::from_bytes(b"MOVE").expect("static method"), &source)?;
@@ -2625,13 +3216,26 @@ fn validate_logical_path(path: &str) -> Result<(), CloudError> {
 struct DavItem {
     href: String,
     directory: bool,
-    size: u64,
+    size: Option<u64>,
+    invalid_size: bool,
     etag: String,
     modified: i64,
     file_id: Option<String>,
     encrypted: bool,
     content_type: Option<String>,
     writable: Option<bool>,
+}
+
+fn append_dav_property_text(value: &mut String, fragment: &str) -> Result<(), CloudError> {
+    if value
+        .len()
+        .checked_add(fragment.len())
+        .is_none_or(|length| length > MAX_DAV_ENTRY)
+    {
+        return Err(invalid("DAV property exceeds its size limit"));
+    }
+    value.push_str(fragment);
+    Ok(())
 }
 
 fn parse_multistatus(
@@ -2641,12 +3245,13 @@ fn parse_multistatus(
     visit: &mut dyn FnMut(RemoteEntry) -> Result<(), CloudError>,
 ) -> Result<(), CloudError> {
     let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let mut entries = 0usize;
     let mut item: Option<DavItem> = None;
     let mut prop_values = DavItem::default();
     let mut field = String::new();
+    let mut field_text = String::new();
     let mut depth = 0usize;
     let mut in_prop = false;
     let mut propstat_ok = false;
@@ -2685,6 +3290,7 @@ fn parse_multistatus(
                     if depth > 32 {
                         return Err(invalid("DAV entry nesting exceeds its limit"));
                     }
+                    field_text.clear();
                     field = if namespace_ok {
                         name.clone()
                     } else {
@@ -2716,20 +3322,65 @@ fn parse_multistatus(
                 }
             }
             Ok((_, Event::Text(e))) => {
-                if let Some(ref mut current) = item {
-                    let text = e
-                        .decode()
-                        .map_err(|_| invalid("DAV response contains invalid text"))?;
-                    if text.len() > MAX_DAV_ENTRY {
-                        return Err(invalid("DAV property exceeds its size limit"));
-                    }
-                    let value = text.trim();
+                let text = e
+                    .decode()
+                    .map_err(|_| invalid("DAV response contains invalid text"))?;
+                if item.is_some() && !field.is_empty() {
+                    append_dav_property_text(&mut field_text, &text)?;
+                }
+            }
+            Ok((_, Event::CData(e))) => {
+                let text = e
+                    .decode()
+                    .map_err(|_| invalid("DAV response contains invalid text"))?;
+                if item.is_some() && !field.is_empty() {
+                    append_dav_property_text(&mut field_text, &text)?;
+                }
+            }
+            Ok((_, Event::GeneralRef(reference))) => {
+                let name = reference
+                    .decode()
+                    .map_err(|_| invalid("DAV response contains an invalid reference"))?;
+                let character = match reference
+                    .resolve_char_ref()
+                    .map_err(|_| invalid("DAV response contains an invalid character reference"))?
+                {
+                    Some(character) => character,
+                    None => match name.as_ref() {
+                        "quot" => '"',
+                        "apos" => '\'',
+                        "amp" => '&',
+                        "lt" => '<',
+                        "gt" => '>',
+                        _ => return Err(invalid("DAV response contains an unknown entity")),
+                    },
+                };
+                if !matches!(character, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+                {
+                    return Err(invalid("DAV response contains an invalid XML character"));
+                }
+                if item.is_some() && !field.is_empty() {
+                    let mut encoded = [0; 4];
+                    append_dav_property_text(&mut field_text, character.encode_utf8(&mut encoded))?;
+                }
+            }
+            Ok((namespace, Event::End(e))) => {
+                let name = local_name(e.local_name().as_ref()).to_ascii_lowercase();
+                let dav_element = namespace_is(&namespace, b"DAV:");
+                if let Some(ref mut current) = item
+                    && field == name
+                    && expected_namespace(&name)
+                        .is_some_and(|expected| namespace_is(&namespace, expected))
+                {
+                    let value = field_text.trim();
                     match field.as_str() {
                         "href" if current.href.is_empty() => current.href = value.to_owned(),
                         "getcontentlength" if in_prop => {
-                            prop_values.size = value
-                                .parse()
-                                .map_err(|_| invalid("DAV content length is invalid"))?
+                            // A property's status follows its value. Defer
+                            // rejection until successful propstats establish
+                            // whether this is a file or a collection.
+                            prop_values.size = value.parse().ok();
+                            prop_values.invalid_size |= prop_values.size.is_none();
                         }
                         "getetag" if in_prop => prop_values.etag = value.to_owned(),
                         "getlastmodified" if in_prop => {
@@ -2757,10 +3408,6 @@ fn parse_multistatus(
                         _ => {}
                     }
                 }
-            }
-            Ok((namespace, Event::End(e))) => {
-                let name = local_name(e.local_name().as_ref()).to_ascii_lowercase();
-                let dav_element = namespace_is(&namespace, b"DAV:");
                 if dav_element && name == "prop" {
                     in_prop = false;
                 }
@@ -2768,7 +3415,8 @@ fn parse_multistatus(
                     if let Some(ref mut current) = item {
                         current.directory |= prop_values.directory;
                         current.encrypted |= prop_values.encrypted;
-                        current.size = prop_values.size;
+                        current.invalid_size |= prop_values.invalid_size;
+                        current.size = prop_values.size.or(current.size);
                         if !prop_values.etag.is_empty() {
                             current.etag = std::mem::take(&mut prop_values.etag);
                         }
@@ -2800,6 +3448,7 @@ fn parse_multistatus(
                     depth = depth.saturating_sub(1);
                 }
                 field.clear();
+                field_text.clear();
             }
             Ok((_, Event::DocType(_))) => {
                 return Err(invalid("DAV response contains a document type declaration"));
@@ -2872,9 +3521,24 @@ fn to_remote_entry(
         .cloned()
         .unwrap_or_else(|| "root".to_owned());
     let etag = item.etag.trim().to_owned();
-    if etag.is_empty() {
+    // Collections can advertise getetag in a 404 propstat. Their identity and
+    // ordinary-ancestry metadata remain useful, but an absent validator grants
+    // no conditional mutation authority. Regular-file revisions stay required.
+    if etag.is_empty() && !item.directory {
         return Err(invalid("DAV response omitted an entity tag"));
     }
+    // Collections have no transferable body size. Unavailable or malformed
+    // getcontentlength properties therefore cannot deny their root identity.
+    // Files require an explicit valid size from a successful propstat; neither
+    // a failed property nor a later unrelated propstat can fabricate zero.
+    let size = if item.directory {
+        0
+    } else if item.invalid_size {
+        return Err(invalid("DAV content length is invalid"));
+    } else {
+        item.size
+            .ok_or_else(|| invalid("DAV response omitted a content length"))?
+    };
     let encrypted = item.encrypted
         || item
             .content_type
@@ -2888,7 +3552,7 @@ fn to_remote_entry(
             .unwrap_or_else(|| actual.to_string()),
         path,
         directory: item.directory,
-        size: if item.directory { 0 } else { item.size },
+        size,
         etag,
         modified_unix: item.modified,
         writable: item.writable.unwrap_or(true),
@@ -3181,7 +3845,11 @@ fn safe_diagnostic_value(value: &str, max_len: usize, secret: Option<&str>) -> O
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
-        || secret.is_some_and(|secret| !secret.is_empty() && value.contains(secret))
+        || secret.is_some_and(|secrets| {
+            secrets
+                .lines()
+                .any(|secret| !secret.is_empty() && value.contains(secret))
+        })
     {
         return None;
     }
@@ -3263,6 +3931,260 @@ mod tests {
         sync::mpsc,
         thread,
     };
+
+    #[test]
+    fn app_token_basic_auth_covers_graph_dav_async_range_and_refuses_redirects() {
+        let dav = r#"<d:multistatus xmlns:d="DAV:"></d:multistatus>"#;
+        let (server, worker) = fixture(vec![
+            ("200 OK", r#"{"id":"synthetic-user"}"#.into()),
+            ("207 Multi-Status", dav.into()),
+            ("206 Partial Content", "part".into()),
+            (
+                "302 Found\r\nLocation: http://127.0.0.1:1/never",
+                String::new(),
+            ),
+        ]);
+        let client = OpenCloudClient::new_with_app_token(
+            &server,
+            "synthetic-user",
+            "synthetic-app-token".into(),
+            &ProxyConfig::Direct,
+        )
+        .unwrap();
+        let graph = client.server.join("graph/v1.0/me").unwrap();
+        assert_eq!(client.current_user_id().unwrap(), "synthetic-user");
+        let dav = client.server.join("dav/spaces/synthetic/").unwrap();
+        client.propfind(&dav, "0", "/", &mut |_| Ok(())).unwrap();
+        let context = RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(2),
+            token_generation: client.token_generation(),
+        };
+        let (request, secret) = client
+            .request_async_with_context(Method::GET, &dav, Some(context))
+            .unwrap();
+        let body = async_body::run_body_operation(
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            move |_| async move {
+                let response = checked_async(
+                    request
+                        .header(RANGE, "bytes=0-3")
+                        .send()
+                        .await
+                        .map_err(network)?,
+                    &[StatusCode::PARTIAL_CONTENT],
+                    &secret,
+                )?;
+                response.bytes().await.map_err(network)
+            },
+        )
+        .unwrap();
+        assert_eq!(&*body, b"part");
+        assert_eq!(
+            client
+                .graph_get_with_context(&graph, None)
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidResponse
+        );
+        let foreign = Url::parse("https://different.example/dav/").unwrap();
+        assert!(client.request(Method::GET, &foreign).is_err());
+        assert!(client.request_async(Method::GET, &foreign).is_err());
+        let requests = worker.join().unwrap();
+        let expected = format!(
+            "authorization: Basic {}",
+            STANDARD.encode("synthetic-user:synthetic-app-token")
+        );
+        assert!(requests.iter().all(|request| request.contains(&expected)));
+        assert!(requests[0].starts_with("GET /graph/v1.0/me "));
+        assert!(requests[1].starts_with("PROPFIND /dav/"));
+        assert!(requests[2].contains("range: bytes=0-3"));
+        assert_eq!(requests.len(), 4);
+    }
+
+    #[test]
+    fn app_token_rejection_is_unauthorized_without_secret_diagnostics_or_refresh() {
+        let encoded = STANDARD.encode("synthetic-user:synthetic-token");
+        let (server, worker) = fixture(vec![
+            (
+                "401 Unauthorized",
+                r#"{"error":{"code":"synthetic-token"}}"#.into(),
+            ),
+            (
+                "401 Unauthorized",
+                format!(r#"{{"error":{{"code":"{encoded}"}}}}"#),
+            ),
+        ]);
+        let client = OpenCloudClient::new_with_app_token(
+            &server,
+            "synthetic-user",
+            "synthetic-token".into(),
+            &ProxyConfig::Direct,
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let error = client.spaces().unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Unauthorized);
+            assert!(!error.to_string().contains("synthetic-token"));
+            assert!(!error.to_string().contains(&encoded));
+        }
+        let requests = worker.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.starts_with("GET /graph/v1.0/me/drives "))
+        );
+    }
+
+    #[test]
+    fn app_token_validation_rotation_and_redaction_are_method_bound() {
+        for (username, token) in [
+            ("", "token"),
+            ("u:other", "token"),
+            ("u\n", "token"),
+            ("u", "\n"),
+            ("u", "token\r\n"),
+        ] {
+            assert!(validate_app_token_credentials(username, token).is_err());
+        }
+        assert!(validate_app_token_credentials(&"u".repeat(513), "token").is_err());
+        assert!(validate_app_token_credentials("u", &"t".repeat(65_537)).is_err());
+        for server in [
+            "http://example.com",
+            "https://cloud.example/?secret=x",
+            "https://@cloud.example",
+            "https://cloud.example\n",
+        ] {
+            assert!(validate_app_token_server(server).is_err());
+        }
+        let client = OpenCloudClient::new_with_app_token(
+            "https://cloud.example",
+            "uuid-identity",
+            "synthetic-secret".into(),
+            &ProxyConfig::Direct,
+        )
+        .unwrap();
+        assert!(
+            client
+                .clone()
+                .set_bearer_token("replacement".into())
+                .is_err()
+        );
+        assert_eq!(client.token_generation(), 1);
+        let (header, redactions) = client.authorization("synthetic-secret").unwrap();
+        assert!(header.is_sensitive());
+        let encoded = STANDARD.encode("uuid-identity:synthetic-secret");
+        assert!(safe_diagnostic_value(&encoded, 128, Some(&redactions)).is_none());
+        assert!(safe_diagnostic_value("synthetic-secret", 128, Some(&redactions)).is_none());
+        let diagnostic = format!("{client:?}");
+        assert!(!diagnostic.contains("synthetic-secret"));
+        assert!(!diagnostic.contains(&encoded));
+        let bearer = OpenCloudClient::new("https://cloud.example", "bearer-v1".into()).unwrap();
+        bearer.set_bearer_token("bearer-v2".into()).unwrap();
+        assert_eq!(
+            bearer.authorization("bearer-v2").unwrap().0,
+            "Bearer bearer-v2"
+        );
+    }
+
+    #[test]
+    fn vault_metadata_deadline_preserves_shorter_outer_context_and_restores_it() {
+        let client = OpenCloudClient::new("https://synthetic.invalid", "synthetic".into()).unwrap();
+        let outer = RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(2),
+            token_generation: client.token_generation(),
+        };
+        assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+        {
+            let _guard = RangeContextGuard::enter(outer);
+            client
+                .with_vault_metadata_deadline(|| {
+                    let current = ACTIVE_RANGE_CONTEXT.with(Cell::get).unwrap();
+                    assert_eq!(current.deadline, outer.deadline);
+                    assert_eq!(current.token_generation, outer.token_generation);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                ACTIVE_RANGE_CONTEXT.with(Cell::get).unwrap().deadline,
+                outer.deadline
+            );
+        }
+        assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+    }
+
+    #[test]
+    fn vault_metadata_deadline_refuses_expired_or_stale_outer_before_operation() {
+        let client = OpenCloudClient::new("https://synthetic.invalid", "synthetic".into()).unwrap();
+        for context in [
+            RangeReadContext {
+                deadline: Instant::now() - Duration::from_secs(1),
+                token_generation: client.token_generation(),
+            },
+            RangeReadContext {
+                deadline: Instant::now() + Duration::from_secs(2),
+                token_generation: client.token_generation() + 1,
+            },
+        ] {
+            {
+                let _guard = RangeContextGuard::enter(context);
+                let result = client.with_vault_metadata_deadline(|| -> Result<(), CloudError> {
+                    panic!("stale admission must not run")
+                });
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Unauthorized);
+                let restored = ACTIVE_RANGE_CONTEXT.with(Cell::get).unwrap();
+                assert_eq!(restored.deadline, context.deadline);
+                assert_eq!(restored.token_generation, context.token_generation);
+            }
+            assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+        }
+    }
+
+    #[test]
+    fn vault_metadata_deadline_refuses_final_rotation_and_restores_context() {
+        let client = OpenCloudClient::new("https://synthetic.invalid", "synthetic".into()).unwrap();
+        let result = client.with_vault_metadata_deadline(|| {
+            client.set_bearer_token("synthetic-rotated".into())?;
+            Ok("must not publish")
+        });
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Unauthorized);
+        assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+    }
+
+    #[test]
+    fn vault_metadata_deadline_refuses_final_expiry_and_preserves_operation_errors() {
+        let client = OpenCloudClient::new("https://synthetic.invalid", "synthetic".into()).unwrap();
+        let outer = RangeReadContext {
+            deadline: Instant::now() + Duration::from_millis(200),
+            token_generation: client.token_generation(),
+        };
+        {
+            let _guard = RangeContextGuard::enter(outer);
+            let mut operation_entered = false;
+            let result = client.with_vault_metadata_deadline(|| {
+                operation_entered = true;
+                thread::sleep(
+                    outer.deadline.saturating_duration_since(Instant::now())
+                        + Duration::from_millis(1),
+                );
+                Ok("must not publish")
+            });
+            assert!(
+                operation_entered,
+                "must exercise post-operation expiry refusal"
+            );
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Unauthorized);
+            assert_eq!(
+                ACTIVE_RANGE_CONTEXT.with(Cell::get).unwrap().deadline,
+                outer.deadline
+            );
+        }
+        let result: Result<(), CloudError> =
+            client.with_vault_metadata_deadline(|| Err(conflict("synthetic operation failed")));
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Conflict);
+        assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+    }
 
     #[test]
     fn token_generation_completion_lease_serializes_rotation_and_shared_clients() {
@@ -3633,7 +4555,7 @@ mod tests {
         }));
     }
 
-    fn fixture(
+    pub(super) fn fixture(
         responses: Vec<(&'static str, String)>,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3729,7 +4651,36 @@ mod tests {
             .expect("stalled Graph fixture exits on client timeout");
     }
 
-    const GRAPH: &str = r#"{"value":[{"id":"drive-1","name":"Personal","driveType":"personal","root":{"id":"root","webDavUrl":"http://127.0.0.1:PORT/dav/personal/"}}]}"#;
+    pub(super) const GRAPH: &str = r#"{"value":[{"id":"drive-1","name":"Personal","driveType":"personal","root":{"id":"root","webDavUrl":"http://127.0.0.1:PORT/dav/personal/"}}]}"#;
+
+    #[test]
+    fn captured_server_origin_uses_existing_tls_policy_and_rejects_raw_url_ambiguity() {
+        for origin in ["https://fixture.invalid", "http://127.0.0.1:32123"] {
+            assert!(validate_captured_server_origin(origin).is_ok());
+        }
+        for origin in [
+            "",
+            " https://fixture.invalid",
+            "https://fixture.invalid ",
+            "https://fixture.invalid\n",
+            "https://fixture.in\tvalid",
+            "https://user@fixture.invalid",
+            "https://user:secret@fixture.invalid",
+            "https://@fixture.invalid",
+            "https://fixture.invalid?token=synthetic",
+            "https://fixture.invalid#fragment",
+            "http://fixture.invalid",
+            "http://localhost",
+            "ftp://fixture.invalid",
+            "https:///",
+        ] {
+            assert!(
+                validate_captured_server_origin(origin).is_err(),
+                "malformed or disallowed captured origin accepted"
+            );
+        }
+        assert!(validate_captured_server_origin(&"x".repeat(2_049)).is_err());
+    }
 
     #[test]
     fn client_rejects_non_loopback_http_and_redacts_debug() {
@@ -3976,6 +4927,62 @@ mod tests {
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn direct_rename_rejects_root_aliases_without_network_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let client = OpenCloudClient::new(&server, "synthetic-token".into()).unwrap();
+        for alias in ["", "/", "//", "///"] {
+            for (from, to) in [(alias, "/moved"), ("/item.txt", alias), (alias, alias)] {
+                let error = client.rename("drive-1", from, to, "unused").unwrap_err();
+                assert_eq!(error.kind, ErrorKind::Unsupported);
+                assert!(error.message.contains("Space root"));
+            }
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn direct_rename_keeps_conditional_nonoverwriting_move_for_ordinary_paths() {
+        let root = r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/personal/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getetag>"root"</d:getetag><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#.to_owned();
+        let source = r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/personal/source.txt</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>4</d:getcontentlength><d:getetag>"old"</d:getetag><oc:fileid>same-file</oc:fileid><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#.to_owned();
+        let renamed = source.replace("source.txt", "renamed.txt");
+        let (server, worker) = fixture(vec![
+            ("200 OK", GRAPH.to_owned()),
+            ("200 OK", GRAPH.to_owned()),
+            ("207 Multi-Status", root.clone()),
+            ("207 Multi-Status", source),
+            ("207 Multi-Status", root.clone()),
+            ("404 Not Found", String::new()),
+            ("207 Multi-Status", root.clone()),
+            ("201 Created", String::new()),
+            ("200 OK", GRAPH.to_owned()),
+            ("207 Multi-Status", root),
+            ("207 Multi-Status", renamed),
+        ]);
+        let client = OpenCloudClient::new(&server, "synthetic-token".into()).unwrap();
+        let result = client
+            .rename("drive-1", "/source.txt", "/renamed.txt", "\"old\"")
+            .unwrap();
+        assert_eq!(result.id, "same-file");
+        assert_eq!(result.path, "/renamed.txt");
+        let requests = worker.join().unwrap();
+        let moves: Vec<_> = requests
+            .iter()
+            .filter(|request| request.starts_with("MOVE "))
+            .collect();
+        assert_eq!(moves.len(), 1);
+        assert!(moves[0].starts_with("MOVE /dav/personal/source.txt "));
+        let headers = moves[0].to_ascii_lowercase();
+        assert!(headers.contains("if-match: \"old\""));
+        assert!(headers.contains("overwrite: f"));
+        assert!(headers.contains(&format!("destination: {server}/dav/personal/renamed.txt")));
     }
 
     #[test]
@@ -4731,3 +5738,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod metadata_scope_tests;

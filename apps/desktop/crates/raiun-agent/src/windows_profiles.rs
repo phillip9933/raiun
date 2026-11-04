@@ -4,6 +4,38 @@ use super::windows_profile_registry::{Registry, RootReservation, SourceKind, Sou
 use super::*;
 use std::collections::BTreeMap;
 
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_broker_test.rs"]
+mod windows_headless_broker_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_mount_test.rs"]
+mod windows_headless_mount_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_cli_test.rs"]
+mod windows_headless_cli_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_write_test.rs"]
+mod windows_headless_write_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_edits_native_test.rs"]
+mod windows_headless_edits_native_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_busy_test.rs"]
+mod windows_headless_busy_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_streamed_test.rs"]
+pub(super) mod windows_headless_streamed_test;
+
+#[cfg(test)]
+#[path = "windows_headless_directory_test.rs"]
+pub(super) mod windows_headless_directory_test;
+
 struct BrokerState {
     registry: Registry,
     runtimes: BTreeMap<String, Arc<WindowsAgent>>,
@@ -272,6 +304,13 @@ impl WindowsProfiles {
             .collect::<Vec<_>>();
         for runtime in runtimes {
             runtime.maybe_start_refresh()?;
+            if let Some(request) = runtime.headless_configured_mount_request()? {
+                if let Err(error) = self.handle(&request) {
+                    if let Ok(mut state) = runtime.state.lock() {
+                        state.error = Some(error);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -298,11 +337,63 @@ impl WindowsProfiles {
         &self,
         request: windows_vault_requests::OwnedControlRequest,
     ) -> Result<(Value, bool), String> {
+        runtime_mode()?.validate_request(request.value())?;
+        if request.value().get("action").and_then(Value::as_str) == Some("vault_create") {
+            let request = request.decode_create()?;
+            if !WINDOWS_VAULT_SESSIONS_ENABLED {
+                return Err("Windows vault sessions are not available yet".into());
+            }
+            return self.dispatch_vault_create(request);
+        }
+        if request.value().get("action").and_then(Value::as_str) == Some("vault_copy_verify_start")
+        {
+            reject_control_secret_request(request.value())?;
+            if !WINDOWS_VAULT_SESSIONS_ENABLED {
+                return Err("Windows vault sessions are unavailable".into());
+            }
+            let gate = self
+                .mutation_gate
+                .lock()
+                .map_err(|_| "Vault changes are unavailable")?;
+            let (_, runtime) = self.resolve(request.value())?;
+            let (result, release) =
+                runtime.prepare_windows_vault_copy_verification(request.value())?;
+            drop(gate);
+            if let Some(release) = release {
+                let _ = release.send(());
+            }
+            return Ok((result, false));
+        }
+        if matches!(
+            request.value().get("action").and_then(Value::as_str),
+            Some("vault_copy_start" | "vault_move_start")
+        ) {
+            reject_control_secret_request(request.value())?;
+            if !WINDOWS_VAULT_SESSIONS_ENABLED {
+                return Err("Windows vault sessions are unavailable".into());
+            }
+            let gate = self
+                .mutation_gate
+                .lock()
+                .map_err(|_| "Vault changes are unavailable")?;
+            let (_, runtime) = self.resolve(request.value())?;
+            let (result, release) = runtime.prepare_windows_vault_copy(request.value())?;
+            drop(gate);
+            if let Some(release) = release {
+                let _ = release.send(());
+            }
+            return Ok((result, false));
+        }
         let session_action = request
             .value()
             .get("action")
             .and_then(Value::as_str)
-            .is_some_and(|action| matches!(action, "vault_unlock" | "vault_lock" | "vault_forget"));
+            .is_some_and(|action| {
+                matches!(
+                    action,
+                    "vault_unlock" | "vault_unlock_offline" | "vault_lock" | "vault_forget"
+                )
+            });
         if !session_action {
             return self.handle(request.value());
         }
@@ -311,6 +402,70 @@ impl WindowsProfiles {
             return Err("Windows vault sessions are not available yet".into());
         }
         self.dispatch_vault_session(request)
+    }
+
+    fn dispatch_vault_create(
+        &self,
+        request: windows_vault_requests::create_requests::VaultCreateRequest,
+    ) -> Result<(Value, bool), String> {
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Vault changes are unavailable")?;
+        let (profile, runtime) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            let profile = request
+                .target
+                .profile_id
+                .as_deref()
+                .or(state.registry.selected())
+                .ok_or("No active account is selected")?
+                .to_owned();
+            if state
+                .registry
+                .profiles()
+                .get(&profile)
+                .is_none_or(|record| record.removed())
+            {
+                return Err("Account has been removed".into());
+            }
+            let runtime = state
+                .runtimes
+                .get(&profile)
+                .cloned()
+                .ok_or("Unknown profile_id")?;
+            (profile, runtime)
+        };
+        let _credential_operation = runtime
+            .vault_credential_operation
+            .lock()
+            .map_err(|_| "Vault credential changes are unavailable")?;
+        let prepared = runtime.prepare_windows_vault_create(request)?;
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state
+                .runtimes
+                .get(&profile)
+                .is_none_or(|active| !Arc::ptr_eq(active, &runtime))
+            {
+                return Err("The vault account runtime changed".into());
+            }
+            runtime.check_vault_preparation(&prepared)?;
+            // Write the historical encrypted-location exclusion BEFORE
+            // any live route can expose a native decrypted identity.
+            let next = state
+                .registry
+                .with_reserved_vault(&profile, prepared.reservation.clone())?;
+            self.persist(&next)?;
+            state.registry = next;
+        }
+        Ok((runtime.publish_windows_vault_unlock(prepared)?, false))
     }
 
     // The public action gate is deliberately outside this shared implementation.
@@ -325,6 +480,44 @@ impl WindowsProfiles {
             .lock()
             .map_err(|_| "Vault changes are unavailable")?;
         match request {
+            windows_vault_requests::session_requests::VaultSessionRequest::OfflineUnlock {
+                target,
+                mut password,
+                pin,
+            } => {
+                let runtime = {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    let profile = target
+                        .profile_id
+                        .as_deref()
+                        .or(state.registry.selected())
+                        .ok_or("No active account is selected")?;
+                    if state
+                        .registry
+                        .profiles()
+                        .get(profile)
+                        .is_none_or(|p| p.removed())
+                    {
+                        return Err("Account has been removed".into());
+                    }
+                    state
+                        .runtimes
+                        .get(profile)
+                        .cloned()
+                        .ok_or("Unknown profile_id")?
+                };
+                let _operation = runtime
+                    .vault_credential_operation
+                    .lock()
+                    .map_err(|_| "Vault changes are unavailable")?;
+                Ok((
+                    runtime.unlock_windows_cached_vault(&target, &mut password, pin.as_ref())?,
+                    false,
+                ))
+            }
             windows_vault_requests::session_requests::VaultSessionRequest::Unlock {
                 target,
                 mut credential,
@@ -451,7 +644,8 @@ impl WindowsProfiles {
     }
 
     pub(super) fn handle(&self, request: &Value) -> Result<(Value, bool), String> {
-        reject_secret_request(request)?;
+        runtime_mode()?.validate_request(request)?;
+        reject_control_secret_request(request)?;
         let action = request
             .get("action")
             .and_then(Value::as_str)
@@ -465,18 +659,17 @@ impl WindowsProfiles {
                 .selected()
                 .is_none();
             if no_active_account {
-                return Ok((
-                    json!({
-                        "connected":false,
-                        "offline":false,
-                        "mounted":false,
-                        "account_switch_supported":true,
-                        "accounts_empty":true,
-                        "agent_version":env!("CARGO_PKG_VERSION"),
-                        "session_cleanup_uncertain":false
-                    }),
-                    false,
-                ));
+                let mut status = json!({
+                    "connected":false,
+                    "offline":false,
+                    "mounted":false,
+                    "account_switch_supported":true,
+                    "accounts_empty":true,
+                    "agent_version":env!("CARGO_PKG_VERSION"),
+                    "session_cleanup_uncertain":false
+                });
+                windows_headless::annotate_status(&mut status, runtime_mode()?);
+                return Ok((status, false));
             }
         }
         match action {
@@ -527,13 +720,101 @@ impl WindowsProfiles {
                 }
                 Ok((
                     json!({
-                        "account_removal_supported": true,
+                        "account_removal_supported": !mount_only(),
                         "selected": selected,
                         "items": items,
                         "removed_items": removed_items
                     }),
                     false,
                 ))
+            }
+            "windows_recovery_retry" => {
+                let (id, runtime) = self.resolve(request)?;
+                if self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?
+                    .registry
+                    .selected()
+                    != Some(id.as_str())
+                {
+                    return Err("The selected account changed; review saved edits again".into());
+                }
+                // Do not hold broker mutation/state locks through a file
+                // transfer. Runtime generation/root fences govern the admitted
+                // operation, and account shutdown must remain able to revoke it.
+                runtime.handle_request(request)
+            }
+            "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if action != "guest_permissions"
+                    && self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?
+                        .registry
+                        .selected()
+                        != Some(id.as_str())
+                {
+                    return Err("The selected account changed; review guest access again".into());
+                }
+                runtime.handle_request(request)
+            }
+            "sharing_capabilities"
+            | "sharing_inventory"
+            | "sharing_owned_settings"
+            | "sharing_owned_update"
+            | "sharing_owned_revoke"
+            | "sharing_permissions"
+            | "sharing_recipients"
+            | "sharing_invite"
+            | "sharing_update"
+            | "sharing_revoke"
+            | "sharing_link_create"
+            | "sharing_link_revoke" => {
+                let parsed = crate::sharing_wire::Request::parse(request)?;
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if parsed.mutating()
+                    && self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?
+                        .registry
+                        .selected()
+                        != Some(id.as_str())
+                {
+                    return Err("The selected account changed; review sharing again".into());
+                }
+                runtime.handle_request(request)
+            }
+            "windows_device_cache_quota_set" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if request.get("profile_id").and_then(Value::as_str) != Some(id.as_str())
+                    || self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?
+                        .registry
+                        .selected()
+                        != Some(id.as_str())
+                {
+                    return Err(
+                        "The selected account changed; review storage settings again".into(),
+                    );
+                }
+                runtime.handle_request(request)
             }
             "account_select" => {
                 let _gate = self
@@ -553,6 +834,26 @@ impl WindowsProfiles {
                 state.registry = next;
                 // Selection neither revokes credentials nor drains any runtime.
                 Ok((json!({}), false))
+            }
+            "vault_list" => {
+                // Hold selection/removal stable through read-only publication.
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Encrypted folder browsing is unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Encrypted folder browsing is unavailable")?;
+                    if state.registry.selected() != Some(id.as_str()) {
+                        return Err(
+                            "Encrypted folder browsing requires the selected account".into()
+                        );
+                    }
+                }
+                Ok((runtime.browse_windows_vault(request)?, false))
             }
             "account_rename" => {
                 let _gate = self
@@ -794,12 +1095,15 @@ impl WindowsProfiles {
                 state.runtimes.insert(id.clone(), runtime);
                 Ok((json!({"id":id}), false))
             }
-            "configure" | "configure_root" => {
+            "configure" | "configure_root" | "mount" => {
                 let _gate = self
                     .mutation_gate
                     .lock()
                     .map_err(|_| "Account changes are unavailable")?;
                 let (id, runtime) = self.resolve(request)?;
+                if action == "mount" && request.get("cloud_root").is_none() {
+                    return runtime.handle_request(request);
+                }
                 let path = request
                     .get("cloud_root")
                     .and_then(Value::as_str)
@@ -1190,6 +1494,131 @@ pub(super) fn serve_profiles() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_edit_retry_must_target_the_selected_account_before_dispatch() {
+        let other = "profile-0123456789abcdef0123456789abcdef";
+        let registry = Registry::decode_or_default(None)
+            .unwrap()
+            .with_added(other, "Synthetic Work")
+            .unwrap()
+            .with_selected("default")
+            .unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let vaults = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+        let (default_runtime, _) = super::super::tests::synthetic_profile_runtime(
+            "default",
+            Some(admissions.clone()),
+            vaults.clone(),
+        );
+        let (other_runtime, _) =
+            super::super::tests::synthetic_profile_runtime(other, Some(admissions), vaults);
+        let broker = WindowsProfiles::for_synthetic_lifecycle_fixture(
+            registry,
+            vec![default_runtime, other_runtime],
+        )
+        .unwrap();
+        let mut request = json!({"action":"windows_recovery_retry","profile_id":other,
+            "expected_generation":1,"expected_recovery_scope_token":"a".repeat(64),
+            "record_id":"aabbccdd","generation":1});
+        assert_eq!(
+            broker.handle(&request).unwrap_err(),
+            "The selected account changed; review saved edits again"
+        );
+        request["profile_id"] = json!("default");
+        assert!(
+            broker
+                .handle(&request)
+                .unwrap_err()
+                .contains("Connect this account")
+        );
+        broker.stop_all().unwrap();
+    }
+
+    #[test]
+    fn broker_routes_strict_vault_listing_to_exact_selected_runtime() {
+        let registry = Registry::decode_or_default(None).unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let (runtime, _) = super::super::tests::synthetic_profile_runtime(
+            "default",
+            Some(admissions),
+            Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+        );
+        let broker =
+            WindowsProfiles::for_synthetic_lifecycle_fixture(registry, vec![runtime]).unwrap();
+        let request = json!({"action":"vault_list","profile_id":"default","expected_auth_generation":1,"space_id":"space","root_path":"/Vault","root_resource_id":"root","path":"/"});
+        // Signed-out fixtures reach the dedicated read-only handler, which
+        // refuses before any remote or native enumeration work.
+        assert_eq!(
+            broker.handle(&request).unwrap_err(),
+            "Encrypted folder browsing is unavailable; reconnect and unlock this location"
+        );
+        let mut invalid = request.clone();
+        invalid["offline"] = json!(false);
+        assert_eq!(
+            broker.handle(&invalid).unwrap_err(),
+            "Invalid encrypted folder browsing request"
+        );
+        invalid = request;
+        invalid["profile_id"] = json!("profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert!(broker.handle(&invalid).is_err());
+        broker.stop_all().unwrap();
+    }
+
+    #[test]
+    fn broker_admits_only_valid_public_link_password_requests_to_the_selected_runtime() {
+        let registry = Registry::decode_or_default(None).unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let vault_sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+        let (runtime, _) = super::super::tests::synthetic_profile_runtime(
+            "default",
+            Some(admissions),
+            vault_sessions,
+        );
+        let generation = runtime
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let broker =
+            WindowsProfiles::for_synthetic_lifecycle_fixture(registry, vec![runtime]).unwrap();
+        let valid = json!({
+            "action":"sharing_link_create",
+            "profile_id":"default",
+            "expected_auth_generation":generation,
+            "space_id":"space-1",
+            "path":"/folder",
+            "expected_item_id":"item-1",
+            "link_type":"view",
+            "password":"synthetic-link-password"
+        });
+        // The account-state gate is reached, proving the secret-bearing
+        // request passed broker admission; the offline synthetic runtime then
+        // refuses it before constructing a network client.
+        assert_eq!(
+            broker.handle(&valid).unwrap_err(),
+            "The account changed; refresh sharing before continuing"
+        );
+
+        for invalid in [
+            json!({
+                "action":"sharing_link_create",
+                "profile_id":"default",
+                "expected_auth_generation":generation,
+                "space_id":"space-1",
+                "path":"/folder",
+                "expected_item_id":"item-1",
+                "link_type":"view",
+                "password":"x".repeat(73)
+            }),
+            json!({"action":"sharing_invite","profile_id":"default","password":"synthetic"}),
+            json!({"action":"vault_unlock","profile_id":"default","password":"synthetic"}),
+        ] {
+            let error = broker.handle(&invalid).unwrap_err();
+            assert_ne!(
+                error,
+                "The account changed; refresh sharing before continuing"
+            );
+        }
+    }
 
     #[test]
     fn source_separation_refuses_cross_profile_and_same_account_drive_overlap() {

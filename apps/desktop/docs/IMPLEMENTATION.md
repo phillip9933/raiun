@@ -1,5 +1,41 @@
 # Desktop implementation status
 
+## Current candidate — 3 November 2026
+
+The canonical Linux/Windows GUI and headless CLI source is consolidated in the
+Desktop coordinator's worktree. Ordinary Windows file operations and online
+encrypted file/folder create, save, replacement, rename/move, file deletion and
+empty-directory deletion are connected. Cached encrypted access now connects
+protected queued file saves, creation, file rename/delete, bounded queued subtree
+retarget and explicit online reconciliation through SDK and native verification.
+Only its actual supported operations are advertised; existing-folder rename/delete
+and replacement-style editors remain online-only. See [current parity status](GUI-PARITY.md)
+for bounds and actual validation scope.
+
+The unsigned Linux GUI/CLI packages are prepared from `777bc3d` and passed
+signed-out startup, normal quit and CLI help/version checks. Later source changes
+are confined to Windows. The Windows `bb972ad` installer was installed in the
+owner's original profile with exact payloads and retained settings/recovery;
+GUI/Agent startup and a new file's initial remote creation passed. The following
+edit arrived before native placeholder completion and remains safely retained.
+The first failed workflow receipt is preserved; file-update acceptance is pending.
+
+An explicit saved-edit retry now connects an interrupted, remote-verified ordinary
+Personal create to a new protected conditional edit of the same physical file.
+It verifies the original resource/version and current account/root/ancestry,
+then verifies the edited cloud bytes before native completion. The original body
+is retained with a distinct linked superseded history, never acknowledged as the
+edited body. A changed file, remote version or binding refuses and keeps recovery.
+A completed historical commit link does not claim a fresh remote/native check.
+The held create producer remains closed for its connection; normal reconnect can
+restore it only after authenticated recovery is resolved. No root reset is used.
+
+Affected compilation and formatting are the source gates. The corrected Windows
+installer and the same retained file workflow still require actual execution;
+no native acceptance is inferred from source checks. No new release is published.
+Older sections below are historical implementation records, not current activation
+or remaining-work claims.
+
 ## Current baseline and urgent patch — 27 October 2026
 
 Linux and Windows Desktop 0.7.0-beta.2 were published together. The owner requested
@@ -3151,3 +3187,676 @@ they do not silently replace this tested candidate. The earlier browser preview
 was stopped after automatic approval denial; separate previously authorized
 packaged-app VM checks proceed independently. Test/harness failures are retained
 under the external task evidence directory rather than represented as passes.
+
+## Next-release GUI parity gate — 29 October 2026
+
+The owner's next-release requirement now includes full ordinary Windows file
+operations, Linux/Windows GUI feature parity and the practical headless CLI MVP.
+The [current parity matrix](GUI-PARITY.md) identifies source seams, missing
+capabilities and scoped native acceptance. [Issue #46](https://github.com/phillip9933/raiun/issues/46)
+tracks the shared release gate; successful Sharing or installer checks alone do
+not establish readiness. The independent CLI work owns ordinary provider
+streaming/namespace implementation; Desktop owns GUI/encrypted parity and
+security integration. Reviewed frozen patches preserve each checkout's work.
+
+The Sharing follow-up fixes canonical LibreGraph link names and redacts public
+capability-bearing OCS identifiers from debug output. Source checks cover the
+real response field and conflicting aliases; corrected-package confirmation is
+still required. A prior explicitly approved empty-folder live test confirmed
+protected creation, name/access changes and exact revocation, preserving the
+other grant and leaving the folder empty. Its creation acknowledgement was
+incorrectly uncertain before the name parser fix; that failure is retained.
+
+At source `77ba21c`, Linux packages passed isolated launch/normal Quit and the
+Windows native suite and synthetic 0.7.4-to-0.7.5 installed upgrade passed. The
+Windows run used a hosted interactive administrator, not an ordinary-user
+laptop. These are regression baselines, not full operation or GUI parity proof.
+
+### Windows encrypted-folder browsing integration (29 October 2026)
+
+The local candidate now adds online, read-only encrypted directory browsing to
+Windows using the existing identity-bound vault reader. Selected account,
+authentication generation, physical registered root and unlock epoch are checked
+before publication. Lock/account transitions clear pending names in the UI.
+Root inspection and listing share a twenty-second metadata budget, preserving
+shorter outer deadlines and rejecting expired or rotated-session results.
+Native writes, offline pins and cross-vault copy are not enabled by this slice.
+
+All 43 frontend test files and the production build pass. Rust workspace tests,
+formatting and strict Linux/Windows cross-target Clippy pass; the deadline helper
+also received independent source review. These source checks do not establish
+positive native Windows browsing or complete GUI parity. That package acceptance
+and the broader full-operation integration remain open. Evidence is under
+`outputs/desktop-release-prep-20261029/gui-parity/browse-integration-r1/` outside Git.
+
+### Shared ordinary streaming composition (29 October 2026)
+
+The GUI branch now composes the frozen C13 ordinary streaming modules using
+verified non-overlap patches and selected native/control/agent hunks. Existing
+Sharing, cache, vault browsing and test-hardening changes remain. The full local
+workspace passes 1,298 cases with 14 existing ignores, formatting and strict
+Linux/Windows cross-target Clippy. No new dependencies or lockfile changes.
+
+This composition does **not** enable streamed recovery in the GUI factory.
+Default GUI session bootstrap uses a protected owner-only directory with no
+inheritance, while the current streaming parent requires the modern inheritable
+layout. A separate pinned compatibility admission is required before activation;
+existing ACLs and legacy records must not be repaired, adopted or migrated.
+
+The independently tested C13 diagnostic passed four 17-MiB-plus existing-file
+cases across separate focused native Windows runs: Personal/Spaces saves and
+Personal/Spaces permission refusal with retained edits through restart. These
+results do not establish upgraded-GUI storage compatibility, replacement saves,
+namespace CRUD, encrypted writes or full parity. Evidence is outside Git in
+`outputs/desktop-release-prep-20261029/integration/c13-gui-compose-r1/` and
+`outputs/headless-mvp-acceptance-20261029/windows-candidate13/`.
+
+## Rename root boundary — 30 October 2026
+
+The shared Engine and direct OpenCloud rename entry points reject empty or
+slash-only source and destination paths before backend discovery or metadata
+work. A destination is the complete new name; renaming or replacing a Space
+root is unsupported. Ordinary paths retain conditional, non-overwriting MOVE
+behavior. This shared boundary fix does not establish mounted Windows rename
+handling, durable rename recovery or GUI file-operation parity.
+
+### GUI shared rename source integration, 31 October 2026
+
+The GUI now composes optional admitted namespace storage, a retained connected
+store accessor and authenticated metadata-only namespace health. Both provider
+and retained prepared-owner health protect cleanup/eviction/unregister decisions;
+unsupported retained history or corruption stays unknown. Completed records are
+resolved only under explicit namespace context, and cached status performs no
+disk reads. Existing saved sessions, legacy state/root compatibility, streamed
+retention/quota and save/Retry behavior remain unchanged.
+
+A partial binding candidate joins known source/parent opaque IDs to conservative
+same-batch hints without requests or mutation. It cannot construct parent or
+intent authority: fresh native/parent/owner/content proof and connected observer
+lifecycle wiring remain required. Source composition and helper controls do not
+establish automatic Explorer propagation or mounted GUI/CLI parity. The prior
+1,492-pass GUI source checkpoint and original scoped Windows native records are
+preserved separately; no new package, signing or publication is implied.
+
+The connected observer wrapper is also available as an explicit API: it checks
+current provider/root ownership around observation, drains before disconnect,
+and retains the full aggregate on pending cleanup. No production attach/poll
+caller is present. The copied headless fixture was held before compilation or
+execution and adapted to fresh explicit GUI-private state; it must not introduce
+headless context or current-user routing into the GUI. Actual native GUI observer
+and mounted rename acceptance remain pending.
+
+The corrected R49 fresh-parent bridge is composed as an explicit API, preserving
+source revisions and joining actual native parent/destination identity before
+reusing the existing one-send producer. It remains dormant. Pending content and
+callback-capture exclusion is a separate shared prerequisite before automatic
+GUI/CLI dispatch; no queue-empty or cached-unknown shortcut is permitted. Original
+Windows failure epochs and targeted corrected-parent controls retain their exact
+scope and do not qualify connected native entry or the next package.
+
+
+### One Desktop GUI/CLI source checkout, 31 October 2026
+
+The owner consolidated GUI and headless CLI development into the active Desktop
+checkout under `apps/desktop`. The previous headless checkout and its source,
+packages and failed/passing evidence remain frozen references. Desktop source
+stays at 0.7.5; this composition does not publish a new app version or release.
+GUI saved-session, legacy root/DPAPI compatibility, cache quota, retention,
+sharing, vault and save/Retry behavior remain the GUI baseline. Headless mode
+retains its distinct state/profile routes, transport policies and mount-only
+restrictions; folder sync, media jobs and vault operations remain disabled there.
+
+The shared SDK now includes explicit app-token authentication alongside default
+Bearer clients, the existing neutral origin/TLS policy and the GUI's sharing and
+vault metadata APIs. Streaming create helpers and their tests are composed as
+explicit APIs only: OpenCloud 9's public create-only atomicity is not qualified,
+and these helpers do not enable automatic creation. Headless packages, startup
+helpers, setup/test guides and a separately scoped license inventory now live in
+the same source tree. See [headless setup](HEADLESS.md), [Windows setup](HEADLESS-WINDOWS.md),
+[startup](HEADLESS-STARTUP.md) and [authentication](AUTHENTICATION.md).
+
+Unconfigured headless sign-in remains memory-only. An explicitly selected config
+uses `remember_login=true` and `auto_mount=true` defaults unless disabled. Linux
+remembered credentials are private plaintext files, while Windows uses isolated
+current-user DPAPI; GUI credential/default startup policy is unchanged. Explicit
+startup registration has separate platform effects described in the setup and
+privacy guides. Source composition does not install or start either mode.
+
+Historical Linux VM, Windows Cloud Files, DPAPI and SDK controls retain their
+exact original source/package scopes. They are not combined-candidate native
+acceptance, and original failed epochs remain failed. Final combined source and
+notice validation follow complete manifest/source integration. Shared pending-save
+and callback-capture exclusion remains a prerequisite before the dormant rename
+bridge can gain automatic GUI/CLI callers; no separate GUI shortcut or runtime
+writer activation is introduced here. Full Windows CRUD, replacement saves,
+large files, connected lifecycle and before-login startup remain separate gates.
+
+### R51 save/capture admission foundation
+
+Close-capture accounting and a retained-owner content-health interface are being
+qualified separately from connected rename dispatch. The close-only permit starts
+before native callback validation and spans durable capture/handoff. Clean closes
+do not change its mutation epoch; dirty closes advance it before body capture.
+Unknown/error bookkeeping fails closed for future admission without suppressing
+save recovery. No bookkeeping mutex crosses I/O. A local dispatch claim supplies
+no remote atomicity guarantee.
+
+The content query avoids the legacy body-decrypting recovery decoder. It treats
+any retained legacy content conservatively as nonclean, even if historical local
+completion may exist, and reads V2 metadata under an existing quota lease without
+creating or repairing state. Unsupported/unknown results refuse admission. Exact
+source, compile, independent review and new-cohort receipts determine which
+foundation controls passed. The connected producer is unchanged and held until
+both entries use these capabilities before HTTP and publication, revalidate
+through native proofs, and preserve uncertainty after any possibly sent request.
+Full GUI/CLI operations and restart/boot acceptance remain open; sync is deferred.
+
+### R52 content-health fixture correction
+
+The first R51 filesystem cohort failed before its intended checks: two fixtures
+created unregistered journal scopes, and the synthetic protector omitted the
+directory policy required by quota inventory. The original three failures and six
+separate pure tracker passes remain consumed and preserved. R52 replaces only
+the affected fixture selectors with new ones using fresh private state, genuine
+scope registration, and an exact-root DPAPI-backed counting protector. It keeps
+the orphan, incomplete-stage, missing-quota and corrupt-evidence refusal checks.
+Production source and the connected producer are unchanged. The admitted R52
+cohort passed all three metadata DPAPI controls (PID 540). The original R51
+filesystem failures remain failed. These passes qualify only the reader controls,
+not the save/capture admission guard, connected rename workflow, GUI/CLI operation
+parity or restart/boot acceptance.
+
+### R53 legacy history compatibility
+
+Completed legacy `.edit` bodies remain retained after their local acknowledgment.
+The lightweight content query therefore continues to report them conservatively
+as nonclean. A separate explicit compatibility query uses the existing bounded
+full-authentication decoder to distinguish valid locally acknowledged history
+from pending or uncertain work. It decrypts and hashes the bounded legacy body,
+zeroizes it, then authenticates the recovery event chain. This is an owner-thread
+operation outside callbacks, backend leases and HTTP, and is not described as a
+body-free query. V2 metadata and every selected legacy scope share one work
+allowance under existing quota handling. Missing, corrupt, incomplete or exhausted
+evidence stays unavailable; history is never deleted, repaired or retargeted.
+This supports normal upgrade classification within the established bounds. Shared
+connected-entry admission, final-send ordering, caller wiring and native acceptance
+remain separate requirements; MVP is incomplete and sync is deferred.
+
+### R54 legacy compatibility fixture quota correction
+
+R53's three guarded controls failed at the first coordinated legacy append, before any compatibility-reader assertion. Its original source, logs, binary and failed 0/3 receipt remain retained. Static inspection identifies an impossible fixture quota: append_edit reserves MAX_SEALED_BYTES (16 MiB body + 256 KiB metadata + 64 KiB overhead = 17,104,896 bytes), exceeding R53's entire 16 MiB state allowance. The exact first internal failure was not instrumented.
+
+R54 uses separately named selectors and fresh retained DPAPI cases with a 64 MiB state allowance, plus an explicit reservation/headroom assertion before fixture construction. Production admission, compatibility API, strict no-body reader, decoder, native producer and quota rules are unchanged. The admitted R54 cohort passed all three bounded authenticated legacy-reader controls (PID 18068), with zero failures. The original R53 three-control failure remains failed and preserved. The typed readback/local-ack fixtures qualify history classification only; they are not actual native completion or connected guard acceptance. No rename-entry guard or caller is wired here; expanded MVP acceptance remains open and sync remains deferred.
+
+### R55 explicit save/rename admission integration (component validation only)
+
+Both explicit file-rename entries now retain one close-capture ticket before parent/session HTTP and share one private admitted core. The direct entry validates its supplied store against the retained factory's exact scope, protector, policy and persistent quota-file identity. Bounded authenticated recovery probes run outside backend leases and callbacks, before publication and after pin waits. After own Pending publication, only content recovery is queried, so the attempt cannot self-block on its namespace row. Early no-publication deferral is distinct from post-publication retained admission failure.
+
+Remote and native-local adapters check the same ticket around long waits. The live remote adapter rechecks current owner/cancel/location authority and consumes one send claim inside the SDK hook after its final proofs and request construction, immediately before execute. Unsupported adapters refuse guarded sends without falling back to an earlier legacy send boundary. Capture is never disabled and no tracker mutex spans disk or HTTP.
+
+Completion has a separate one-use short-lock ordering claim immediately before the real durable journal callback. A close admitted before that claim prevents local acknowledgment and retains RemoteVerifiedLocalPending; native identity update may already have occurred, so this does not mean no native side effects. A close admitted after the claim is ordered after that completion attempt and continues capture; later uncertainty never erases factual durable events. These are local ordering points, not remote atomicity, replay or rollback authority.
+
+Fresh component and loopback controls are separate from historical runs. They qualify guard helpers and SDK boundaries only; neither real ConfiguredRootConnection public entry nor mounted native completion has been executed by these controls. Existing native proofs, recovery safeguards, runtime caller/lifecycle activation, packages, expanded MVP and sync remain separate gates. The initial prefreeze fixture compile errors are retained; no original failure is relabeled.
+
+### R56 final-proof fixture correction
+
+The original frozen R55 cohort remains 12 passed / 1 failed: ten guard/live-adapter controls and two SDK send-boundary controls passed, while the combined negative-proof test failed at its first root-counter assumption before reaching its source subcase. Its exact source, binary and failure packet are retained. Root request 6 is a missing-destination fallback permission check; request 7 is the actual final configured-root identity validation. Request counts and callback/MOVE assertions after the failed assertion were not captured by that test.
+
+R56 replaces that failed test in current source with two separately named independent controls, targeting final root check 7 and source check 3 and asserting their proof counts, conflict refusal, no send claim and no MOVE. Production guard, SDK, native/coordinator/tracker and Cargo.lock are unchanged from frozen R55. The two distinct R56 SDK controls passed in the admitted cohort (PID 15832, 2 passed / 0 failed), targeting the final root check 7 and source check 3. The twelve scoped R55 passes are retained without rerun, while its original failed combined proof control remains failed. These are component controls: actual public native-entry executions remain zero, and no Cloud Files registration or real server test occurred. Mounted public-entry/native acceptance, held-dispatch interoperability, caller/lifecycle activation, MVP and sync remain pending.
+
+### R57 held-dispatch health fixture scope
+
+The admitted R57 cohort passed both fresh guarded DPAPI controls (PID 4704, 2 passed / 0 failed, 0.53 seconds) using the real retained prepared provider, its namespace-rename factory and an actual live FileRenameLease. No rerun occurred during source integration. They compare two factory bindings and keep the exclusive dispatch lease alive across whole-history and authenticated content-only health reads. The completed-legacy case requires own Pending namespace to keep whole history unresolved while full body authentication reports content clean. The pending-content case must remain nonclean. Both preserved the checked protected entry set, lengths and bytes and the pristine Pending record; timestamps were not asserted. Typed legacy ACK is authenticated synthetic history, not native completion.
+
+Production provider, guard, SDK, native code and Cargo.lock are unchanged. Original R51/R53/R55 failures and later scoped R56 passes remain separate. R57 does not register Cloud Files, contact a server, execute either ConfiguredRootConnection public entry or activate runtime callers. Actual public-entry fixtures require the retained namespace factory and real capture owner; historical arbitrary-store/streamed-only native fixtures cannot be rerun unchanged to establish acceptance. A separate output receipt records exact readiness requirements.
+
+### Upload responsiveness follow-up — 1 November 2026
+
+Ordinary online directory listings can bypass a busy Engine metadata-publication
+lock using the same root, parent, encryption and bounded-list checks. The bypass
+does not publish or evict cache metadata and refuses offline fallback; pending
+local edits retain their existing overlay. Normal acquired-lock publication and
+offline behavior remain unchanged. A proposed separate Linux listing pool was
+omitted after review: the current four synchronous mount callbacks already share
+four workers, so the proposed saturation test used a producer topology that does
+not occur in normal dispatch. Callback saturation can still delay browsing;
+background upload handoff remains necessary to address that limit.
+
+This is a source-level responsiveness improvement, not parallel uploading or
+proof that the reported Dolphin hang is fixed. Upload completion remains
+synchronous and verified. Durable background admission, pending-create reads,
+uncertain-send recovery and native/package acceptance remain separate work.
+The owner's NAS-wide outage also affected the web client; its blocked Unraid
+shared-folder workers were investigated separately, and the owner reports
+stability after upgrading from 7.3.2 to 7.3.4. This is not Desktop acceptance or
+proof of a single cause for the earlier upload errors.
+
+### Durable Linux Desktop create uploads — unpublished candidate
+
+The Linux Desktop mount uses a durable queue for new ordinary files when its
+account cache is available, with exactly two account-owned upload workers.
+Headless mount-only mode and existing-file/vault saves retain their previous
+paths. An unavailable cache preserves the established synchronous online mount;
+`RAIUN_DISABLE_CREATE_HANDOFF=1` also selects that path for troubleshooting.
+Directories are still created synchronously.
+
+While a new file is open, flush/fsync secures its private local working copy and
+ownership marker. The descriptor remains editable, including repeated flushes
+from duplicated descriptors. The final kernel RELEASE closes the local writer,
+freezes its actual bytes, then performs the existing one-ID Cache admission and
+receipt protocol. Local acceptance does **not** mean cloud delivery. RELEASE
+also occurs after application exit/crash and does not certify a complete or
+valid application document. Errors during RELEASE cannot reach the returning
+close call: failed admission retains readable copies in Saved upload copies,
+with persistent recovery warnings and a best-effort failed Transfers entry.
+Unclosed working markers surviving daemon restart are read-only recovery; they
+are never automatically adopted into an upload. Legacy V2 recovery is unchanged.
+
+Handed-off pending files remain readable locally. Their paths and ancestors
+cannot be edited, renamed or deleted while delivery is unresolved; a fresh
+writable open can use the normal conditional-save path after verification.
+Closed queued copies use the configured offline-cache allowance and require
+space for the original spool and immutable queue copy. Editable local working
+copies retain the existing disk-space/open-handle limits and are not owned by
+cache eviction. The UI distinguishes local working copies, queue admission,
+active delivery and uncertain outcomes. Legacy retry never replays a visible
+new-create job; Save local copy preserves the retained original.
+
+The explicit server policy retains the existing ordinary-create contract:
+fresh account/root/ordinary-parent/absence checks and a root-bound conditional
+PUT. Concurrency is limited to two; a durable one-use claim prevents automatic
+replay after an ambiguous send. OpenCloud's public create route is not certified
+as an atomic no-clobber operation against competing external writers. This queue
+does not strengthen that server guarantee. Each successful upload still needs
+independent full-byte, length, ID and revision verification before completion.
+Unknown outcomes retain local bytes for review rather than a blind retry.
+Pausing prevents new claims; an interrupted claimed operation may remain
+uncertain. Logout, unmount and shutdown cancel and join both workers before
+account teardown. A busy unmount leaves the drive attached with its uploader
+stopped until unmount can be retried; it does not silently restart it.
+
+Cache format 10 retains immutable custody receipts after clean-body eviction.
+Only locally acknowledged, fully verified new-create bodies qualify for cleanup;
+unresolved edits and legacy history do not. Existing offline pins or policies
+conservatively prevent cleanup across their scope, so the cache can still require
+attention at its limit. Mutation transactions reserve the writer before reading
+state; this fixes the reproduced SQLite WAL snapshot-upgrade failure without
+retrying a potentially sent upload. Downgrading a migrated cache to an older
+binary is unsupported. Windows cleanup helpers are source-checked, not newly
+native-tested.
+
+The final editable-save/final-RELEASE implementation passes a synthetic actual-FUSE
+check in an isolated Ubuntu VM: repeated writes, truncation, fsync, duplicated
+handles, final close, two held uploads, responsive reads/listings and independent
+byte verification. The exact unsigned Linux preview built from `30b4763` also
+passes disconnected Agent/CLI smoke checks, signed-out GUI rendering and normal
+Quit Raiun shutdown. Those are scoped component/package checks, not an installation
+on the owner's laptop or real-server throughput. The earlier prototype and failed
+GUI attempts remain separate evidence. The owner reports approximately 250 MB /
+211 files uploaded through the web UI in under a minute after the NAS recovered;
+the new uploader still needs measurement against that baseline.
+
+### Windows namespace integration — 1 November 2026 source checkpoint
+
+The unpublished candidate has an owner-thread file-rename worker using the
+original backend, identity catalog, account/token generation and physical root.
+Its current scope is a fresh, unambiguous ASCII Personal file rename within one
+parent. It invokes the guarded native/public entry and retains uncertainty;
+there is no automatic replay or recovery adoption. Headless streamed-save policy
+is unchanged. This does not implement Windows new-file creation, replacement,
+delete, Space operations or cross-parent moves.
+
+One dispatcher now owns notification attachment/polling and ordered routing,
+with a bounded cursor, checked shared record counter, command/save priority and
+sticky attention on uncertainty. The separately opted-in legacy directory route
+remains exclusive. Shared directory routing stays disabled. A new no-follow,
+metadata-only entry observation distinguishes plain entries from cloud-shaped
+entries without granting ownership, upload-completion or mutation authority.
+Future directory wiring must still independently admit and revalidate each
+ordinary directory; ignored cloud hints cannot become a healthy-upload claim.
+Completed directory history is authenticated under the original exact scope and
+shared limits; pending, corrupt or unknown history continues to block admission.
+
+Combined host validation passes 1,728 tests with 16 existing explicit ignores,
+plus strict Linux/Windows checks, formatting and Windows native compilation.
+The initial shared-target run accidentally reused an older Cloud Files artifact;
+its source-binding failure is retained. The corrected run explicitly executes
+all three new classifier cases and verifies their Windows binary symbols.
+These are source/component results. The original R58 native fixture setup failure
+remains failed; its corrected controls and actual owner-loop fixtures still need
+native execution under a normal standard-user session. Installed Windows package
+acceptance and expanded feature parity remain open. No new release is implied.
+
+### Windows new-file source integration — 2 November 2026
+
+The unpublished candidate now includes guarded creation of an ordinary file
+directly inside Personal or an existing managed Personal subfolder. It retains
+the complete original parent path and its identity/revision, connected root, prepared
+recovery provider, immutable snapshot, account/token generation and deadline
+through SDK upload/readback, native conversion and linked custody completion.
+Native ownership stays on the connection thread. Owned SDK tasks run on a joined
+two-thread executor with at most two outstanding tasks, including undrained
+replies; only one file-create operation is admitted per root. This improves the
+owner-thread structure, not Windows bulk-upload parallelism. Local capture,
+hashing and durable journal work are still synchronous bounded phases.
+
+Notification routing now validates the complete raw batch before live metadata
+classification. Personal/Spaces containers and cloud-shaped entries can be
+skipped without granting ownership or claiming completed uploads. Unsupported
+plain entries, missing or changed metadata and removals retain attention; this
+does not add deletion, creation of parent folders or Space-file creation support.
+
+Source checks pass 1,792 host cases with 17 explicit ignores, strict Linux and
+Windows checks, and Windows test compilation. The two public-entry create
+fixtures and full manager/worker upload-and-stop fixture are compiled, not
+executed. The latter's Windows-only test changes reuse the unchanged host
+baseline with explicit source proof.
+Existing-subfolder runtime wiring and its connected native acceptance case are
+compiled and source-checked. The new case requires its own native execution;
+the earlier root cases do not establish subfolder acceptance.
+
+Directory creation now has a separate owner/SDK phase foundation. Original
+directory pins, admission and journal custody stay on the connection thread;
+metadata, one MKCOL and verification use owned SDK tasks. The original prepared
+provider supplies directory storage. Cancellation is checked again after SDK
+metadata admission, immediately before MKCOL; cancellation after dispatch remains
+uncertain. The compatibility driver still blocks its caller. The Agent now
+schedules file and directory tasks on the same two joined workers, with separate
+permissions and one active candidate per root. A directory's original 30-second
+budget includes queue wait. Ambiguous deferral retains attention rather than
+starting a fresh attempt. Production creation remains disabled.
+
+Refresh, logout, sign-in, shutdown and root configuration now drain the original
+workers before changing account authority. Both connection close results must
+succeed after joining; refusal preserves the original session, root and recovery
+state. Account and worker locks do not span the drain. Exact generation/session
+checks reject stale completions; root configuration reserves admission through
+its persistence handoff. Nine focused Windows lifecycle tests are compiled, not
+executed. Connected directory-worker and exact-package acceptance remain open;
+revocation alone is not a completed drain.
+Owned file preparation and final refresh now each share one metadata deadline
+capped at 30 seconds. Previously, a stalled blocking metadata request could
+inherit the file job's remaining six-hour budget and delay the joined drain.
+The bounded clone preserves the original cancellation and owner checks; file
+body transfers retain their original total deadline. This bounds the wait,
+rather than interrupting an in-flight blocking request immediately. A real
+held-HTTP regression and full host suite passed. The final assertion-style-only
+revision reuses those executions with an exact equivalence proof; strict checks
+and Windows compilation passed on that revision. Native execution remains open.
+The ignored directory-worker case and panic-safe lifecycle test fixtures now
+pass Windows compilation and strict source checks. They have not run on a
+Windows device. Directory conversion deliberately retains its existing
+on-demand population policy; completion does not certify the whole directory
+as in sync. The earlier pinned device-test cohort remains unchanged.
+
+The normal headless streamed-recovery factory also has a compiled qualification
+case with fresh memory-only login and explicit mounting. It is not native
+acceptance or production activation: the CLI's existing writeback limit remains
+until its own save/restart, retained-custody and storage-policy checks pass.
+Production creation remains disabled. Native and exact-package acceptance,
+plus a verified create-only server contract, are still required: HTTP 201 and
+full readback alone do not establish atomic no-clobber semantics. No installed
+application or published release has changed.
+
+### Linux packaged headless acceptance — 2 November 2026
+
+The unsigned headless package built from consolidated source `92dc9d4` passed
+one native workflow with 13 asserted checks in a fresh isolated KVM guest as
+ordinary UID 1000 with no effective capabilities. The packaged CLI and Agent
+created their private state, signed in to a synthetic loopback account, mounted
+real FUSE, read Personal and Projects, and performed one revision-conditioned
+ordinary update with independent exact ETag/body readback. An open file caused
+an explicit busy-unmount refusal; closing it allowed normal unmount and stop.
+The opted-in synthetic login remained private, and a fresh Agent process
+restored it, mounted again and read the updated content. Folder-sync and
+desktop-autostart mutations remained refused in mount-only mode.
+
+All 23 owned processes reached terminal states, including the expected refused
+unmount command. No task mount or Raiun process remained. Actual guest shutdown,
+original QEMU process disappearance, closed SSH transport, absent image writers
+and unchanged original disk metadata were verified. The task's new disk and
+synthetic private state are retained. This is distinct from the earlier
+211-file internal test and signed-out package smoke. It does not establish GUI,
+boot-service, real-server throughput, broader file operations or Windows
+acceptance, and changes no installed host application or release.
+
+### Packaged GUI and Windows fixture checkpoint — 2 November 2026
+
+The unsigned 0.7.5 AppImage from `a54ecee` (runtime code `2978d8b`) is
+99,568,120 bytes, SHA256
+`e54cb4c08fb0f88d634db77bbd9cb1f8bf14b3a3f9af0892d9308d14a9768555`.
+Parent-reviewed Ubuntu 24.04 acceptance rendered the signed-out GUI with its
+matching packaged Agent, private child HOME and unchanged guest account HOME.
+One normal tray Quit exited both processes; actual guest shutdown and unchanged
+original images were verified. Signing, installation, upgrade and live-account
+acceptance remain separate; this establishes no Windows acceptance.
+
+The original Windows R58/R59 preflight listed all seven selectors; the first
+executed case failed with exit 101 at line 1185. The corroborated
+`SyntheticRootChanged` result identifies a directory-only fixture opener used
+for a file observation; that failure and six unrun cases remain preserved.
+The `b9c8ad1`/`8c3085f` corrections affect only Windows debug fixtures, preserving
+Linux code; strict default/synthetic source gates and Agent test compilation
+passed. The corrected R6 packet from `b9c8ad1` was transferred through private
+OpenCloud; Windows download and native results remain pending. Production
+activation, capabilities and the current MVP acceptance gaps are unchanged.
+
+
+### Normal Windows runtime activation — 2 November 2026
+
+Source `ebde91a` connects the reviewed clean ordinary Personal-file deletion owner
+and enables existing Personal file/mkdir SDK workers for normal GUI and CLI
+mounts. The CLI now activates existing streamed recovery. The native deletion
+owner retains original account/root/generation binding and protected one-attempt
+history; remote verification, native acknowledgement and actual local completion
+remain distinct. Revocation is published before fallible worker joins, retaining
+uncertain custody. Ordinary removal observations no longer disable later creation;
+they grant no mutation authority and still fence conflicting batch endpoints.
+
+Affected normal Windows Agent/CLI compilation and formatting passed. No additional
+tests or native executions were run for this composition. The current owner
+instruction limits this release phase to basic finished-candidate checks and
+withdraws the seven-case gate and repeated full suites. Existing tests, prior
+failures and evidence remain preserved. See GUI-PARITY.md for actual remaining
+feature gaps; this activation does not implement broad Space, folder mutation,
+replacement or encrypted equivalents. No new release or owner installation is
+claimed by this source checkpoint.
+
+
+### Windows Spaces namespace integration — 3 November 2026
+
+Local source through `3e912d9` extends the shared ordinary Personal pipeline to
+writable, unencrypted Spaces: new files, mkdir, clean-file deletion and same-parent
+ASCII file rename. The target Space/root comes from fresh actual managed namespace
+traversal and metadata; the verified Personal root still identifies the account.
+The conditional-delete SDK's earlier Personal-only gate was removed while its
+writable/encrypted/root/source checks remain. Final SDK send-admission callbacks
+stay local and perform no network reentry; remote qualification occurs beforehand.
+The composed Windows Agent/CLI compile and formatting passed, including the last
+narrow guard corrections and the empty-directory work below. No repeated full
+suite or expanded native matrix was run.
+
+The unsigned `d8233c1` Windows installer built and passed the basic same-user
+0.7.4-to-0.7.5 upgrade with retained synthetic DPAPI/settings/documents and normal
+Agent exit. The laptop installed and started the exact payload under its standard
+synthetic user. Its default browser also failed to appear when opened outside
+Raiun; current sign-in and file workflow remain unverified, with no proven app
+regression and no further account/browser setup loop. Newer Spaces source has not
+been delivered over that installed candidate. Broader folder, replacement-save and
+encrypted parity remain implementation work, not extra test gates.
+
+### Empty Windows directory deletion — 3 November 2026
+
+Source `6d29b26` adds deletion of an ordinary empty managed directory in Personal
+or a writable, unencrypted Space. The original native directory handle and exact
+file identity must remain clean; handle-based enumeration, the protected catalog
+and fresh remote listing must all exclude children. A typed directory intent uses
+one resource-ID DELETE with the actual strong directory ETag. Missing validators,
+unknown contents or uncertain completion refuse or retain custody. This is the
+same conditional-operation qualification as the shared Linux SDK, not a new
+server transaction or a recursive-delete feature.
+
+Native acknowledgement and positive local completion remain separate. Completion
+uses the documented zero flags and the original captured object kind; directory
+kind is never inferred from a zero-byte body. Source `1efde93` exposes the unchanged
+read-only emptiness helper for the sibling directory-rename implementation.
+Formatting and one composed normal Windows Agent/CLI compile passed. No new tests,
+native execution or package are claimed by this source checkpoint.
+
+### Windows replacement saves and vault creation — 3 November 2026
+
+Source `985392c` changes ordinary file deletion to release the local operation
+before selecting a cloud mutation. Positive original-key acknowledgement and
+deletion completion are required. Actual absence admits a conditional deletion;
+a new plain file at the original name instead captures a durable streamed body,
+conditionally writes the original remote resource and verifies its content before
+native publication. No deletion intent is recorded for that replacement branch.
+Unknown identity, open writers and uncertain outcomes retain custody and recovery.
+Completed-only observer metadata is bounded without imposing a lifetime save
+limit. Retiring a temporary source hint additionally requires actual source
+absence and an unbound admitted catalog name; Unicode alias uncertainty refuses
+that optional retirement. Native editor acceptance remains open.
+
+Source `1da7b8e` adds explicit new encrypted-folder creation through the existing
+owned secret broker. Fresh parent identity and account generation are required;
+the shared creation codec initializes and reads back its proof before session
+publication. The broker persists the historical encrypted-location exclusion
+before installing a native route. Creation does not opt into password storage,
+enable general encrypted writes or attach a sync pair. Partial remote folders
+remain on failure. Author formatting, TypeScript and affected Windows compilation
+passed; the composed source check follows integration of the directory-rename
+change. No new tests, native creation or replacement-save acceptance are claimed.
+
+### Composed Windows mutation checkpoint — 3 November 2026
+
+Source `0a93f7b` adds same-parent rename of a qualified empty ordinary managed
+directory. Fresh source/destination metadata, no catalog descendants and native
+handle enumeration establish the supported empty case. The SDK uses one
+resource-ID MOVE with the actual strong source ETag and overwrite disabled.
+After remote readback, a pinned positive-USN native metadata update and identity
+readback precede retiring the original catalog row. The final SDK send hook
+rechecks the actual pinned native identity, path, parent and USN without network
+reentry or enumeration. Nonempty subtrees and cross-parent moves are excluded.
+
+The composed source, including replacement saves and Windows vault creation,
+passed formatting and one normal Windows Agent/CLI compile (7.10 seconds).
+This is not a new package or native workflow result. The existing laptop
+installation remains the older unsigned `d8233c1` candidate.
+
+### Ordinary Windows moves and encrypted Copy — 3 November 2026
+
+Source `f8789e4` composes same-Space file moves, bounded clean directory subtree
+rename/move and clean cloud-only file metadata operations. Directory operations
+join at most 1,024 actual native, catalog and remote nodes, hold both parents and
+every child identity, stage all new protected rows before native updates and
+retain old rows until all native readbacks pass. Uncertain publication errors also
+retain original pins; duplicate ordinary resource aliases refuse catalog startup
+without rewriting evidence. A directory MOVE has the original source validator,
+overwrite disabled and captured parent conditions, with no aggregate subtree or
+final-parent transaction guarantee.
+
+Cloud-only file metadata operations require positive in-sync state, no modified
+ranges, original native identity/USN and unchanged remote ID/strong ETag/size.
+They read no content and do not mark unknown data clean. Resident-file moves reuse
+only exact live revision-bound content proofs, limiting full downloads to one
+source and one destination. A separate two-line publication correction retains
+the Personal account anchor while accepting the independently verified target
+Space/root.
+
+Explicit Windows cross-vault Copy reuses the shared 16-MiB copy protocol and
+existing jobs, with original installed routes, account/generation/root checks and
+cancel-before-join. Its Windows copy envelope stays in bounded zeroizing memory;
+only ciphertext reaches the private journal. Generic plaintext staging, offline
+writes, replay and retry paths are not enabled. Both source and destination are
+already unlocked online vaults, and Copy preserves the source.
+
+The combined normal Windows Agent/CLI compile, formatting and affected Linux SDK
+compile passed. No full suite or new native run was performed. These local
+sources have not replaced the installed `d8233c1` Windows candidate or the earlier
+Linux AppImage. Larger encrypted existing-file saves and the remaining encrypted
+operation gaps are implementation work, not additional test gates.
+
+
+### Streamed Windows encrypted existing-file saves — 3 November 2026
+
+Source `c95aa44` adds the complete encrypted existing-file save pipeline up to
+1 GiB. A separate full-vault-bound protected chunk store and explicit StreamedV1
+descriptor preserve the legacy small-body format and its 512-KiB limit. The
+original native handle, identity, positive USN, modified ranges and complete
+resident coverage are checked around capture. Durable enrollment and descriptor
+readback precede body capture; original-source postproof precedes committed
+manifest verification. Serialized epochs remain historical, never live authority.
+
+The online conditional overwrite consumes an authenticated one-shot reader,
+hashes the exact bytes used by the existing encoder and independently decrypts
+the returned ciphertext into a digest sink. Only ciphertext reaches private
+staging files. Original live account/vault/root and epoch admission remain;
+possible post-dispatch failures retain uncertain custody without automatic replay.
+The async HTTP client disables automatic request retries. Native completion and
+Lock cleanup use bounded hashing, and Save Copy retains one fixed operation
+deadline through authenticated reopen and no-clobber destination verification.
+The per-vault store admits at most 4 GiB and 4,096 entries, with no pending-edit
+eviction or conversion into ordinary recovery authority.
+
+The exact 21-file composition passed normal Windows Agent compilation and
+formatting; the canonical affected Linux Agent/CLI compilation also passed.
+Initial compiler failures remain retained. No extra suite, native run, package,
+owner installation or publication is implied. Encrypted child namespace writes,
+replacement editors and offline parity remain separate implementation gaps.
+
+
+### Windows encrypted file and folder creation — 3 November 2026
+
+Source `812d11f` connects new FILE/DIRECTORY creation through the normal
+Windows observer and joined SDK workers. One typed phase owner retains the
+original account, vault, opaque unlock epoch, registered root, parent and native
+identities. New regular files are limited to 1 GiB; their actual source bytes
+are privately captured and authenticated before a single conditional encrypted
+PUT and full authenticated readback. Folder MKCOL uses the original parent
+condition and a sealed readback proof. Native conversion/publication follows
+protected catalogue and hydration enrollment; factual completion supplies the
+normal cleanup receipt. Existing local children are preserved independently.
+
+The separate vault-specific DPAPI intent/history uses full-scope AAD and the
+unchanged protected snapshot codec. Durable attempts and uncertain publication
+never become automatic replay or ordinary recovery authority. Admission reopens
+the current root/vault custody; completed FILE history reauthenticates its stored
+body. First-open sharing/lock violations wait before capture with the original
+candidate and deadline. Other errors and all admitted uncertainty preserve
+original custody. Ordinary factory checks remain unchanged; a local dispatch
+preference prevents unnecessary vault-discovery requests for ordinary creates.
+
+Lock cleanup now pins and checks the exact retained route's on-disk local
+inventory before dehydration and after key clearing. It reads metadata only,
+refuses unknown/plain/foreign/dirty entries and enumeration errors, and never
+adopts or deletes those bytes. The inventory is bounded to 10,000 entries,
+64 descendant levels and 16 MiB of component storage.
+
+The 22-file composition and narrow first-pin busy correction passed normal
+Windows Agent/CLI compilation and formatting. The canonical affected Linux
+Agent/CLI compile and format checks passed too; exact unchanged bytes reuse
+those results. Initial compiler failures remain retained. No suite, native
+workflow, new package, owner installation, signing or publication is claimed.
+Encrypted rename/move/delete, replacement editors and offline parity remain
+implementation gaps.
+
+
+### Composed candidate delivery freeze — 3 November 2026
+
+Source `faf96c5` corrects the FILE/DIRECTORY create worker-parent proof. The
+previous code constructed an unconnected ownership object and then requested
+connected-owner validation, which would reject every proof. The replacement
+uses the retained read-only root inspection lease, actual cloud-root state, OS
+registration and exact native/opaque path ancestry. It creates no connection
+owner; the original live connection/capability stays with the caller. Affected
+Windows Agent/CLI compilation passed in 7.29 seconds and formatting in 1.98
+seconds. No native result is inferred from those checks.
+
+The completed composition is frozen for package delivery. Unfinished encrypted
+rename work remains in its independent dirty worktree and external WIP snapshot,
+including its unresolved custody compatibility. It is not part of this
+candidate. Remaining encrypted rename/move/delete, replacement-editor and
+offline gaps remain explicit limitations. Do not hold package production for
+further optional additions, broader suites or the laptop's fresh-profile browser
+problem. Packaging does not claim full parity, grant publication authority or
+turn compiled behavior into native acceptance.

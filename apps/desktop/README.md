@@ -14,7 +14,10 @@ OpenCloud/
 
 The 0.7.4 numeric version remains on the Beta update channel. Compatible installed clients can check for releases and explicitly download/install verified updates; see [Desktop updates](docs/DESKTOP-UPDATES.md) for channels and trust.
 
-The app provides an OpenCloud drive, folder sync, offline caching, encrypted file access, account controls, transfers and recovery. The Sync Folders workspace presents ordinary sync folders and upload-only media folders together; Sync Folders supports two-way and one-way directions, Photos/Videos filters and editable exclusions. Settings include Light/Dark/System themes, per-account colors, account rename/removal/restore and grouped storage, network and security controls. Windows uses an in-place installer upgrade by default. The owner verified the reconnect fix with both the Default and a newly added Windows account. These checks do not certify every native account/file-manager workflow or all advanced encrypted/offline behavior. Media import runs remain bounded by documented stability, file-size and conflict rules; source files stay in place and older cloud versions are not automatically retained. See the [beta changelog](CHANGELOG.md), [Sync Folders guide](docs/SYNC-FOLDERS.md) and [acceptance records](docs/MVP-ACCEPTANCE.md).
+See [authentication and compatibility](docs/AUTHENTICATION.md) for GUI and
+headless CLI authentication and the unpublished validation candidate.
+
+The app provides an OpenCloud drive, folder sync, offline caching, encrypted file access, account controls, transfers and recovery. The Sync Folders workspace presents ordinary sync folders and upload-only media folders together; Sync Folders supports two-way and one-way directions, Photos/Videos filters and editable exclusions. Settings include Light/Dark/System themes, per-account colors, account rename/removal/restore and grouped storage, network and security controls. Windows uses an in-place installer upgrade by default. Media import runs remain bounded by documented stability, file-size and conflict rules; source files stay in place and older cloud versions are not automatically retained. See the [beta changelog](CHANGELOG.md), [Sync Folders guide](docs/SYNC-FOLDERS.md) and [acceptance records](docs/MVP-ACCEPTANCE.md).
 
 ## Screenshots
 
@@ -24,6 +27,34 @@ Browser layout previews of the Desktop interface; no account connected. These sh
 | --- | --- |
 | <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/desktop-light.png" alt="Desktop light interface" width="420"> | <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/desktop-dark.png" alt="Desktop dark interface" width="420"> |
 
+## Headless CLI candidate
+
+The unpublished **0.7.5 source candidate** now keeps GUI and headless CLI code in
+one Desktop checkout and Cargo workspace. The earlier CLI checkout is a frozen
+reference, not a second active implementation. This consolidation does not publish
+a new release or change the GUI's saved sign-in, account storage or startup defaults.
+
+`raiun drive` controls a separate mount-only agent with isolated state and account
+routing. Its package contains only the Rust CLI and agent; see [Linux setup](docs/HEADLESS.md),
+[Windows setup](docs/HEADLESS-WINDOWS.md) and [startup](docs/HEADLESS-STARTUP.md).
+Browser PKCE prints a URL for manual opening, including the documented SSH forwarding
+flow; app-token sign-in uses hidden input or private stdin. Folder sync, media jobs
+and vault operations remain disabled in headless mode.
+
+Without a headless config, sign-in is memory-only and restart requires fresh login.
+Choosing configured operation opts into its policy: `remember_login` and `auto_mount`
+default to `true` in that explicit config; use `--no-remember-login` and
+`--no-auto-mount` during config creation, or set them to `false`, to disable them.
+Remembered headless credentials use private plaintext files on Linux and isolated
+current-user DPAPI on Windows. Startup registration is a separate explicit action.
+See [privacy](PRIVACY.md#headless-cli-candidate) before enabling persistence.
+
+The imported setup/test guides retain their original source versions and scoped
+acceptance records. Those records do not certify this combined candidate's native
+GUI/CLI behavior, boot startup or complete Windows file-operation parity. In
+particular, automatic namespace writes remain gated on the shared save/rename
+capture guard and the later connected-owner integration.
+
 ## Components
 
 - `raiun-core`: configuration validation, cloud backend contracts, namespace names.
@@ -31,15 +62,26 @@ Browser layout previews of the Desktop interface; no account connected. These sh
 - `raiun-engine`: SQLite inventories, baselines, verification, and transfer history.
 - `raiun-agent`: local control socket, background scheduler, browser sign-in, keyring.
 - `raiun-fuse`: Linux filesystem adapter with local write spooling.
-- `raiun-cli`: offline configuration commands and bounded media-destination
-  preview from an explicit JSON manifest, plus a bounded local `media-scan`
-  command. Neither imports, renames, or uploads files.
+- `raiun-cli`: isolated headless `drive` controls, offline configuration commands,
+  bounded media-destination preview from an explicit JSON manifest and local
+  `media-scan`. The preview and scan commands do not import, rename or upload files.
+- `raiun-headless`: strict nonsecret configuration and isolated persistence policy
+  shared by the CLI and its mount-only agent.
 - `desktop-shell`: Tauri 2 native tray with account settings, the unified Sync Folders
   workspace, conflict review, saved-copy recovery and transfers.
 - `raiun-vault`: streaming vault encryption/decryption, scoped unlock lifecycle,
   and portable directory validation. Explicit encrypted folder pairs use a
   separate verified backend; ordinary sync and the on-demand mount retain
   encrypted-area guards. See [encrypted sync](docs/ENCRYPTED-SYNC.md).
+
+## Shared visual design
+
+The [Raiun design reference](../../design/raiun/DESIGN-SYSTEM.md) defines neutral
+information panels, semantic status colors, account identity, light/dark tokens
+and a per-platform review scorecard. Use its [component catalog](../../design/raiun/reference.html)
+for comparison. Run `python3 scripts/design-tokens.py --check` from this directory;
+regenerate Desktop CSS and the catalog token embed with `--write` after token edits.
+Token checks do not certify runtime accessibility, keyboard operation or reflow.
 
 ## Build and test
 

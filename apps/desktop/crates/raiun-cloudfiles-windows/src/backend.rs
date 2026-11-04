@@ -63,6 +63,14 @@ pub struct PlaceholderChild {
     pub last_write_time: i64,
 }
 
+/// Read-only original route locator, never mutation or cleanup authority.
+#[cfg(windows)]
+pub struct VaultCleanupRootLocator {
+    pub(crate) identity: crate::OpaqueIdentity,
+    pub(crate) components: Vec<String>,
+    pub(crate) route: Vec<PlaceholderChild>,
+}
+
 /// Exact authenticated remote baseline needed to preserve one local edit for
 /// later conditional recovery. Paths here are virtual namespace paths, never
 /// host filesystem paths. A missing or weak ETag remains retainable but is
@@ -88,6 +96,22 @@ pub struct PlaceholderEditBinding {
 /// until native dirty accounting and every capture/callback guard have finished.
 #[cfg(windows)]
 pub trait ExistingVaultEditCapture {
+    /// Pure original-route/save-owner cancellation only; no key/lease/authority
+    /// escapes this callback. None keeps older adapters fail closed for streams.
+    fn stream_revocation(&self) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+        None
+    }
+    /// Additive >512KiB capture. The reader and original source verifier remain
+    /// borrowed until protected staged-body commit/readback has completed.
+    fn retain_streamed(
+        &self,
+        _payload: crate::vault_custody::ExistingVaultStreamedEditPayload,
+        _source: &mut dyn std::io::Read,
+        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
     fn baseline(&self) -> &crate::vault_custody::ExistingVaultEditBaseline;
     fn retain(
         &self,
@@ -273,6 +297,81 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     fn provider_scope(&self) -> &ProviderScope;
     fn root_identity(&self) -> ConfiguredRootIdentity;
 
+    /// Optional namespace-rename storage for this exact prepared account/root.
+    /// Implementations must opt in explicitly; storage alone grants no rename
+    /// admission or publication authority.
+    #[cfg(windows)]
+    fn file_rename_store(
+        &self,
+        _scope: &crate::EditJournalScope,
+        _authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>,
+        BackendError,
+    > {
+        Ok(None)
+    }
+
+    /// Optional directory journal from this SAME prepared account/root context.
+    /// Storage does not grant directory dispatch or native publication authority.
+    #[cfg(windows)]
+    fn directory_intent_store(
+        &self,
+        _scope: &crate::EditJournalScope,
+        _authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>,
+        BackendError,
+    > {
+        Ok(None)
+    }
+
+    /// A nonblocking cached count seeded by authenticated preflight. No disk,
+    /// body decryption or network work is permitted here. Unsupported, poisoned
+    /// or invalidated summaries return None, never a healthy zero.
+    fn cached_ordinary_pending_count(&self) -> Option<usize> {
+        None
+    }
+
+    /// Separate opt-in for the complete protected v2 capture pipeline. Legacy
+    /// providers cannot make a larger native read eligible by default.
+    #[cfg(windows)]
+    fn supports_streamed_capture(&self) -> bool {
+        false
+    }
+
+    #[cfg(windows)]
+    fn begin_streamed_job(&self) -> Option<StreamedRecoveryJob> {
+        None
+    }
+
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    fn stage_streamed_edit(
+        &self,
+        _binding: &PlaceholderEditBinding,
+        _root_identity: ConfiguredRootIdentity,
+        _local_file: crate::LocalFileIdentity,
+        _relative_path: &str,
+        _content_len: u64,
+        _job: &StreamedRecoveryJob,
+        _source: &mut dyn std::io::Read,
+        _cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<crate::StagedStreamedEdit, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    /// Caller still owns its binding/source/path guards and has revalidated
+    /// them after capture. This cannot reconstruct initial admission from disk.
+    #[cfg(windows)]
+    fn commit_streamed_edit(
+        &self,
+        _stage: crate::StagedStreamedEdit,
+        _cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<crate::InitialEditReceipt>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     /// Persist complete local bytes before a close callback is considered
     /// recovered. `binding` is obtained under the backend's revocation lease;
     /// the recovery implementation must validate its account/generation and
@@ -344,6 +443,30 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     /// are treated as unresolved by the native teardown path.
     fn has_unresolved(&self) -> Result<bool, BackendError>;
 
+    /// Read-only content-recovery admission check for this exact retained
+    /// account/root capability. Namespace operation history is intentionally
+    /// excluded. `false` is returned only after a bounded authenticated scan;
+    /// unsupported storage, corrupt/incomplete metadata, or exhausted limits
+    /// return `Unavailable`. Implementations must not create or repair state,
+    /// decrypt persisted content bodies, or return recovery authority here.
+    #[cfg(windows)]
+    fn has_unresolved_content(&self) -> Result<bool, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    /// Compatibility health that fully authenticates the retained legacy
+    /// content journal before using its terminal acknowledgement. Unlike
+    /// `has_unresolved_content`, this may decrypt legacy record bodies in
+    /// memory; it never returns those bodies or grants dispatch authority.
+    /// Unsupported storage, corrupt/incomplete evidence, or exhausted scan
+    /// budgets remain unavailable.
+    /// Call only from an owner-thread operation outside callbacks, backend
+    /// leases and HTTP; this is intentionally a bounded body-reading query.
+    #[cfg(windows)]
+    fn has_unresolved_content_authenticated_legacy(&self) -> Result<bool, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     /// Explicitly dispatch one previously selected recovered edit. This does
     /// not connect or start a provider; implementations resolve the record
     /// internally from this prepared exact account/root scope, persist an
@@ -357,6 +480,26 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         _approval: crate::ExplicitRecoveryApproval,
     ) -> Result<crate::ReconciliationOutcome, crate::JournalError> {
         Err(crate::JournalError::InvalidState)
+    }
+
+    /// Explicit recovery plus fresh remote readback authority for exact native
+    /// completion. Historical upload outcomes alone never authorize marking
+    /// local bytes clean. Older implementations safely return no proof.
+    fn dispatch_recovered_edit_verified(
+        &self,
+        record_id: &str,
+        generation: u64,
+        remote: &dyn crate::RecoveryRemote,
+        approval: crate::ExplicitRecoveryApproval,
+    ) -> Result<
+        (
+            crate::ReconciliationOutcome,
+            Option<crate::VerifiedEditReadback>,
+        ),
+        crate::JournalError,
+    > {
+        self.dispatch_recovered_edit(record_id, generation, remote, approval)
+            .map(|outcome| (outcome, None))
     }
 }
 
@@ -406,6 +549,11 @@ pub trait PreparedEnumeration {
     /// This does not change authenticated remote metadata or directory rights.
     fn file_read_only(&self, _child: &PlaceholderChild) -> bool {
         self.read_only()
+    }
+
+    /// Cached projections are partial and must keep on-demand population enabled.
+    fn completes_population(&self) -> bool {
+        true
     }
 
     fn children(&self) -> &[PlaceholderChild];
@@ -499,10 +647,99 @@ impl PreparedFetch for StagedFetch {
 }
 
 /// Cooperative cancellation signal associated with one native request.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CancellationToken {
     cancelled: Arc<AtomicBool>,
     deadline: Instant,
+    owner_cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+impl std::fmt::Debug for CancellationToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CancellationToken")
+            .field("deadline", &self.deadline)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Immutable transfer-job policy, separate from storage quota and fetch limits.
+#[derive(Clone, Copy, Debug)]
+pub struct StreamedRecoveryPolicy {
+    total_timeout: Duration,
+}
+
+impl StreamedRecoveryPolicy {
+    pub fn new(total_timeout: Duration) -> Result<Self, BackendError> {
+        if !(Duration::from_secs(60)..=Duration::from_secs(86_400)).contains(&total_timeout) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(Self { total_timeout })
+    }
+
+    pub fn total_timeout(self) -> Duration {
+        self.total_timeout
+    }
+}
+
+impl Default for StreamedRecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            total_timeout: Duration::from_secs(21_600),
+        }
+    }
+}
+
+/// Ephemeral deadline/cancellation only; never upload or native ACK authority.
+/// Clones retain the original deadline and cancellation state, including queue
+/// wait, independent readback and joined source shutdown.
+#[derive(Clone, Debug)]
+pub struct StreamedRecoveryJob {
+    cancellation: CancellationToken,
+}
+
+impl StreamedRecoveryJob {
+    #[cfg(test)]
+    pub(crate) fn for_test_timeout(timeout: Duration) -> Self {
+        Self {
+            cancellation: CancellationToken {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                deadline: Instant::now() + timeout,
+                owner_cancelled: None,
+            },
+        }
+    }
+    pub fn deadline(&self) -> Instant {
+        self.cancellation.deadline()
+    }
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+    pub fn is_stopped(&self) -> bool {
+        self.cancellation.is_cancelled() || self.cancellation.is_expired()
+    }
+    /// Borrow this job's original deadline and cancellation identity. This
+    /// grants no upload, native completion or restored session authority.
+    pub fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+    pub(crate) fn check(&self) -> Result<(), BackendError> {
+        if self.is_stopped() {
+            Err(BackendError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+    /// Add revocation without dropping earlier owner checks or extending time.
+    /// Actual owner callbacks must be nonblocking atomic-only checks.
+    pub fn with_revocation_check(&self, revoked: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        let previous = self.cancellation.owner_cancelled.clone();
+        let mut job = self.clone();
+        job.cancellation.owner_cancelled = Some(Arc::new(move || {
+            previous.as_ref().is_some_and(|check| check()) || revoked()
+        }));
+        job
+    }
 }
 
 impl CancellationToken {
@@ -519,6 +756,35 @@ impl CancellationToken {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             deadline: Instant::now() + bounded,
+            owner_cancelled: None,
+        }
+    }
+
+    pub fn for_recovery_job(policy: StreamedRecoveryPolicy) -> StreamedRecoveryJob {
+        Self::for_recovery_job_with_deadline(policy, None)
+    }
+
+    /// Start one metadata-only namespace job with the existing 30-second
+    /// request budget. Call once before queueing; clones and revocation probes
+    /// retain this same deadline and cancellation state. This grants no
+    /// directory dispatch, storage or native publication authority.
+    pub fn for_metadata_job() -> StreamedRecoveryJob {
+        StreamedRecoveryJob {
+            cancellation: Self::new(),
+        }
+    }
+
+    pub(crate) fn for_recovery_job_with_deadline(
+        policy: StreamedRecoveryPolicy,
+        original: Option<Instant>,
+    ) -> StreamedRecoveryJob {
+        let maximum = Instant::now() + policy.total_timeout;
+        StreamedRecoveryJob {
+            cancellation: Self {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                deadline: original.map_or(maximum, |deadline| deadline.min(maximum)),
+                owner_cancelled: None,
+            },
         }
     }
 
@@ -528,6 +794,7 @@ impl CancellationToken {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             deadline: Instant::now() + Duration::from_secs(60 * 60),
+            owner_cancelled: None,
         }
     }
 
@@ -538,6 +805,15 @@ impl CancellationToken {
         self.deadline.min(Instant::now() + DEFAULT_FETCH_TIMEOUT)
     }
 
+    /// One bounded metadata phase sharing the original cancellation/currentness.
+    /// Only the clone's deadline changes; the original total job stays intact.
+    #[cfg(any(windows, test))]
+    pub(crate) fn bounded_request(&self) -> Self {
+        let mut request = self.clone();
+        request.deadline = self.request_deadline();
+        request
+    }
+
     /// Mark the request cancelled. Repeated calls are harmless.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
@@ -545,6 +821,10 @@ impl CancellationToken {
 
     /// Check cancellation before starting or continuing backend work.
     pub fn is_cancelled(&self) -> bool {
+        if self.owner_cancelled.as_ref().is_some_and(|check| check()) {
+            // Revocation is sticky: a later reconnect/resume cannot revive it.
+            self.cancel();
+        }
         self.cancelled.load(Ordering::Acquire)
     }
 
@@ -715,6 +995,25 @@ pub trait PreparedFetchSession {
 /// expensive work. The callback bridge caps each staging window at
 /// [`MAX_REQUEST_BYTES`] and transfers data in [`MAX_RANGE_BYTES`] slices.
 pub trait PlaceholderBackend: Send + Sync + 'static {
+    /// Historical retained-route metadata only; no active session or bearer is
+    /// restored. Native code must independently pin every original identity.
+    #[cfg(windows)]
+    fn vault_cleanup_root_locator(
+        &self,
+        _route: &crate::vault_routes::VerifiedVaultRoute,
+    ) -> Result<crate::VaultCleanupRootLocator, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    /// Atomic-only, nonblocking owner fence for an ephemeral recovery job.
+    fn recovery_job_revoked(&self) -> bool {
+        true
+    }
+    /// Capture the original transfer cancellation epoch once at job creation.
+    fn recovery_transfer_cancellation(&self) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+        None
+    }
+
     /// Native bookkeeping is mandatory before publishing decrypted vault bytes.
     /// This classifies an already owned opaque identity; it grants no unlock.
     fn requires_hydration_inventory(&self, _identity: &[u8]) -> Result<bool, BackendError> {
@@ -735,6 +1034,25 @@ pub trait PlaceholderBackend: Send + Sync + 'static {
         _callback: &mut dyn FnMut(&dyn ExistingVaultEditCapture) -> Result<(), BackendError>,
     ) -> Result<(), BackendError> {
         Err(BackendError::Unavailable)
+    }
+
+    #[cfg(windows)]
+    fn cached_vault_edit_mode(&self, _identity: &[u8]) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+    #[cfg(windows)]
+    fn with_vault_edit_capture_context(
+        &self,
+        identity: &[u8],
+        callback: &mut dyn FnMut(
+            crate::vault_cached_edit::VaultEditCaptureContext<'_>,
+        ) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        self.with_vault_edit_capture(identity, &mut |capture| {
+            callback(crate::vault_cached_edit::VaultEditCaptureContext::Online(
+                capture,
+            ))
+        })
     }
 
     /// Prepare an exact account-bound baseline for a user-edited placeholder.
@@ -1011,6 +1329,75 @@ mod tests {
     }
 
     #[test]
+    fn streamed_job_policy_is_validated_and_clones_never_reset_time() {
+        use super::{CancellationToken, StreamedRecoveryJob, StreamedRecoveryPolicy};
+        use std::time::Duration;
+        assert!(StreamedRecoveryPolicy::new(Duration::from_secs(59)).is_err());
+        assert!(StreamedRecoveryPolicy::new(Duration::from_secs(86401)).is_err());
+        assert_eq!(
+            StreamedRecoveryPolicy::default().total_timeout(),
+            Duration::from_secs(21600)
+        );
+        let job = CancellationToken::for_recovery_job(StreamedRecoveryPolicy::default());
+        assert_eq!(job.deadline(), job.clone().deadline());
+        assert!(job.cancellation().remaining().unwrap() > Duration::from_secs(30));
+        let expired = StreamedRecoveryJob::for_test_timeout(Duration::ZERO);
+        assert!(expired.check().is_err());
+        assert!(expired.is_stopped());
+    }
+
+    #[test]
+    fn metadata_job_keeps_original_request_budget_and_shared_cancellation() {
+        use super::{CancellationToken, DEFAULT_FETCH_TIMEOUT};
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            time::Instant,
+        };
+        let before = Instant::now();
+        let job = CancellationToken::for_metadata_job();
+        let after = Instant::now();
+        assert!(job.deadline() >= before + DEFAULT_FETCH_TIMEOUT);
+        assert!(job.deadline() <= after + DEFAULT_FETCH_TIMEOUT);
+        let original_deadline = job.deadline();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let observed = revoked.clone();
+        let queued = job.with_revocation_check(Arc::new(move || observed.load(Ordering::Acquire)));
+        assert_eq!(queued.deadline(), original_deadline);
+        assert!(!queued.is_stopped());
+        revoked.store(true, Ordering::Release);
+        assert!(queued.is_stopped());
+        revoked.store(false, Ordering::Release);
+        assert!(job.is_stopped());
+        assert!(queued.clone().is_stopped());
+        assert_eq!(job.deadline(), original_deadline);
+    }
+
+    #[test]
+    fn streamed_job_owner_revocation_is_sticky_and_additive() {
+        use super::{CancellationToken, StreamedRecoveryPolicy};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let job = CancellationToken::for_recovery_job(StreamedRecoveryPolicy::default());
+        let observed = first.clone();
+        let job = job.with_revocation_check(Arc::new(move || observed.load(Ordering::Acquire)));
+        let observed = second.clone();
+        let linked = job.with_revocation_check(Arc::new(move || observed.load(Ordering::Acquire)));
+        assert_eq!(job.deadline(), linked.deadline());
+        first.store(true, Ordering::Release);
+        assert!(linked.is_stopped());
+        first.store(false, Ordering::Release);
+        assert!(job.is_stopped());
+        assert!(linked.is_stopped());
+    }
+
+    #[test]
     fn cancellation_token_is_shared_and_idempotent() {
         let token = super::CancellationToken::new();
         let reader = token.clone();
@@ -1019,6 +1406,161 @@ mod tests {
         assert!(reader.is_cancelled());
         reader.cancel();
         assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn bounded_metadata_request_times_out_held_graph_and_preserves_original_job() {
+        use super::{CancellationToken, StreamedRecoveryPolicy};
+        use raiun_opencloud::{OpenCloudClient, ProxyConfig, RangeReadContext};
+        use std::{
+            io::Read,
+            net::TcpListener,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+                mpsc,
+            },
+            thread,
+            time::{Duration, Instant},
+        };
+
+        // Even a failed factual barrier/assertion releases the peer before either
+        // thread joins. No detached client, kill, network retry or test timeout kill.
+        struct HeldGraph {
+            release: Option<mpsc::Sender<()>>,
+            peer: Option<thread::JoinHandle<bool>>,
+            client: Option<thread::JoinHandle<()>>,
+        }
+        impl HeldGraph {
+            fn cleanup(&mut self) -> (bool, bool) {
+                drop(self.release.take());
+                let peer = self
+                    .peer
+                    .take()
+                    .is_none_or(|peer| peer.join().unwrap_or(false));
+                let client = self
+                    .client
+                    .take()
+                    .is_none_or(|client| client.join().is_ok());
+                (peer, client)
+            }
+        }
+        impl Drop for HeldGraph {
+            fn drop(&mut self) {
+                let _ = self.cleanup();
+            }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = OpenCloudClient::new_with_proxy(
+            &format!("http://{address}"),
+            "synthetic-metadata-cap".into(),
+            &ProxyConfig::Direct,
+        )
+        .unwrap();
+        let owner_revoked = Arc::new(AtomicBool::new(false));
+        let probe = owner_revoked.clone();
+        let original = CancellationToken::for_recovery_job(
+            StreamedRecoveryPolicy::new(Duration::from_secs(60)).unwrap(),
+        )
+        .with_revocation_check(Arc::new(move || probe.load(Ordering::Acquire)));
+        let original_deadline = original.deadline();
+        let started = Instant::now();
+        // This is the same production helper the owned file Prepare path uses.
+        let metadata = original.cancellation().bounded_request();
+        let bounded_at = Instant::now();
+        let context = RangeReadContext {
+            deadline: metadata.deadline(),
+            token_generation: client.token_generation(),
+        };
+        let same_cancel = Arc::ptr_eq(&metadata.cancelled, &original.cancellation().cancelled);
+        let same_owner = match (
+            &metadata.owner_cancelled,
+            &original.cancellation().owner_cancelled,
+        ) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        };
+        let (release, released) = mpsc::channel();
+        let (accepted, accepted_request) = mpsc::channel();
+        let peer_released = Arc::new(AtomicBool::new(false));
+        let peer_done = peer_released.clone();
+        let mut held = HeldGraph {
+            release: Some(release),
+            peer: None,
+            client: None,
+        };
+        held.peer = Some(thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(40);
+            let mut socket = loop {
+                if !matches!(released.try_recv(), Err(mpsc::TryRecvError::Empty))
+                    || Instant::now() >= deadline
+                {
+                    return false;
+                }
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(_) => return false,
+                }
+            };
+            if socket.set_nonblocking(false).is_err()
+                || socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .is_err()
+            {
+                return false;
+            }
+            let mut bytes = Vec::new();
+            let mut byte = [0];
+            while !bytes.ends_with(b"\r\n\r\n") && bytes.len() < 32768 {
+                if socket.read_exact(&mut byte).is_err() {
+                    return false;
+                }
+                bytes.push(byte[0]);
+            }
+            let request = String::from_utf8_lossy(&bytes);
+            let valid = bytes.ends_with(b"\r\n\r\n")
+                && request.lines().next() == Some("GET /graph/v1.0/me/drives HTTP/1.1");
+            if accepted.send(valid).is_err() {
+                return false;
+            }
+            // No response headers/body are sent before the test releases this peer.
+            // The finite safety bound is longer than the request/result assertion.
+            let _ = released.recv_timeout(Duration::from_secs(40));
+            peer_done.store(true, Ordering::Release);
+            drop(socket);
+            valid
+        }));
+        let (completed, result) = mpsc::channel();
+        held.client = Some(thread::spawn(move || {
+            let value = client.spaces_with_context_limited(context, 1);
+            let _ = completed.send((value, started.elapsed()));
+        }));
+        let factual_request = accepted_request.recv_timeout(Duration::from_secs(5));
+        original.cancel();
+        let outcome = result.recv_timeout(Duration::from_secs(33));
+        let terminal_while_peer_held = outcome.is_ok() && !peer_released.load(Ordering::Acquire);
+        // These joins precede every assertion after threads were started. The
+        // old long-context path is released at 33s and fails without hanging.
+        let joined = held.cleanup();
+        assert_eq!(joined, (true, true));
+        assert_eq!(factual_request.ok(), Some(true));
+        assert!(same_cancel && same_owner);
+        assert_eq!(original.deadline(), original_deadline);
+        assert!(metadata.deadline() <= original_deadline);
+        assert!(metadata.deadline() <= bounded_at + Duration::from_secs(30));
+        assert!(original.is_stopped() && metadata.is_cancelled());
+        assert!(
+            terminal_while_peer_held,
+            "metadata must finish before peer release at the real production request cap"
+        );
+        let (value, elapsed) = outcome.expect("bounded metadata result before 33s");
+        assert!(value.is_err());
+        assert!((Duration::from_secs(25)..=Duration::from_secs(33)).contains(&elapsed));
     }
 
     #[test]

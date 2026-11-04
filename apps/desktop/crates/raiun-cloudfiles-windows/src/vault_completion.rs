@@ -74,6 +74,9 @@ impl VaultUploadControl {
                 .as_ref()
                 .is_some_and(|active| !active.load(Ordering::Acquire))
     }
+    pub(crate) fn read_cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
     pub(crate) fn generation(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.generation)
     }

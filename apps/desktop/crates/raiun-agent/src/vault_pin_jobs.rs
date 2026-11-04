@@ -133,6 +133,47 @@ impl VaultPinJobs {
         .ok_or_else(|| "Encrypted snapshot refresh was skipped".into())
     }
 
+    /// Existing worker plus a retained local-storage guard. The owned Arc
+    /// keeps private directory custody until the worker actually terminates.
+    #[cfg(windows)]
+    pub fn start_guarded(
+        this: &Arc<Self>,
+        scope: &VaultSessionScope,
+        backend: VaultBackend,
+        existing_pin_id: Option<String>,
+        auth_generation: Arc<AtomicU64>,
+        expected_generation: u64,
+        current: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<String, String> {
+        this.start_inner(scope_key(scope), None, move |cancelled, progress| {
+            let valid =
+                || auth_generation.load(Ordering::Acquire) == expected_generation && current();
+            if !valid() {
+                cancelled.store(true, Ordering::Release);
+                return Err(());
+            }
+            let mut checked_progress = |value| {
+                if !valid() {
+                    cancelled.store(true, Ordering::Release);
+                }
+                progress(value);
+            };
+            let result = backend
+                .pin_offline_tree_with_progress(
+                    existing_pin_id.as_deref(),
+                    cancelled,
+                    &mut checked_progress,
+                )
+                .map_err(|_| ());
+            if !valid() {
+                cancelled.store(true, Ordering::Release);
+                return Err(());
+            }
+            result
+        })?
+        .ok_or_else(|| "Encrypted snapshot refresh was skipped".into())
+    }
+
     /// Start a low-priority refresh no more than once per hour for this exact
     /// scope and pin. A user-started job may run more often. The cooldown is
     /// process-local, so restart permits an explicit/currently-due refresh.
@@ -282,6 +323,29 @@ impl VaultPinJobs {
             .remote_gate
             .lock()
             .map_err(|_| "Encrypted remote-operation gate is poisoned")?;
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Encrypted maintenance operation was cancelled".into());
+        }
+        operation()
+    }
+
+    /// Run bounded metadata work only when no remote maintenance operation is
+    /// active. RPC readers must not wait behind a network transfer: callers
+    /// can return an explicit busy result and retain the existing job handle.
+    pub fn try_run_serialized<T>(
+        &self,
+        cancelled: &AtomicBool,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _remote = match self.remote_gate.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err("Encrypted remote operation is busy".into());
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("Encrypted remote-operation gate is poisoned".into());
+            }
+        };
         if cancelled.load(Ordering::Acquire) {
             return Err("Encrypted maintenance operation was cancelled".into());
         }

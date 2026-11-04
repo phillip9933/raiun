@@ -4,7 +4,9 @@
 //! settings file, and unscoped keyring entry. Additional profiles receive
 //! private state directories and independent keyring scopes.
 
-use super::{Runtime, new_runtime, start_runtime};
+#[cfg(test)]
+use super::new_runtime;
+use super::{Runtime, new_runtime_with_mode, runtime_mode::RuntimeMode, start_runtime};
 use raiun_core::{CONFIG_SCHEMA_VERSION, Config, FolderPair, MediaImportJob, validate_config};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -50,6 +52,7 @@ struct ManagerState {
 
 /// Owns the selected profile and each profile's independent engine runtime.
 pub struct ProfileManager {
+    mode: RuntimeMode,
     state_dir: PathBuf,
     vaults: Arc<raiun_vault::session::VaultSessionCoordinator>,
     state: Mutex<ManagerState>,
@@ -60,7 +63,12 @@ pub struct ProfileManager {
 
 impl ProfileManager {
     /// Load the registry and start all saved profiles.
+    #[cfg(test)]
     pub fn open(state_dir: PathBuf) -> Result<Arc<Self>, String> {
+        Self::open_with_mode(state_dir, RuntimeMode::Desktop)
+    }
+
+    pub fn open_with_mode(state_dir: PathBuf, mode: RuntimeMode) -> Result<Arc<Self>, String> {
         if !state_dir.is_absolute() {
             return Err("State directory must be absolute".into());
         }
@@ -77,7 +85,7 @@ impl ProfileManager {
                 ensure_profile_directory(&state_dir, id)?;
             }
             let scope = (id != DEFAULT_ID).then(|| id.clone());
-            let runtime = new_runtime(dir, scope, vaults.clone())?;
+            let runtime = new_runtime_with_mode(dir, scope, vaults.clone(), mode)?;
             if registry.removed.contains(id) {
                 runtime.retiring.store(true, Ordering::Release);
                 runtime.shutdown.store(true, Ordering::Release);
@@ -90,6 +98,7 @@ impl ProfileManager {
             runtimes: runtimes.clone(),
         })?)?;
         let manager = Arc::new(Self {
+            mode,
             state_dir,
             vaults,
             state: Mutex::new(ManagerState { registry, runtimes }),
@@ -114,13 +123,31 @@ impl ProfileManager {
 
     /// Route a control request to the selected profile or an explicit profile.
     pub fn handle(self: &Arc<Self>, mut request: Value) -> Result<Value, String> {
-        // Move, do not clone, password storage into a wiping owner before any
-        // profile validation can fail. The raw socket input is wiped separately.
-        let password = match request.as_object_mut().and_then(|o| o.remove("password")) {
-            Some(Value::String(value)) => Some(zeroize::Zeroizing::new(value)),
-            Some(_) => return Err("Password must be text".into()),
-            None => None,
-        };
+        // Own every decoded secret before any malformed sibling field can fail.
+        let mut owned = crate::headless_runtime::SecretRequest(request);
+        let password = crate::headless_runtime::take_secret(&mut owned.0, "password")?;
+        let app_token = crate::headless_runtime::take_secret(&mut owned.0, "app_token")?;
+        request = std::mem::take(&mut owned.0);
+        self.mode.validate_request(&request)?;
+        if self.mode == RuntimeMode::MountOnly && password.is_some() {
+            return Err("Passwords are unavailable in the mount-only client".into());
+        }
+        if request.get("action").and_then(Value::as_str) == Some("auth_app_token") {
+            if password.is_some() {
+                return Err("Password is not accepted for app-token login".into());
+            }
+            self.ensure_running()?;
+            let (_, runtime) = self.resolve_runtime(&request)?;
+            return runtime.login_app_token(&request, app_token.ok_or("Missing app token")?);
+        }
+        if app_token.is_some() {
+            return Err("App tokens are only accepted by app-token login".into());
+        }
+        if request.get("action").and_then(Value::as_str) == Some("sharing_link_create") {
+            let sharing = crate::sharing_wire::Request::parse(&request)?
+                .with_public_link_password(password)?;
+            return self.execute_sharing(sharing);
+        }
         if request
             .get("action")
             .and_then(Value::as_str)
@@ -164,13 +191,46 @@ impl ProfileManager {
             "account_select" => self.select_account(&request),
             "account_rename" => self.rename_account(&request),
             "account_avatar" => self.account_avatar(&request),
+            "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => {
+                self.guest_sharing(&request)
+            }
+            "sharing_capabilities"
+            | "sharing_inventory"
+            | "sharing_owned_settings"
+            | "sharing_owned_update"
+            | "sharing_owned_revoke"
+            | "sharing_permissions"
+            | "sharing_recipients"
+            | "sharing_invite"
+            | "sharing_update"
+            | "sharing_revoke"
+            | "sharing_link_create"
+            | "sharing_link_revoke" => self.sharing(&request),
+            "cache_quota_set" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                self.ensure_running()?;
+                let (id, runtime) = self.resolve_runtime(&request)?;
+                if request.get("profile_id").and_then(Value::as_str) != Some(id.as_str())
+                    || self.selected_profile()?.as_deref() != Some(id.as_str())
+                {
+                    return Err(
+                        "The selected account changed; review storage settings again".into(),
+                    );
+                }
+                let mut result = runtime.handle(strip_profile_id(request))?;
+                result["profile_id"] = json!(id);
+                Ok(result)
+            }
             "account_remove" => self.remove_account(&request),
             "account_restore" => self.restore_account(&request),
             "shutdown" => self.request_shutdown(),
             "status" => {
                 if request.get("profile_id").is_none() && self.selected_profile()?.is_none() {
                     return Ok(
-                        json!({"connected":false,"mounted":false,"account_switch_supported":true,"accounts_empty":true,"agent_version":env!("CARGO_PKG_VERSION")}),
+                        json!({"connected":false,"mounted":false,"account_switch_supported":true,"accounts_empty":true,"agent_version":env!("CARGO_PKG_VERSION"),"runtime_mode":self.mode.name()}),
                     );
                 }
                 let (id, runtime) = self.resolve_runtime(&request)?;
@@ -335,7 +395,7 @@ impl ProfileManager {
 
         let id = random_profile_id(&state.registry.profiles)?;
         let dir = ensure_profile_directory(&self.state_dir, &id)?;
-        let runtime = new_runtime(dir, Some(id.clone()), self.vaults.clone())?;
+        let runtime = new_runtime_with_mode(dir, Some(id.clone()), self.vaults.clone(), self.mode)?;
         runtime.handle(strip_profile_id(
             json!({"action":"configure","cloud_root":root}),
         ))?;
@@ -505,10 +565,11 @@ impl ProfileManager {
             return Err("Unknown removed profile_id".into());
         }
         let dir = profile_dir(&self.state_dir, id);
-        let runtime = new_runtime(
+        let runtime = new_runtime_with_mode(
             dir,
             (id != DEFAULT_ID).then(|| id.to_owned()),
             self.vaults.clone(),
+            self.mode,
         )?;
         if runtime
             .settings
@@ -607,25 +668,164 @@ impl ProfileManager {
         }
     }
 
+    fn guest_sharing(&self, request: &Value) -> Result<Value, String> {
+        let request = crate::guest_sharing_wire::Request::parse(request)?;
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Account changes are unavailable")?;
+        self.ensure_running()?;
+        if request.mutating()
+            && self.selected_profile()?.as_deref() != Some(request.profile_id.as_str())
+        {
+            return Err("The selected account changed; review guest access again".into());
+        }
+        let (_, runtime) = self.resolve_runtime(&json!({"profile_id":request.profile_id}))?;
+        // AuthTransition serializes explicit invitations with logout/replacement.
+        // The state lease also fences background token refresh until completion.
+        let _transition = if request.mutating() {
+            Some(super::AuthTransition::begin(&runtime.auth_transition)?)
+        } else {
+            None
+        };
+        let auth = runtime
+            .auth_state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if runtime.retiring.load(Ordering::Acquire)
+            || runtime.shutdown.load(Ordering::Acquire)
+            || (!request.mutating() && runtime.auth_transition.load(Ordering::Acquire))
+            || runtime.auth_generation.load(Ordering::Acquire) != request.expected_auth_generation
+        {
+            return Err("The account changed; refresh guest access before continuing".into());
+        }
+        let session = auth
+            .session
+            .as_ref()
+            .ok_or("Connect this account to manage guest access")?;
+        if session.expires_at
+            <= std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "System clock is unavailable")?
+                .as_secs()
+        {
+            return Err("Reconnect this account to manage guest access".into());
+        }
+        if auth.client.is_none() {
+            return Err("Connect this account to manage guest access".into());
+        }
+        let client = raiun_opencloud::OpenCloudClient::new_for_guest_sharing(
+            &session.server,
+            session.access_token.clone(),
+            &session.proxy,
+        )
+        .map_err(|_| "Could not prepare guest access")?;
+        let result = request.execute(&client)?;
+        if runtime.auth_generation.load(Ordering::Acquire) != request.expected_auth_generation {
+            return Err("The account changed; refresh guest access before continuing".into());
+        }
+        Ok(result)
+    }
+
+    fn sharing(&self, request: &Value) -> Result<Value, String> {
+        let request = crate::sharing_wire::Request::parse(request)?;
+        self.execute_sharing(request)
+    }
+
+    fn execute_sharing(&self, request: crate::sharing_wire::Request) -> Result<Value, String> {
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Account changes are unavailable")?;
+        self.ensure_running()?;
+        if request.mutating()
+            && self.selected_profile()?.as_deref() != Some(request.profile_id.as_str())
+        {
+            return Err("The selected account changed; review sharing again".into());
+        }
+        let (_, runtime) = self.resolve_runtime(&json!({"profile_id":request.profile_id}))?;
+        // AuthTransition serializes explicit invitations with logout/replacement.
+        // The state lease also fences background token refresh until completion.
+        let _transition = if request.mutating() {
+            Some(super::AuthTransition::begin(&runtime.auth_transition)?)
+        } else {
+            None
+        };
+        let auth = runtime
+            .auth_state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if runtime.retiring.load(Ordering::Acquire)
+            || runtime.shutdown.load(Ordering::Acquire)
+            || (!request.mutating() && runtime.auth_transition.load(Ordering::Acquire))
+            || runtime.auth_generation.load(Ordering::Acquire) != request.expected_auth_generation
+        {
+            return Err("The account changed; refresh sharing before continuing".into());
+        }
+        let session = auth
+            .session
+            .as_ref()
+            .ok_or("Connect this account to manage sharing")?;
+        if session.expires_at
+            <= std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "System clock is unavailable")?
+                .as_secs()
+        {
+            return Err("Reconnect this account to manage sharing".into());
+        }
+        if auth.client.is_none() {
+            return Err("Connect this account to manage sharing".into());
+        }
+        let client = raiun_opencloud::OpenCloudClient::new_for_guest_sharing(
+            &session.server,
+            session.access_token.clone(),
+            &session.proxy,
+        )
+        .map_err(|_| "Could not prepare sharing")?;
+        let result = request.execute(&client)?;
+        if runtime.auth_generation.load(Ordering::Acquire) != request.expected_auth_generation {
+            return Err("The account changed; refresh sharing before continuing".into());
+        }
+        Ok(result)
+    }
+
     fn account_avatar(&self, request: &Value) -> Result<Value, String> {
         self.ensure_running()?;
         let (id, runtime) = self.resolve_runtime(request)?;
-        let expected = request.get("expected_auth_generation").and_then(Value::as_u64)
+        let expected = request
+            .get("expected_auth_generation")
+            .and_then(Value::as_u64)
             .ok_or("Refresh the account before loading its photo")?;
         let client = {
-            let state = runtime.auth_state.lock().map_err(|_| "Account state is unavailable")?;
-            if runtime.retiring.load(Ordering::Acquire) || runtime.shutdown.load(Ordering::Acquire)
+            let state = runtime
+                .auth_state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if runtime.retiring.load(Ordering::Acquire)
+                || runtime.shutdown.load(Ordering::Acquire)
                 || runtime.auth_transition.load(Ordering::Acquire)
-                || runtime.auth_generation.load(Ordering::Acquire) != expected {
+                || runtime.auth_generation.load(Ordering::Acquire) != expected
+            {
                 return Err("The account changed while loading its photo".into());
             }
-            state.client.clone().ok_or("Connect this account to load its photo")?
+            state
+                .client
+                .clone()
+                .ok_or("Connect this account to load its photo")?
         };
-        let image = client.account_avatar().map_err(|_| "The account photo is unavailable")?;
-        let _state = runtime.auth_state.lock().map_err(|_| "Account state is unavailable")?;
-        if runtime.retiring.load(Ordering::Acquire) || runtime.shutdown.load(Ordering::Acquire)
+        let image = client
+            .account_avatar()
+            .map_err(|_| "The account photo is unavailable")?;
+        let _state = runtime
+            .auth_state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if runtime.retiring.load(Ordering::Acquire)
+            || runtime.shutdown.load(Ordering::Acquire)
             || runtime.auth_transition.load(Ordering::Acquire)
-            || runtime.auth_generation.load(Ordering::Acquire) != expected {
+            || runtime.auth_generation.load(Ordering::Acquire) != expected
+        {
             return Err("The account changed while loading its photo".into());
         }
         crate::account_avatar_wire::response(&id, expected, image)
@@ -653,6 +853,7 @@ impl ProfileManager {
             }
         };
         let object = status.as_object_mut().ok_or("Runtime status is invalid")?;
+        object.insert("runtime_mode".into(), json!(self.mode.name()));
         object.insert("profile_id".into(), json!(id));
         object.insert("profile_label".into(), json!(label));
         Ok(status)
@@ -1340,6 +1541,7 @@ mod tests {
         runtime.restoring.store(false, Ordering::Release);
         let registry = load_registry(&dir.join(REGISTRY_FILE)).unwrap();
         let manager = Arc::new(ProfileManager {
+            mode: RuntimeMode::Desktop,
             state_dir: dir,
             vaults,
             state: Mutex::new(ManagerState {
@@ -1505,11 +1707,28 @@ mod tests {
         assert_eq!(removed["credentials_revoked"], true);
         assert_eq!(removed["vault_password_cleanup_uncertain"], true);
         assert_eq!(credentials.lock().unwrap().len(), 1);
-        assert!(manager.accounts().unwrap()["items"].as_array().unwrap().is_empty());
-        assert_eq!(manager.accounts().unwrap()["removed_items"][0]["id"], "default");
-        let restored = manager.handle(json!({"action":"account_restore","profile_id":"default","confirm":true})).unwrap();
+        assert!(
+            manager.accounts().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            manager.accounts().unwrap()["removed_items"][0]["id"],
+            "default"
+        );
+        let restored = manager
+            .handle(json!({"action":"account_restore","profile_id":"default","confirm":true}))
+            .unwrap();
         assert_eq!(restored["sign_in_required"], true);
-        assert!(manager.state.lock().unwrap().runtimes[DEFAULT_ID].settings.lock().unwrap().server.is_none());
+        assert!(
+            manager.state.lock().unwrap().runtimes[DEFAULT_ID]
+                .settings
+                .lock()
+                .unwrap()
+                .server
+                .is_none()
+        );
         manager.request_shutdown().unwrap();
     }
 
@@ -1585,6 +1804,45 @@ mod tests {
             }))
             .unwrap_err();
         assert!(unknown.contains("Unknown profile"));
+    }
+
+    #[test]
+    fn public_link_password_reaches_account_fences_without_becoming_a_vault_request() {
+        let temp = tempdir().expect("state directory");
+        let manager = ProfileManager::open(temp.path().to_path_buf()).expect("profile manager");
+        let request = json!({
+            "action":"sharing_link_create", "profile_id":"default", "expected_auth_generation":0,
+            "space_id":"synthetic-space", "path":"/Empty test folder", "expected_item_id":"synthetic-item",
+            "link_type":"view", "password":"synthetic-link-password"
+        });
+        let error = manager.handle(request.clone()).unwrap_err();
+        assert_eq!(error, "Connect this account to manage sharing");
+        let mut stale = request.clone();
+        stale["expected_auth_generation"] = json!(99);
+        assert_eq!(
+            manager.handle(stale).unwrap_err(),
+            "The account changed; refresh sharing before continuing"
+        );
+        let mut foreign = request.clone();
+        foreign["profile_id"] = json!("unknown-profile");
+        assert_eq!(
+            manager.handle(foreign).unwrap_err(),
+            "The selected account changed; review sharing again"
+        );
+        for password in [json!(""), json!("é".repeat(37)), json!(false)] {
+            let mut invalid = request.clone();
+            invalid["password"] = password;
+            let error = manager.handle(invalid).unwrap_err();
+            assert_ne!(error, "Connect this account to manage sharing");
+            assert!(!error.contains("synthetic-link-password"));
+        }
+        assert_eq!(
+            manager
+                .handle(json!({"action":"status","password":"synthetic-link-password"}))
+                .unwrap_err(),
+            "Password is only accepted by a vault operation"
+        );
+        manager.request_shutdown().unwrap();
     }
 
     #[test]
@@ -2002,5 +2260,4 @@ mod tests {
         assert!(ensure_profiles_root(&state_dir).is_err());
     }
     include!("avatar_profile_tests.rs");
-
 }

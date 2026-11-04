@@ -59,6 +59,8 @@ pub enum RecoveryWarning {
     InvalidManifestFields,
     LocalPathUnavailable,
     LegacyUnscopedManifest,
+    EditableCreateWorkingCopy,
+    RetainedCreateHandoff,
 }
 
 /// One bounded page from a read-only spool scan.
@@ -87,6 +89,7 @@ pub enum RecoveryError {
     UnsafeSpoolDirectory,
     ResponseTooLarge,
     Io,
+    UnsafeSavedCopy,
 }
 
 impl fmt::Display for RecoveryError {
@@ -99,6 +102,7 @@ impl fmt::Display for RecoveryError {
             }
             Self::ResponseTooLarge => write!(f, "recovery page exceeds the response size limit"),
             Self::Io => write!(f, "could not read provider recovery metadata"),
+            Self::UnsafeSavedCopy => write!(f, "saved create identity or scope changed"),
         }
     }
 }
@@ -298,13 +302,30 @@ fn read_spool_item(key: &str, files: &SpoolFiles) -> RecoveryItem {
                     fields[3].clone(),
                     true,
                 ),
-                ProviderManifest::Scoped(fields) => (
-                    fields.space_id,
-                    fields.path,
-                    fields.condition,
-                    fields.etag,
-                    false,
-                ),
+                ProviderManifest::Scoped(fields) => {
+                    if fields.version == 4 {
+                        item.warnings.push(
+                            if fields
+                                .working
+                                .as_ref()
+                                .is_some_and(|working| !working.closing)
+                            {
+                                RecoveryWarning::EditableCreateWorkingCopy
+                            } else {
+                                RecoveryWarning::RetainedCreateHandoff
+                            },
+                        );
+                    } else if fields.version == 3 {
+                        item.warnings.push(RecoveryWarning::RetainedCreateHandoff);
+                    }
+                    (
+                        fields.space_id,
+                        fields.path,
+                        fields.condition,
+                        fields.etag,
+                        false,
+                    )
+                }
             };
             if !valid_manifest_fields(&space, &remote, &condition, &etag) {
                 item.warnings.push(RecoveryWarning::InvalidManifestFields);
@@ -362,6 +383,10 @@ struct ScopedManifest {
     path: String,
     condition: String,
     etag: String,
+    #[serde(default)]
+    handoff: Option<Box<super::create_handoff::Intent>>,
+    #[serde(default)]
+    working: Option<Box<super::create_handoff::WorkingCopy>>,
 }
 
 enum ProviderManifest {
@@ -410,7 +435,27 @@ fn read_manifest_bytes_after_open(
 fn read_bounded_manifest(path: &Path) -> Result<ProviderManifest, ManifestReadError> {
     let body = read_manifest_bytes(path)?;
     if let Ok(manifest) = serde_json::from_slice::<ScopedManifest>(&body) {
-        if manifest.version != 2
+        let valid_version = match (
+            manifest.version,
+            manifest.handoff.as_ref(),
+            manifest.working.as_ref(),
+        ) {
+            (2, None, None) => true,
+            (3, Some(intent), None) => {
+                intent.valid()
+                    && manifest.resource_id.is_none()
+                    && manifest.condition == "absent"
+                    && manifest.etag.is_empty()
+            }
+            (4, None, Some(working)) => {
+                working.valid()
+                    && manifest.resource_id.is_none()
+                    && manifest.condition == "absent"
+                    && manifest.etag.is_empty()
+            }
+            _ => false,
+        };
+        if !valid_version
             || manifest.origin.len() > 4_096
             || manifest.account_id.is_empty()
             || manifest.account_id.len() > 1_024
@@ -515,6 +560,91 @@ fn same_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 
 fn scan_entry_allowed(scanned_entries: usize, maximum: usize) -> bool {
     scanned_entries < maximum
+}
+
+/// Open an explicitly versioned retained create copy read-only. This grants no
+/// upload/retry/adoption authority. Editable-marker size is historical metadata,
+/// not an immutable checksum: post-fsync edits remain recoverable after restart.
+pub fn open_saved_create_copy(
+    spool_dir: &Path,
+    key: &str,
+    scope: &raiun_cache::CacheScope,
+    path: &str,
+) -> Result<File, RecoveryError> {
+    let unsafe_copy = || RecoveryError::UnsafeSavedCopy;
+    let directory = fs::symlink_metadata(spool_dir).map_err(|_| RecoveryError::Io)?;
+    if !directory.is_dir()
+        || directory.file_type().is_symlink()
+        || !valid_spool_key(key)
+        || scope.protection() != raiun_cache::ScopeProtection::PlaintextAllowed
+        || stable_hash(&format!("{}\0{path}", scope.space_id()))
+            != u64::from_str_radix(key, 16).map_err(|_| unsafe_copy())?
+    {
+        return Err(unsafe_copy());
+    }
+    let marker_path = spool_dir.join(format!("{key}.meta"));
+    let bytes = read_manifest_bytes(&marker_path).map_err(|_| unsafe_copy())?;
+    let marker: super::OrdinaryWriteManifest =
+        serde_json::from_slice(&bytes).map_err(|_| unsafe_copy())?;
+    if !marker.matches_scope(scope, path) {
+        return Err(unsafe_copy());
+    }
+    let data_path = spool_dir.join(format!("{key}.data"));
+    let before = fs::symlink_metadata(&data_path).map_err(|_| unsafe_copy())?;
+    if !before.is_file()
+        || before.file_type().is_symlink()
+        || before.len() > super::create_handoff::MAX_WORKING_BYTES
+    {
+        return Err(unsafe_copy());
+    }
+    let mut file = open_manifest_nofollow(&data_path).map_err(|_| unsafe_copy())?;
+    let opened = file.metadata().map_err(|_| unsafe_copy())?;
+    if !same_identity(&before, &opened) {
+        return Err(unsafe_copy());
+    }
+    match (marker.version, marker.working, marker.handoff) {
+        (4, Some(working), None) if working.valid() => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if working.device != opened.dev() || working.inode != opened.ino() {
+                    return Err(unsafe_copy());
+                }
+            }
+        }
+        (3, None, Some(intent)) if intent.valid() => {
+            use sha2::{Digest, Sha256};
+            use std::io::{Seek, SeekFrom};
+            let mut digest = Sha256::new();
+            let mut len = 0_u64;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer).map_err(|_| unsafe_copy())?;
+                if count == 0 {
+                    break;
+                }
+                len = len.checked_add(count as u64).ok_or_else(unsafe_copy)?;
+                if len > intent.len {
+                    return Err(unsafe_copy());
+                }
+                digest.update(&buffer[..count]);
+            }
+            if len != intent.len || format!("{:x}", digest.finalize()) != intent.sha256 {
+                return Err(unsafe_copy());
+            }
+            file.seek(SeekFrom::Start(0)).map_err(|_| unsafe_copy())?;
+        }
+        _ => return Err(unsafe_copy()),
+    }
+    if read_manifest_bytes(&marker_path).map_err(|_| unsafe_copy())? != bytes
+        || !same_identity(
+            &opened,
+            &fs::symlink_metadata(&data_path).map_err(|_| unsafe_copy())?,
+        )
+    {
+        return Err(unsafe_copy());
+    }
+    Ok(file)
 }
 
 #[cfg(test)]

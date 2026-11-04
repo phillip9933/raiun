@@ -333,8 +333,11 @@ fn create_event() -> io::Result<OwnedHandle> {
 
 fn current_user_pipe_path() -> io::Result<String> {
     let sid = current_user_sid()?;
-    super::pipe_path_for_sid(&sid)
-        .ok_or_else(|| io::Error::other("Windows returned an invalid user SID"))
+    let path = match super::headless_context()? {
+        Some(context) => super::headless_pipe_path_for_sid(&sid, context.scope_id()),
+        None => super::pipe_path_for_sid(&sid),
+    };
+    path.ok_or_else(|| io::Error::other("Windows returned an invalid user SID or scope"))
 }
 
 fn current_user_sid() -> io::Result<String> {

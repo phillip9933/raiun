@@ -31,10 +31,10 @@ function harness(request) {
   const ui = { usage: null, contextKey: '', sequence: 0, loading: false, error: '' };
   const text = ['syncWindowsDeviceCacheContext', 'refreshWindowsDeviceCacheUsage', 'windowsDeviceCacheCard'].map(functionText).join('\n');
   const functions = new Function('currentWindowsOfflineContext', 'windowsDeviceCacheUi', 'request', 'render', 'isCurrentAccount',
-    'validateWindowsDeviceCacheUsage', 'isStaleAccountRequest', 'messageOf', 'svg', 'esc', 'formatBytes',
+    'validateWindowsDeviceCacheUsage', 'isStaleAccountRequest', 'messageOf', 'svg', 'esc', 'formatBytes', 'formatStorageBytes',
     `${transpile(text)}; return { sync: syncWindowsDeviceCacheContext, refresh: refreshWindowsDeviceCacheUsage, card: windowsDeviceCacheCard };`
   )(() => current, ui, request, () => {}, (epoch, profile) => current?.accountEpoch === epoch && current?.profileId === profile,
-    validateWindowsDeviceCacheUsage, () => false, String, () => '', String, value => `${value} B`);
+    validateWindowsDeviceCacheUsage, () => false, String, () => '', String, value => `${value} B`, value => `${value} B`);
   return { ...functions, ui, setContext: value => { current = value; } };
 }
 
@@ -68,16 +68,19 @@ test('actual explicit refresh sends only current scope and discards a reply afte
 
 test('actual Windows card labels shared last-observed totals and offline controls live in their workspace', async () => {
   const view = harness(async () => usage());
-  assert.match(view.card(), /Device cache \(all accounts\)/);
-  assert.match(view.card(), /not limited to the selected account/);
+  assert.match(view.card(), /Storage on this device/);
+  assert.match(view.card(), /Shared by all accounts on this Windows device/);
   assert.match(view.card(), /has not been checked/);
   await view.refresh();
   const html = view.card();
-  assert.match(html, /Last observed: 1200 B used of 1000 B/);
+  assert.match(html, /Last observed: 1200 B stored · 1000 B cache allowance/);
   assert.doesNotMatch(html, /data-action="manage-windows-offline-files"/);
   assert.doesNotMatch(html, /data-action="open-offline-files"/);
-  assert.match(functionText('offlineWorkspacePage'), /windowsDeviceCacheCard\(\).*windowsOfflineFilesCard\(\).*windowsOfflineFoldersCard\(\)/s);
+  assert.match(functionText('offlineStoragePage'), /windowsDeviceCacheCard\(\)/);
+  assert.match(functionText('offlineWorkspacePage'), /windowsOfflineFilesCard\(\).*windowsOfflineFoldersCard\(\)/s);
   const card = functionText('offlineAvailabilityCard');
-  assert.match(card, /if \(isWindowsAgentStatus\(state.status\)\) return windowsDeviceCacheCard\(\)/);
+  assert.match(card, /Storage is shared by all accounts/);
+  assert.match(card, /data-page="offline"/);
+  assert.doesNotMatch(card, /windowsDeviceCacheCard\(\)/);
   assert.match(card, /state.status\?\.offline_cache/);
 });

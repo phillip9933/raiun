@@ -6,7 +6,9 @@
 
 #[cfg(any(unix, test))]
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use raiun_opencloud::ProxyConfig;
+use raiun_opencloud::{
+    OpenCloudClient, ProxyConfig, validate_app_token_credentials, validate_app_token_server,
+};
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,11 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
+
+#[path = "auth_protocol.rs"]
+mod protocol;
+#[path = "auth_token_response.rs"]
+mod token_response;
 
 const MAX_BODY: u64 = 1_048_576;
 const MAX_WEBFINGER_BODY: u64 = 65_536;
@@ -36,6 +43,7 @@ const LEGACY_WEBFINGER_ISSUER_REL: &str = "http://opencloud.eu/ns/oidc/issuer";
 const WEBFINGER_CLIENT_ID: &str = "http://opencloud.eu/ns/oidc/client_id";
 const WEBFINGER_SCOPES: &str = "http://opencloud.eu/ns/oidc/scopes";
 const DEFAULT_CLIENT_ID: &str = "OpenCloudDesktop";
+pub const APP_TOKEN_CLIENT_ID: &str = "RaiunHeadlessAppToken";
 const DEFAULT_SCOPES: &[&str] = &["openid", "offline_access", "profile", "email"];
 
 #[cfg(all(feature = "synthetic-test-ca", not(debug_assertions)))]
@@ -55,6 +63,7 @@ pub struct AuthFlow {
     client_id: String,
     token_endpoint: String,
     expected_issuer: Option<String>,
+    require_callback_issuer: bool,
     authorization_url: String,
     redirect_uri: String,
     state: String,
@@ -66,13 +75,16 @@ pub struct AuthFlow {
     proxy: ProxyConfig,
 }
 
-/// An OAuth session. This type intentionally does not implement `Debug`.
+/// An OAuth or app-token session. This type intentionally does not implement `Debug`.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
     pub server: String,
     pub client_id: String,
     pub access_token: String,
+    /// Basic app-token identity; `access_token` holds the app token when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_token_username: Option<String>,
     pub refresh_token: Option<String>,
     pub expires_at: u64,
     pub token_endpoint: String,
@@ -163,7 +175,7 @@ impl AuthFlow {
         );
         let metadata = get_json(&client, &metadata_url, "OpenID discovery")?;
         let issuer = required_string(&metadata, "issuer")?;
-        validate_url(issuer, allow_loopback_http, "OpenID issuer")?;
+        validate_issuer_identifier(issuer, allow_loopback_http, "OpenID issuer")?;
         ensure_synthetic_test_ca_endpoint(issuer)?;
         if discovered_issuer.is_some_and(|discovered| discovered != issuer) {
             return Err("OpenID discovery issuer does not match the WebFinger issuer".into());
@@ -171,7 +183,7 @@ impl AuthFlow {
         let expected_issuer = Some(issuer.to_owned());
         let authorization_endpoint = required_string(&metadata, "authorization_endpoint")?;
         let token_endpoint = required_string(&metadata, "token_endpoint")?;
-        validate_url(
+        let authorization_endpoint_url = validate_url(
             authorization_endpoint,
             allow_loopback_http,
             "authorization endpoint",
@@ -179,6 +191,8 @@ impl AuthFlow {
         ensure_synthetic_test_ca_endpoint(authorization_endpoint)?;
         validate_url(token_endpoint, allow_loopback_http, "token endpoint")?;
         ensure_synthetic_test_ca_endpoint(token_endpoint)?;
+        let require_callback_issuer =
+            protocol::validate_flow_metadata(&metadata, &authorization_endpoint_url)?;
         let advertised_client_id = webfinger
             .as_ref()
             .filter(|info| info.issuer.is_some())
@@ -220,8 +234,7 @@ impl AuthFlow {
         let state = random_url_token(32)?;
         let code_verifier = random_url_token(32)?;
         let code_challenge = base64_url(&Sha256::digest(code_verifier.as_bytes()));
-        let mut authorization_url = Url::parse(authorization_endpoint)
-            .map_err(|_| "Authorization endpoint URL is invalid".to_string())?;
+        let mut authorization_url = authorization_endpoint_url;
         authorization_url
             .query_pairs_mut()
             .append_pair("client_id", client_id)
@@ -238,6 +251,7 @@ impl AuthFlow {
             client_id: client_id.to_string(),
             token_endpoint: token_endpoint.to_string(),
             expected_issuer,
+            require_callback_issuer,
             authorization_url: authorization_url.to_string(),
             redirect_uri,
             state,
@@ -306,7 +320,20 @@ impl AuthFlow {
                     stream
                         .set_read_timeout(Some(Duration::from_secs(3)))
                         .map_err(|_| "Could not configure OAuth callback timeout")?;
-                    let code = read_callback(&mut stream, &self.state)?;
+                    let code = read_callback(
+                        &mut stream,
+                        &self.state,
+                        self.expected_issuer.as_deref(),
+                        self.require_callback_issuer,
+                    )?;
+                    // Callback reading can block after the initial poll. Never
+                    // begin an exchange for a flow canceled or expired meanwhile.
+                    if is_cancelled() {
+                        return Err("Sign-in was cancelled".into());
+                    }
+                    if Instant::now() >= self.expires_at {
+                        return Err("Sign-in expired. Start sign-in again.".into());
+                    }
                     return self.exchange_code(&code);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -352,6 +379,97 @@ impl AuthFlow {
 }
 
 impl Session {
+    /// Build a non-renewable app-token session without OIDC discovery or HTTP.
+    pub fn for_app_token(
+        server: &str,
+        username: &str,
+        token: String,
+        proxy: ProxyConfig,
+    ) -> Result<Self, String> {
+        validate_app_token_server(server).map_err(|error| error.to_string())?;
+        let server_url = validate_url(server, true, "server")?;
+        if server_url.query().is_some() {
+            return Err("Server URL must not contain a query string".into());
+        }
+        validate_app_token_credentials(username, &token).map_err(|error| error.to_string())?;
+        let session = Self {
+            server: normalize_server(&server_url),
+            client_id: APP_TOKEN_CLIENT_ID.to_owned(),
+            access_token: token,
+            app_token_username: Some(username.to_owned()),
+            refresh_token: None,
+            expires_at: u64::MAX,
+            token_endpoint: String::new(),
+            expected_issuer: None,
+            last_refresh_at: None,
+            proxy,
+        };
+        validate_session(&session)?;
+        Ok(session)
+    }
+
+    /// Rebuild a cloud client while preserving this session's authentication method.
+    pub fn opencloud_client(&self) -> Result<OpenCloudClient, String> {
+        validate_session(self)?;
+        match &self.app_token_username {
+            Some(username) => OpenCloudClient::new_with_app_token(
+                &self.server,
+                username,
+                self.access_token.clone(),
+                &self.proxy,
+            ),
+            None => OpenCloudClient::new_with_proxy(
+                &self.server,
+                self.access_token.clone(),
+                &self.proxy,
+            ),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    /// Admit an app-token session only after fixed Graph identity and Personal
+    /// root discovery succeed. No write, mount, token exchange or renewal occurs.
+    pub fn verify_app_token(&self) -> Result<(), RefreshError> {
+        if self.app_token_username.is_none() {
+            return Ok(());
+        }
+        let client = self.opencloud_client().map_err(RefreshError::Other)?;
+        client
+            .with_bounded_namespace_probe(|| {
+                client.current_user_id()?;
+                let spaces = raiun_core::backend::CloudBackend::spaces(&client)?;
+                let mut personal = spaces
+                    .iter()
+                    .filter(|space| space.personal && !space.encrypted);
+                let root = personal.next().ok_or_else(|| {
+                    raiun_core::backend::CloudError::new(
+                        raiun_core::backend::ErrorKind::InvalidResponse,
+                        "The server returned no ordinary Personal drive",
+                    )
+                })?;
+                if personal.next().is_some() {
+                    return Err(raiun_core::backend::CloudError::new(
+                        raiun_core::backend::ErrorKind::InvalidResponse,
+                        "The server returned multiple Personal drives",
+                    ));
+                }
+                let context = raiun_opencloud::RangeReadContext {
+                    deadline: Instant::now() + Duration::from_secs(3),
+                    token_generation: client.token_generation(),
+                };
+                client.stat_discovered_space_root_with_context(root, context)?;
+                Ok(())
+            })
+            .map_err(|error| match error.kind {
+                raiun_core::backend::ErrorKind::Unauthorized
+                | raiun_core::backend::ErrorKind::Forbidden => RefreshError::Rejected(
+                    "The server rejected the app token; sign in again".into(),
+                ),
+                raiun_core::backend::ErrorKind::Offline => RefreshError::Transport,
+                _ => RefreshError::Other("Could not verify the app token's Personal drive".into()),
+            })
+    }
+
     /// Refresh the access token without exposing token data in diagnostics.
     #[cfg(unix)]
     pub fn refresh(&mut self) -> Result<(), String> {
@@ -363,6 +481,11 @@ impl Session {
     /// startup may use cached state only for the former.
     pub fn refresh_classified(&mut self) -> Result<(), RefreshError> {
         validate_session(self).map_err(RefreshError::Other)?;
+        // App tokens are opaque, revocable credentials with no refresh protocol.
+        // Actual Graph/DAV rejection must remain an authentication failure.
+        if self.app_token_username.is_some() {
+            return Ok(());
+        }
         let refresh_token = self.refresh_token.as_deref().ok_or_else(|| {
             RefreshError::Other("This session has no refresh token; sign in again".into())
         })?;
@@ -383,7 +506,11 @@ impl Session {
         if !status.is_success() {
             let code = oauth_error(&body).unwrap_or("invalid_response");
             let message = format!("Session refresh failed ({code}); sign in again if needed");
-            return Err(if status.as_u16() == 401 || code == "invalid_grant" {
+            // A proxy or temporarily unavailable issuer can return an opaque
+            // HTTP 401. Only an explicit rejected refresh grant authorizes
+            // callers to discard the saved sign-in. Client configuration or
+            // authentication errors do not prove that this user's grant expired.
+            return Err(if code == "invalid_grant" {
                 RefreshError::Rejected(message)
             } else {
                 RefreshError::Other(message)
@@ -848,7 +975,7 @@ fn get_webfinger(
             .and_then(Value::as_str)
             .filter(|href| !href.trim().is_empty())
             .ok_or_else(|| "OpenCloud WebFinger issuer link has no href".to_string())?;
-        let issuer = validate_url(
+        let issuer = validate_issuer_identifier(
             href,
             is_loopback(server_url.host_str().unwrap_or("")),
             "WebFinger issuer",
@@ -904,10 +1031,10 @@ fn get_webfinger(
                     .ok_or_else(|| "OpenCloud WebFinger scope value is malformed".to_string())?;
                 // OpenCloud's JRD example represents scopes as individual
                 // array values, while some deployed servers return one
-                // whitespace-separated value, e.g. ["openid profile email"].
+                // ASCII-space-separated value, e.g. ["openid profile email"].
                 // Accept both representations, then validate every OAuth
                 // scope token exactly as before.
-                for scope in value.split_ascii_whitespace() {
+                for scope in value.split(' ') {
                     if !valid_scope(scope) || scopes.iter().any(|old| old == scope) {
                         return Err("OpenCloud WebFinger scope value is invalid".into());
                     }
@@ -990,33 +1117,17 @@ fn parse_session(
     expected_issuer: Option<&str>,
     proxy: ProxyConfig,
 ) -> Result<Session, String> {
-    let value: Value = serde_json::from_slice(body)
-        .map_err(|_| "Token endpoint returned invalid JSON".to_string())?;
-    let access_token = required_string(&value, "access_token")?.to_string();
-    if access_token.len() > MAX_SECRET {
-        return Err("Token endpoint returned an oversized access token".into());
-    }
-    let expires_in = value
-        .get("expires_in")
-        .and_then(Value::as_u64)
-        .filter(|seconds| (1..=31_536_000).contains(seconds))
+    let parsed = token_response::parse(body, MAX_SECRET)?;
+    let expires_at = now_unix()
+        .checked_add(parsed.lifetime_seconds)
         .ok_or_else(|| "Token endpoint returned an invalid token expiry".to_string())?;
-    let refresh_token = value
-        .get("refresh_token")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if refresh_token
-        .as_ref()
-        .is_some_and(|token| token.len() > MAX_SECRET)
-    {
-        return Err("Token endpoint returned an oversized refresh token".into());
-    }
     Ok(Session {
         server: server.to_string(),
         client_id: client_id.to_string(),
-        access_token,
-        refresh_token,
-        expires_at: now_unix().saturating_add(expires_in),
+        access_token: parsed.access_token,
+        app_token_username: None,
+        refresh_token: parsed.refresh_token,
+        expires_at,
         token_endpoint: token_endpoint.to_string(),
         expected_issuer: expected_issuer.map(str::to_owned),
         last_refresh_at: None,
@@ -1030,6 +1141,28 @@ pub(crate) fn validate_session(session: &Session) -> Result<(), String> {
         .validate()
         .map_err(|_| "Stored proxy configuration is invalid".to_string())?;
     let server = validate_url(&session.server, true, "stored server")?;
+    if let Some(username) = &session.app_token_username {
+        if session.server.len() > 2_048
+            || session.server.chars().any(char::is_control)
+            || server.query().is_some()
+            || normalize_server(&server) != session.server
+            || session.client_id != APP_TOKEN_CLIENT_ID
+            || session.refresh_token.is_some()
+            || !session.token_endpoint.is_empty()
+            || session.expected_issuer.is_some()
+            || session.last_refresh_at.is_some()
+            || session.expires_at == 0
+        {
+            return Err("Stored app-token session is invalid; sign in again".into());
+        }
+        validate_app_token_credentials(username, &session.access_token)
+            .map_err(|error| error.to_string())?;
+        validate_app_token_server(&session.server).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    if session.client_id == APP_TOKEN_CLIENT_ID {
+        return Err("Stored app-token session has no username; sign in again".into());
+    }
     let allow_loopback_http =
         server.scheme() == "http" && server.host_str().is_some_and(is_loopback);
     validate_url(
@@ -1101,6 +1234,23 @@ fn unverified_token_issuer(token: &str) -> Option<String> {
         return None;
     }
     Some(issuer.to_owned())
+}
+
+fn validate_issuer_identifier(
+    raw: &str,
+    allow_loopback_http: bool,
+    label: &str,
+) -> Result<Url, String> {
+    if raw.trim() != raw || raw.chars().any(char::is_control) {
+        return Err(format!("Invalid {label} identifier"));
+    }
+    let parsed = validate_url(raw, allow_loopback_http, label)?;
+    if parsed.query().is_some() {
+        return Err(format!(
+            "{label} identifier must not contain a query string"
+        ));
+    }
+    Ok(parsed)
 }
 
 fn validate_url(raw: &str, allow_loopback_http: bool, label: &str) -> Result<Url, String> {
@@ -1193,7 +1343,12 @@ fn base64_url(input: &[u8]) -> String {
     out
 }
 
-fn read_callback(stream: &mut TcpStream, expected_state: &str) -> Result<String, String> {
+fn read_callback(
+    stream: &mut TcpStream,
+    expected_state: &str,
+    expected_issuer: Option<&str>,
+    require_issuer: bool,
+) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut request = Vec::new();
     let mut line = Vec::new();
@@ -1203,12 +1358,19 @@ fn read_callback(stream: &mut TcpStream, expected_state: &str) -> Result<String,
         callback_reply(stream, false);
         return Err("OAuth callback was invalid or oversized".into());
     }
-    let first = String::from_utf8_lossy(&line).into_owned();
+    let first = String::from_utf8(std::mem::take(&mut line)).map_err(|_| {
+        callback_reply(stream, false);
+        "OAuth callback request was invalid".to_string()
+    })?;
     let mut parts = first.split_ascii_whitespace();
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("").to_string();
     let version = parts.next().unwrap_or("");
-    if method != "GET" || version != "HTTP/1.1" {
+    if method != "GET"
+        || version != "HTTP/1.1"
+        || !target.starts_with('/')
+        || parts.next().is_some()
+    {
         callback_reply(stream, false);
         return Err("OAuth callback request was invalid".into());
     }
@@ -1224,48 +1386,13 @@ fn read_callback(stream: &mut TcpStream, expected_state: &str) -> Result<String,
             break;
         }
     }
-    let callback_url = Url::parse(&format!("http://127.0.0.1{target}"))
-        .map_err(|_| "OAuth callback URL was invalid")?;
-    if callback_url.path() != "/" {
-        callback_reply(stream, false);
-        return Err("OAuth callback path was invalid".into());
-    }
-    let query: std::collections::HashMap<String, String> =
-        callback_url.query_pairs().into_owned().collect();
-    let state = query.get("state").map(String::as_str).unwrap_or("");
-    if !constant_time_equal(state.as_bytes(), expected_state.as_bytes()) {
-        callback_reply(stream, false);
-        return Err("OAuth callback state did not match; sign-in was rejected".into());
-    }
-    if query.contains_key("error") {
-        callback_reply(stream, false);
-        let error = query
-            .get("error")
-            .map(String::as_str)
-            .unwrap_or("invalid_response");
-        return Err(match error {
-            "access_denied" => "Sign-in was denied by the user or server".into(),
-            "login_required" => "The server requires another sign-in method".into(),
-            _ => "The authorization server did not complete sign-in".into(),
+    let result = Url::parse(&format!("http://127.0.0.1{target}"))
+        .map_err(|_| "OAuth callback URL was invalid".to_string())
+        .and_then(|url| {
+            protocol::callback_code(&url, expected_state, expected_issuer, require_issuer)
         });
-    }
-    let Some(code) = query
-        .get("code")
-        .filter(|code| !code.is_empty() && code.len() <= 8192)
-    else {
-        callback_reply(stream, false);
-        let error = query
-            .get("error")
-            .map(String::as_str)
-            .unwrap_or("invalid_response");
-        return Err(match error {
-            "access_denied" => "Sign-in was denied by the user or server".into(),
-            "login_required" => "The server requires another sign-in method".into(),
-            _ => "The authorization server returned no authorization code".into(),
-        });
-    };
-    callback_reply(stream, true);
-    Ok(code.clone())
+    callback_reply(stream, result.is_ok());
+    result
 }
 
 fn read_callback_line(
@@ -1338,6 +1465,94 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+
+    #[test]
+    fn oauth_session_serialization_preserves_legacy_field_shape() {
+        let legacy = json!({
+            "server":"https://cloud.example",
+            "client_id":"OpenCloudDesktop",
+            "access_token":"synthetic-oauth-access",
+            "refresh_token":"synthetic-oauth-refresh",
+            "expires_at":1234567890,
+            "token_endpoint":"https://cloud.example/token",
+            "expected_issuer":"https://cloud.example",
+            "last_refresh_at":null,
+            "proxy":{"mode":"direct"},
+        });
+        let session: Session = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(session.app_token_username.is_none());
+        validate_session(&session).unwrap();
+        let serialized = serde_json::to_value(&session).unwrap();
+        assert!(
+            !serialized
+                .as_object()
+                .unwrap()
+                .contains_key("app_token_username")
+        );
+        assert_eq!(serialized, legacy);
+    }
+
+    #[test]
+    fn app_token_session_is_non_oidc_validated_and_backward_compatible() {
+        let mut session = Session::for_app_token(
+            "https://cloud.example/base/",
+            "synthetic-uuid",
+            "synthetic-app-token".into(),
+            ProxyConfig::Direct,
+        )
+        .unwrap();
+        assert_eq!(session.server, "https://cloud.example/base");
+        assert_eq!(session.client_id, APP_TOKEN_CLIENT_ID);
+        assert_eq!(session.expires_at, u64::MAX);
+        session.refresh_classified().unwrap(); // No token endpoint exists or is contacted.
+        assert_eq!(session.access_token, "synthetic-app-token");
+        assert!(session.last_refresh_at.is_none());
+        assert!(session.opencloud_client().is_ok());
+        let saved = serde_json::to_vec(&session).unwrap();
+        let loaded: Session = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(loaded.app_token_username.as_deref(), Some("synthetic-uuid"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&saved).unwrap()["app_token_username"],
+            "synthetic-uuid"
+        );
+        validate_session(&loaded).unwrap();
+        let mut bad = session.clone();
+        bad.refresh_token = Some("unexpected".into());
+        assert!(validate_session(&bad).is_err());
+        let mut bad = session.clone();
+        bad.client_id = "OpenCloudDesktop".into();
+        assert!(validate_session(&bad).is_err());
+        let mut bad = session.clone();
+        bad.token_endpoint = "https://cloud.example/token".into();
+        assert!(validate_session(&bad).is_err());
+        let mut bad = session.clone();
+        bad.expected_issuer = Some("https://cloud.example".into());
+        assert!(validate_session(&bad).is_err());
+        let mut bad = session.clone();
+        bad.app_token_username = None;
+        assert!(validate_session(&bad).is_err());
+        let mut oauth =
+            serde_json::to_value(refresh_session("https://cloud.example/token")).unwrap();
+        oauth.as_object_mut().unwrap().remove("app_token_username");
+        let loaded: Session = serde_json::from_value(oauth).unwrap();
+        assert!(loaded.app_token_username.is_none());
+        validate_session(&loaded).unwrap();
+    }
+
+    #[test]
+    fn app_token_session_refuses_invalid_credentials_without_echoing_them() {
+        for (server, user, token) in [
+            ("http://cloud.example", "u", "synthetic-secret"),
+            ("https://cloud.example/?secret=x", "u", "synthetic-secret"),
+            ("https://cloud.example", "u:alias", "synthetic-secret"),
+            ("https://cloud.example", "u", "synthetic-secret\n"),
+        ] {
+            let error = Session::for_app_token(server, user, token.into(), ProxyConfig::Direct)
+                .err()
+                .unwrap();
+            assert!(!error.contains("synthetic-secret"));
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1420,6 +1635,7 @@ mod tests {
             server: server.clone(),
             client_id: "synthetic-client".into(),
             access_token: "old-access-token".into(),
+            app_token_username: None,
             refresh_token: Some("old-refresh-token".into()),
             expires_at: now_unix().saturating_sub(1),
             token_endpoint: endpoint.to_owned(),
@@ -1581,9 +1797,9 @@ mod tests {
                             &mut stream,
                             200,
                             if index == 2 {
-                                r#"{"access_token":"synthetic-access","refresh_token":"synthetic-refresh","expires_in":3600}"#
+                                r#"{"token_type":"Bearer","access_token":"synthetic-access","refresh_token":"synthetic-refresh","expires_in":3600}"#
                             } else {
-                                r#"{"access_token":"synthetic-access-2","refresh_token":"synthetic-refresh-2","expires_in":3600}"#
+                                r#"{"token_type":"Bearer","access_token":"synthetic-access-2","refresh_token":"synthetic-refresh-2","expires_in":3600}"#
                             },
                         );
                     }
@@ -1643,7 +1859,7 @@ mod tests {
     fn refresh_persists_rotation_fields_only_from_a_successful_response() {
         let (endpoint, server) = refresh_server(
             200,
-            r#"{"access_token":"rotated-access-token","refresh_token":"rotated-refresh-token","expires_in":3600}"#,
+            r#"{"token_type":"Bearer","access_token":"rotated-access-token","refresh_token":"rotated-refresh-token","expires_in":3600}"#,
         );
         let mut session = refresh_session(&endpoint);
         session.refresh_classified().unwrap();
@@ -1682,6 +1898,41 @@ mod tests {
     }
 
     #[test]
+    fn nonterminal_refresh_responses_preserve_saved_session() {
+        for (status, body) in [
+            (401, "<html>upstream authentication unavailable</html>"),
+            (401, r#"{}"#),
+            (401, r#"{"error":"temporarily_unavailable"}"#),
+            (401, r#"{"error":"server_error"}"#),
+            (401, r#"{"error":"unrecognized_proxy_error"}"#),
+            (401, r#"{"error":401}"#),
+            (400, r#"{"error":"invalid_client"}"#),
+            (401, r#"{"error":"invalid_client"}"#),
+        ] {
+            let (endpoint, server) = refresh_server(status, body);
+            let mut session = refresh_session(&endpoint);
+            let before = serde_json::to_value(&session).unwrap();
+            let outcome = session.refresh_classified();
+            server.join().unwrap();
+            assert!(matches!(outcome, Err(RefreshError::Other(_))));
+            assert_eq!(serde_json::to_value(&session).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn explicit_refresh_grant_rejection_remains_terminal_without_changing_tokens() {
+        for status in [400, 401] {
+            let (endpoint, server) = refresh_server(status, r#"{"error":"invalid_grant"}"#);
+            let mut session = refresh_session(&endpoint);
+            let before = serde_json::to_value(&session).unwrap();
+            let outcome = session.refresh_classified();
+            server.join().unwrap();
+            assert!(matches!(outcome, Err(RefreshError::Rejected(_))));
+            assert_eq!(serde_json::to_value(&session).unwrap(), before);
+        }
+    }
+
+    #[test]
     fn refresh_rejection_is_distinct_from_transport_failure() {
         let (endpoint, server) = refresh_server(401, r#"{"error":"invalid_grant"}"#);
         let mut session = refresh_session(&endpoint);
@@ -1707,12 +1958,29 @@ mod tests {
         webfinger_body: &str,
         metadata_issuer: Option<&str>,
     ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+        start_server_with_metadata(webfinger_status, webfinger_body, metadata_issuer, json!({}))
+    }
+
+    fn start_server_with_metadata(
+        webfinger_status: u16,
+        webfinger_body: &str,
+        metadata_issuer: Option<&str>,
+        overrides: Value,
+    ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let issuer = metadata_issuer
             .unwrap_or("https://issuer.example")
             .replace("{server}", &base);
-        let discovery = metadata_for_issuer(&base, &issuer);
+        let mut discovery: Value =
+            serde_json::from_str(&metadata_for_issuer(&base, &issuer)).unwrap();
+        let overrides: Value =
+            serde_json::from_str(&overrides.to_string().replace("{server}", &base)).unwrap();
+        discovery
+            .as_object_mut()
+            .unwrap()
+            .extend(overrides.as_object().unwrap().clone());
+        let discovery = discovery.to_string();
         let webfinger_body = webfinger_body.replace("{server}", &base);
         let base_for_thread = base.clone();
         let task = thread::spawn(move || {
@@ -1762,12 +2030,13 @@ mod tests {
                     Err(error) => panic!("accept token request: {error}"),
                 }
             };
+            second.set_nonblocking(false).unwrap();
             let (request, body, _) = read_http_request(&second);
             assert!(request.starts_with("POST /token"));
             response(
                 &mut second,
                 200,
-                r#"{"access_token":"private-access-token","refresh_token":"private-refresh-token","expires_in":3600}"#,
+                r#"{"token_type":"Bearer","access_token":"private-access-token","refresh_token":"private-refresh-token","expires_in":3600}"#,
             );
             body
         });
@@ -2185,7 +2454,193 @@ mod tests {
         };
         assert!(error.contains("state"));
         // Only discovery should have reached the synthetic issuer.
-        let _ = server.join();
+        assert!(server.join().unwrap().is_empty());
+    }
+
+    #[test]
+    fn callback_issuer_contract_rejects_before_exchange_and_preserves_legacy_login() {
+        for (required, variant, accepted) in [
+            (true, "missing", false),
+            (true, "matching", true),
+            (false, "wrong", false),
+            (false, "duplicate_state", false),
+            (false, "duplicate_code", false),
+            (false, "missing", true),
+        ] {
+            let (base, server) = start_server_with_metadata(
+                404,
+                "",
+                Some("https://issuer.example"),
+                json!({"authorization_response_iss_parameter_supported":required}),
+            );
+            let flow = AuthFlow::begin(&base, "OpenCloudDesktop").unwrap();
+            let authorization = Url::parse(flow.public_info()["url"].as_str().unwrap()).unwrap();
+            let parameters: std::collections::HashMap<_, _> =
+                authorization.query_pairs().into_owned().collect();
+            let redirect = Url::parse(&parameters["redirect_uri"]).unwrap();
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            query
+                .append_pair("state", &parameters["state"])
+                .append_pair("code", "synthetic-code");
+            match variant {
+                "matching" => {
+                    query.append_pair("iss", "https://issuer.example");
+                }
+                "wrong" => {
+                    query.append_pair("iss", "https://different.example");
+                }
+                "duplicate_state" => {
+                    query.append_pair("state", &parameters["state"]);
+                }
+                "duplicate_code" => {
+                    query.append_pair("code", "synthetic-code");
+                }
+                _ => {}
+            }
+            let target = format!("/?{}", query.finish());
+            let waiter = thread::spawn(move || flow.wait());
+            let mut callback = TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).unwrap();
+            write!(callback, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+            let result = waiter.join().unwrap();
+            let exchanged = server.join().unwrap();
+            if accepted {
+                assert_eq!(result.unwrap().access_token, "private-access-token");
+                assert!(!exchanged.is_empty());
+            } else {
+                assert!(result.is_err(), "{variant}");
+                assert!(exchanged.is_empty(), "rejected callback exchanged a code");
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_observed_after_callback_blocks_token_exchange() {
+        let (base, server) = start_server();
+        let flow = AuthFlow::begin(&base, "OpenCloudDesktop").unwrap();
+        let authorization = Url::parse(flow.public_info()["url"].as_str().unwrap()).unwrap();
+        let parameters: std::collections::HashMap<_, _> =
+            authorization.query_pairs().into_owned().collect();
+        let redirect = Url::parse(&parameters["redirect_uri"]).unwrap();
+        // Queue the complete response before waiting, so the first listener
+        // poll enters parsing rather than taking a cancellation-only path.
+        let mut callback = TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).unwrap();
+        write!(
+            callback,
+            "GET /?state={}&code=synthetic-code HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            parameters["state"]
+        )
+        .unwrap();
+        let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = checks.clone();
+        let result = flow.wait_with_cancel(move || {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+        });
+        let exchanged = server.join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(exchanged.is_empty());
+    }
+
+    #[test]
+    fn expiry_observed_after_callback_blocks_token_exchange() {
+        let (base, server) = start_server();
+        let mut flow = AuthFlow::begin(&base, "OpenCloudDesktop").unwrap();
+        let authorization = Url::parse(flow.public_info()["url"].as_str().unwrap()).unwrap();
+        let parameters: std::collections::HashMap<_, _> =
+            authorization.query_pairs().into_owned().collect();
+        let redirect = Url::parse(&parameters["redirect_uri"]).unwrap();
+        let mut callback = TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).unwrap();
+        write!(
+            callback,
+            "GET /?state={}&code=synthetic-code HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            parameters["state"]
+        )
+        .unwrap();
+        flow.expires_at = Instant::now() + Duration::from_secs(1);
+        let deadline = flow.expires_at;
+        let mut checks = 0;
+        let result = flow.wait_with_cancel(|| {
+            checks += 1;
+            if checks == 2 {
+                // Make expiry observable at the post-read boundary without
+                // depending on TCP read timing or weakening any timeout.
+                thread::sleep(
+                    deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+                );
+            }
+            false
+        });
+        let exchanged = server.join().unwrap();
+        assert!(matches!(result, Err(ref error) if error.contains("expired")));
+        assert_eq!(checks, 2);
+        assert!(exchanged.is_empty());
+    }
+
+    #[test]
+    fn malformed_raw_callback_utf8_is_rejected_without_transforming_a_code() {
+        let (base, server) = start_server();
+        let flow = AuthFlow::begin(&base, "OpenCloudDesktop").unwrap();
+        let authorization = Url::parse(flow.public_info()["url"].as_str().unwrap()).unwrap();
+        let parameters: std::collections::HashMap<_, _> =
+            authorization.query_pairs().into_owned().collect();
+        let redirect = Url::parse(&parameters["redirect_uri"]).unwrap();
+        let mut callback = TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).unwrap();
+        let mut request =
+            format!("GET /?state={}&code=synthetic-", parameters["state"]).into_bytes();
+        request.push(0xff);
+        request.extend_from_slice(b" HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        callback.write_all(&request).unwrap();
+        let result = flow.wait();
+        let exchanged = server.join().unwrap();
+        assert!(result.is_err());
+        assert!(exchanged.is_empty());
+    }
+
+    #[test]
+    fn contradictory_flow_metadata_never_produces_a_login_or_token_exchange() {
+        for metadata in [
+            json!({"response_types_supported":["token"]}),
+            json!({"authorization_response_iss_parameter_supported":"true"}),
+            json!({"authorization_endpoint":"{server}/authorize?client_id=duplicate"}),
+        ] {
+            let (base, server) = start_server_with_metadata(404, "", None, metadata);
+            assert!(AuthFlow::begin(&base, "OpenCloudDesktop").is_err());
+            assert!(server.join().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn grouped_webfinger_scopes_reject_controls_without_normalizing_them() {
+        for scope in [
+            "openid\tprofile",
+            "openid\nprofile",
+            "openid\rprofile",
+            "openid\u{b}profile",
+        ] {
+            let (base, server) = start_webfinger_only_server(
+                200,
+                json!({"properties":{WEBFINGER_SCOPES:[scope]}}).to_string(),
+            );
+            let url = Url::parse(&base).unwrap();
+            assert!(get_webfinger(&safe_client().unwrap(), &base, &url).is_err());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn issuer_identifiers_are_validated_without_url_normalizing_their_identity() {
+        assert!(
+            validate_issuer_identifier("https://issuer.example/tenant", false, "issuer").is_ok()
+        );
+        for issuer in [
+            " https://issuer.example",
+            "https://issuer.example ",
+            "https://issuer.example?x=1",
+            "https://issuer.example/#part",
+            "https://issuer.example/\n",
+        ] {
+            assert!(validate_issuer_identifier(issuer, false, "issuer").is_err());
+        }
     }
 
     #[test]
@@ -2247,6 +2702,7 @@ mod tests {
             server: "https://cloud.example".into(),
             client_id: "OpenCloudDesktop".into(),
             access_token,
+            app_token_username: None,
             refresh_token: None,
             expires_at: 1,
             token_endpoint: "https://issuer.example/token".into(),
