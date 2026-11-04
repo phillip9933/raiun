@@ -14,7 +14,7 @@ synthetic-agent-integration = []
 [dependencies]
 raiun-control = { path = "../raiun-control" }
 serde_json.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
