@@ -2202,6 +2202,7 @@ impl Engine {
                 "account or Space root changed since the file was opened; local bytes were preserved",
             ));
         }
+        let mut online_identity_verified = false;
         match self.backend.stat(space, path) {
             Ok(current) => {
                 if current.encrypted
@@ -2215,6 +2216,7 @@ impl Engine {
                         "remote file identity or base version changed; local bytes were preserved",
                     ));
                 }
+                online_identity_verified = true;
             }
             Err(error)
                 if error.kind == ErrorKind::NotFound
@@ -2223,20 +2225,39 @@ impl Engine {
             Err(error) if error.kind == ErrorKind::Offline && self.offline_cache.is_some() => {}
             Err(error) => return Err(error),
         }
-        if matches!(&base, WriteCondition::Absent)
-            && (self.offline_cache.is_none() || self.pending_write(space, path)?.is_none())
-        {
+        // An unrelated retained create can prevent publishing a complete
+        // parent listing. A newly verified online file must not consequently
+        // become unsaveable merely because it has no listing-cache entry.
+        // Fresh scope/resource/base checks above grant this online-only path;
+        // offline authority and existing journal bases remain unchanged.
+        let uncached_online_edit = online_identity_verified
+            && matches!(&base, WriteCondition::Match(_))
+            && self
+                .offline_cache
+                .as_ref()
+                .map(|context| {
+                    context
+                        .cache
+                        .entry_for_path(expected_scope, path)
+                        .map(|entry| entry.is_none())
+                        .map_err(cache_cloud_error)
+                })
+                .transpose()?
+                .unwrap_or(false);
+        if matches!(&base, WriteCondition::Absent) || uncached_online_edit {
             let _guard = self.execution()?;
-            return self
-                .upload_inner_with_root(
-                    None,
-                    space,
-                    path,
-                    source,
-                    base,
-                    Some(expected_scope.root_resource_id()),
-                )
-                .map(FileWriteOutcome::Uploaded);
+            if self.offline_cache.is_none() || self.pending_write(space, path)?.is_none() {
+                return self
+                    .upload_inner_with_root(
+                        None,
+                        space,
+                        path,
+                        source,
+                        base,
+                        Some(expected_scope.root_resource_id()),
+                    )
+                    .map(FileWriteOutcome::Uploaded);
+            }
         }
         self.commit_file_write(space, path, source, base)
     }
