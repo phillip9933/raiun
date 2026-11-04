@@ -1814,6 +1814,47 @@ fn ensure_operation_active(operation: Option<&OperationCancellation>) -> Result<
     }
 }
 
+fn transfer_metadata_boundary(error: CloudError, phase: &'static str) -> CloudError {
+    if error.kind == ErrorKind::InvalidResponse
+        && error.message == "DAV response omitted an entity tag"
+    {
+        // Both fragments are local constants. Never include server payloads,
+        // request URLs or authentication information in this diagnostic.
+        invalid(&format!("{phase}: DAV response omitted an entity tag"))
+    } else {
+        error
+    }
+}
+
+fn read_transfer_metadata(
+    operation: Option<&OperationCancellation>,
+    phase: &'static str,
+    mut read: impl FnMut() -> Result<RemoteEntry, CloudError>,
+) -> Result<RemoteEntry, CloudError> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        ensure_operation_active(operation)?;
+        match read() {
+            Err(error)
+                if error.kind == ErrorKind::InvalidResponse
+                    && error.message == "DAV response omitted an entity tag"
+                    && Instant::now() < deadline =>
+            {
+                // Only metadata reads may be repeated here. All request/root
+                // checks run again; PUT/GET bodies and journal claims remain
+                // outside this loop. Missing or changed validators never pass.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(Duration::from_millis(100)));
+                ensure_operation_active(operation)?;
+            }
+            result => {
+                ensure_operation_active(operation)?;
+                return result.map_err(|error| transfer_metadata_boundary(error, phase));
+            }
+        }
+    }
+}
+
 fn ensure_not_cancelled(is_cancelled: &impl Fn() -> bool) -> Result<(), CloudError> {
     if is_cancelled() {
         Err(CloudError::new(ErrorKind::Offline, "range read cancelled"))
@@ -2625,12 +2666,14 @@ impl OpenCloudClient {
                 .to_string();
         }
         ensure_operation_active(operation)?;
-        let before = if expected_root.is_some() {
-            self.check_transfer_root(&selected, path, expected_root)?;
-            self.stat_at_dav(&url, path)?
-        } else {
-            self.stat(space, path)?
-        };
+        let before = read_transfer_metadata(operation, "Download initial metadata", || {
+            if expected_root.is_some() {
+                self.check_transfer_root(&selected, path, expected_root)?;
+                self.stat_at_dav(&url, path)
+            } else {
+                self.stat(space, path)
+            }
+        })?;
         ensure_operation_active(operation)?;
         if before.encrypted {
             return Err(CloudError::new(
@@ -2715,12 +2758,14 @@ impl OpenCloudClient {
         // Keep the caller's destination intact until the server confirms the
         // same revision is still present after the complete body is staged.
         ensure_operation_active(operation)?;
-        let after = if expected_root.is_some() {
-            self.check_transfer_root(&selected, path, expected_root)?;
-            self.stat_at_dav(&url, path)?
-        } else {
-            self.stat(space, path)?
-        };
+        let after = read_transfer_metadata(operation, "Download final metadata", || {
+            if expected_root.is_some() {
+                self.check_transfer_root(&selected, path, expected_root)?;
+                self.stat_at_dav(&url, path)
+            } else {
+                self.stat(space, path)
+            }
+        })?;
         ensure_operation_active(operation)?;
         if after.etag != before.etag || after.size != copied {
             return Err(conflict("remote item changed during download"));
@@ -2760,7 +2805,9 @@ impl OpenCloudClient {
                 .to_string();
         }
         ensure_operation_active(operation)?;
-        let target = self.ensure_writable_target(&selected, &url, path)?;
+        let target = self
+            .ensure_writable_target(&selected, &url, path)
+            .map_err(|error| transfer_metadata_boundary(error, "Upload target metadata"))?;
         if let WriteCondition::Match(etag) = &condition {
             if !is_strong_etag(etag) {
                 return Err(invalid("conditional upload requires a strong entity tag"));
@@ -2829,12 +2876,17 @@ impl OpenCloudClient {
             },
         )?;
         ensure_operation_active(operation)?;
-        let entry = if expected_root.is_some() {
-            self.check_transfer_root(&selected, path, expected_root)?;
-            self.stat_at_dav(&url, path)?
-        } else {
-            self.stat(space, path)?
-        };
+        // PUT is never repeated. Some servers publish a new file before its
+        // revision metadata; wait briefly for a verifiable revision instead
+        // of turning that observation into an uncertain completed upload.
+        let entry = read_transfer_metadata(operation, "Upload final metadata", || {
+            if expected_root.is_some() {
+                self.check_transfer_root(&selected, path, expected_root)?;
+                self.stat_at_dav(&url, path)
+            } else {
+                self.stat(space, path)
+            }
+        })?;
         ensure_operation_active(operation)?;
         if entry.size != size {
             return Err(invalid("uploaded file failed size verification"));
