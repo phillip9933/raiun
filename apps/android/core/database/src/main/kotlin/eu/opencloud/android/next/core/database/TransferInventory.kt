@@ -154,7 +154,7 @@ class TransferInventory(
                     .rows(
                         query(
                             "SELECT t.*$ACCOUNT_FROM WHERE t.accountId = ? " +
-                                "AND t.state IN ('RUNNING','QUEUED','RETRY','FAILED','CONFLICT') " +
+                                "AND t.state NOT IN ('AWAITING_UNLOCK','SUCCEEDED','CANCELLED') " +
                                 "ORDER BY CASE WHEN t.state = 'RUNNING' THEN 0 " +
                                 "WHEN t.state IN ('QUEUED','RETRY') THEN 1 ELSE 2 END, " +
                                 "t.createdAtEpochMillis DESC, t.id DESC LIMIT 1",
@@ -332,7 +332,7 @@ class TransferInventory(
                     "THEN 1 ELSE 0 END),0) AS uploadRetryCount, " +
                     "coalesce(SUM(CASE WHEN t.direction = 'UPLOAD' AND t.state = 'CONFLICT' " +
                     "THEN 1 ELSE 0 END),0) AS uploadConflictCount" +
-                    "$ACCOUNT_FROM WHERE t.accountId = ? AND t.state IN ($KNOWN_STATES)",
+                    "$ACCOUNT_FROM WHERE t.accountId = ?",
                 account,
             ),
         )
@@ -419,7 +419,7 @@ private fun selection(
     filter: TransferInventoryFilter,
 ): Selection {
     val args = mutableListOf<Any?>(account)
-    val clauses = mutableListOf("t.accountId = ?", "t.state IN ($KNOWN_STATES)")
+    val clauses = mutableListOf("t.accountId = ?")
     filter.direction?.let {
         clauses += "t.direction = ?"
         args += it
@@ -436,7 +436,7 @@ private fun selection(
     when (filter.status) {
         TransferInventoryStatus.All -> Unit
         TransferInventoryStatus.Active -> clauses += "t.state IN ($ACTIVE_STATES)"
-        TransferInventoryStatus.Attention -> clauses += "t.state IN ('FAILED','CONFLICT')"
+        TransferInventoryStatus.Attention -> clauses += "t.state NOT IN ($ACTIVE_STATES,'SUCCEEDED','CANCELLED')"
         TransferInventoryStatus.Succeeded -> clauses += "t.state = 'SUCCEEDED'"
         TransferInventoryStatus.Cancelled -> clauses += "t.state = 'CANCELLED'"
     }
@@ -444,19 +444,21 @@ private fun selection(
 }
 
 private const val ACTIVE_STATES = "'QUEUED','RUNNING','RETRY','AWAITING_UNLOCK'"
-private const val KNOWN_STATES = "$ACTIVE_STATES,'FAILED','CONFLICT','SUCCEEDED','CANCELLED'"
 private const val ACCOUNT_FROM = " FROM transfers t JOIN accounts a ON a.id = t.accountId AND a.isActive = 1"
 private const val ORDER =
-    " ORDER BY CASE WHEN t.state IN ($ACTIVE_STATES) THEN 0 WHEN t.state IN ('FAILED','CONFLICT') THEN 1 ELSE 2 END, " +
+    " ORDER BY CASE WHEN t.state IN ($ACTIVE_STATES) THEN 0 " +
+        "WHEN t.state NOT IN ('SUCCEEDED','CANCELLED') THEN 1 ELSE 2 END, " +
         "t.createdAtEpochMillis DESC, t.id DESC"
 private const val COUNT_COLUMNS =
     "coalesce(SUM(CASE WHEN t.state IN ($ACTIVE_STATES) THEN 1 ELSE 0 END),0) AS active, " +
-        "coalesce(SUM(CASE WHEN t.state IN ('FAILED','CONFLICT') THEN 1 ELSE 0 END),0) AS attention, " +
+        "coalesce(SUM(CASE WHEN t.state NOT IN ($ACTIVE_STATES,'SUCCEEDED','CANCELLED') " +
+        "THEN 1 ELSE 0 END),0) AS attention, " +
         "coalesce(SUM(CASE WHEN t.state IN ('SUCCEEDED','CANCELLED') THEN 1 ELSE 0 END),0) AS history"
 private const val BACKUP_STATS =
     "SELECT b.id AS backupId, " +
         "coalesce(SUM(CASE WHEN t.state IN ('QUEUED','RUNNING','RETRY') THEN 1 ELSE 0 END),0) AS pending, " +
-        "coalesce(SUM(CASE WHEN t.state IN ('FAILED','CONFLICT') THEN 1 ELSE 0 END),0) AS attention, " +
+        "coalesce(SUM(CASE WHEN t.state NOT IN ($ACTIVE_STATES,'SUCCEEDED','CANCELLED') " +
+        "THEN 1 ELSE 0 END),0) AS attention, " +
         "MAX(CASE WHEN t.state = 'SUCCEEDED' THEN t.updatedAtEpochMillis ELSE NULL END) AS lastCompleted " +
         "FROM folder_backups b JOIN accounts a ON a.id = b.accountId AND a.isActive = 1 LEFT JOIN transfers t " +
         "ON t.accountId = b.accountId AND t.spaceId = b.spaceId AND t.direction = 'UPLOAD' " +

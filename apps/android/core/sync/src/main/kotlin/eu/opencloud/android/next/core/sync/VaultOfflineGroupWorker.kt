@@ -5,6 +5,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
+import eu.opencloud.android.next.core.database.TransferState
 import eu.opencloud.android.next.core.database.VAULT_GROUP_LOCATION_KIND
 import eu.opencloud.android.next.core.database.VaultGroupAttempt
 import eu.opencloud.android.next.core.database.VaultGroupCheckpoint
@@ -14,6 +15,7 @@ import eu.opencloud.android.next.core.database.VaultGroupSeal
 import eu.opencloud.android.next.core.database.VaultOfflineGroupEntity
 import eu.opencloud.android.next.core.database.VaultOfflineGroupMemberEntity
 import eu.opencloud.android.next.core.database.VaultOfflineGroups
+import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.database.vaultOfflineGroups
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
@@ -60,6 +62,8 @@ class VaultOfflineGroupWorker internal constructor(
             val groupId = inputData.getString(TransferWorker.TRANSFER_ID) ?: return@withContext Result.failure()
             val expected = groups.find(groupId) ?: return@withContext Result.success()
             val parent = expected.parent ?: return@withContext Result.success()
+            if (parent.typedState == TransferState.UNKNOWN) return@withContext Result.failure()
+            if (!parent.typedState.isRunnable) return@withContext Result.success()
             if (parent.locationKind != VAULT_GROUP_LOCATION_KIND ||
                 parent.direction != "DOWNLOAD" ||
                 !parent.offlinePin

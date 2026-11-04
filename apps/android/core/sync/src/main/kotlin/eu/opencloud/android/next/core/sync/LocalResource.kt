@@ -4,6 +4,8 @@ import android.content.Context
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.ResourceEntity
+import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.model.resourceCacheDirectory
 import eu.opencloud.android.next.core.model.validatedCachedFile
 import eu.opencloud.android.next.core.network.OpenCloudError
@@ -50,13 +52,15 @@ internal suspend fun awaitDownloadedResource(
     permit: () -> Boolean,
     cached: (ResourceEntity) -> Boolean,
 ): ResourceEntity {
-    withTimeout(30 * 60 * 1000L) {
-        store.observeTransfer(resource.accountId, transferId).first { transfer ->
-            transfer == null || transfer.state !in setOf("QUEUED", "RUNNING", "RETRY")
+    val outcome =
+        withTimeout(30 * 60 * 1000L) {
+            store.observeTransfer(resource.accountId, transferId).first { transfer ->
+                transfer?.typedState?.isRunnable != true
+            }
         }
-    }
     currentCoroutineContext().ensureActive()
     check(permit()) { "File access is locked." }
+    check(outcome?.typedState == TransferState.SUCCEEDED) { "The file could not be downloaded." }
     val allowed = store.requireCurrentMutableResource(resource, false)
     check(cached(allowed)) { "The file could not be downloaded." }
     currentCoroutineContext().ensureActive()

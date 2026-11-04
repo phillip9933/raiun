@@ -18,6 +18,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -62,6 +63,41 @@ class TransferRecoveryTest {
         WorkManagerTestInitHelper.closeWorkDatabase()
         database.close()
     }
+
+    @Test fun `startup recovers interrupted work but retains conflict awaiting unlock and unknown rows`() =
+        runTest {
+            seedAccount()
+            val rows =
+                listOf(
+                    "QUEUED",
+                    "RUNNING",
+                    "RETRY",
+                    "CONFLICT",
+                    "AWAITING_UNLOCK",
+                    "SUCCEEDED",
+                    "CANCELLED",
+                    "FAILED",
+                    "future",
+                ).map { state ->
+                    intent().copy(
+                        id = "state-$state",
+                        destinationPath = "/$state",
+                        state = state,
+                        bytesTransferred = 23,
+                        verificationPending = true,
+                    )
+                }
+            rows.forEach { store.createTransfer(it) }
+            val enqueued = mutableListOf<TransferEntity>()
+            recoverPendingTransfers(context, store) { enqueued += it }
+            assertEquals(setOf("QUEUED", "RUNNING", "RETRY"), enqueued.map { it.state }.toSet())
+            rows.forEach { assertEquals(it, store.transfer(it.id)) }
+            manager.reconcile()
+            for (row in rows.filter { it.state !in setOf("QUEUED", "RUNNING", "RETRY") }) {
+                assertEquals(row, store.transfer(row.id))
+                assertTrue(workManager.getWorkInfosForUniqueWork("transfer-${row.id}").get().isEmpty())
+            }
+        }
 
     @Test fun `reconciliation schedules the accepted retry instead of adopting the obsolete worker`() =
         runTest {
@@ -314,6 +350,7 @@ class TransferRecoveryTest {
 
     @Test fun `cancelled work cannot be resurrected by stale progress or reconciliation`() =
         runTest {
+            seedAccount()
             store.createTransfer(intent())
             val claimed = requireNotNull(store.claimTransfer("transfer", UUID.randomUUID().toString(), 100))
             store.cancelTransfer("transfer")

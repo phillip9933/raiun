@@ -86,7 +86,7 @@ class TransferCompletionWaitTest {
     @Test
     fun missingAndFailedTransfersFailClosed() =
         runBlocking {
-            for (state in listOf(null, "FAILED", "CANCELLED")) {
+            for (state in listOf(null, "FAILED", "CANCELLED", "CONFLICT", "AWAITING_UNLOCK", "future", "SUCCEEDED ")) {
                 try {
                     awaitEditDownload(flowOf(state)) { true }
                     fail("Invalid transfer must fail")

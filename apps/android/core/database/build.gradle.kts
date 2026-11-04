@@ -44,7 +44,8 @@ ksp {
 }
 
 dependencies {
-    implementation(project(":core:model"))
+    // Public transfer state types are defined in core:model.
+    api(project(":core:model"))
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     implementation(libs.kotlinx.coroutines.android)

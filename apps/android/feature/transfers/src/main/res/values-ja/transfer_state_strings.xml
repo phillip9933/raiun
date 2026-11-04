@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_unknown_state">この転送の保存状態を認識できません。再試行せずに保持しています。</string>
+</resources>

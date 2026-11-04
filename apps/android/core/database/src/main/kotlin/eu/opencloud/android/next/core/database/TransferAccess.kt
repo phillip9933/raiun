@@ -39,11 +39,12 @@ internal suspend fun FileBrowserDatabase.claimAllowedTransfer(
 ): TransferEntity? =
     withTransaction {
         val current = transferDao().findById(id) ?: return@withTransaction null
+        if (accountDao().findById(current.accountId) == null) return@withTransaction null
         if (current.locationKind == VAULT_GROUP_LOCATION_KIND) return@withTransaction null
         if (current.locationKind == "SPACE" &&
             vaultExclusionDao().denies(current.accountId, current.spaceId, current.destinationPath)
         ) {
-            if (current.state in setOf("QUEUED", "RUNNING", "RETRY")) transferDao().cancel(id)
+            if (current.typedState.isRunnable) transferDao().cancel(id)
             return@withTransaction null
         }
         transferDao().claim(id, workerId, now)

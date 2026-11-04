@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_server_open_explanation">Esta opción abre el archivo del servidor. «Abrir con» abre una copia local en este dispositivo. La edición y la colaboración dependen de las aplicaciones configuradas en el servidor.</string>
+</resources>

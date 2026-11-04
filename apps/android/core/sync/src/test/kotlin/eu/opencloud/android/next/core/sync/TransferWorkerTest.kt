@@ -52,6 +52,33 @@ class TransferWorkerTest {
             assertEquals(0, store.transfer("transfer")?.attemptCount)
         }
 
+    @Test fun `unknown persisted state fails without execution normalization or retry`() =
+        runTest {
+            seed()
+            val unknown =
+                requireNotNull(
+                    store.transfer("transfer"),
+                ).copy(state = "future-after-write", notBeforeEpochMillis = Long.MAX_VALUE)
+            store.updateTransfer(unknown)
+            var executed = false
+            assertEquals(
+                ListenableWorker.Result.failure(),
+                worker(IllegalStateException("must not execute")) { executed = true }.doWork(),
+            )
+            assertTrue(!executed)
+            assertEquals(unknown, store.transfer(unknown.id))
+        }
+
+    @Test fun `pending account removal refuses claim without retrying or changing transfer`() =
+        runTest {
+            seed()
+            val pending = requireNotNull(store.transfer("transfer"))
+            val account = requireNotNull(store.account(pending.accountId))
+            database.accountDao().upsert(account.copy(isActive = false, removalPending = true))
+            assertEquals(ListenableWorker.Result.failure(), worker(IllegalStateException("must not execute")).doWork())
+            assertEquals(pending, store.transfer(pending.id))
+        }
+
     @Test fun `worker persists only safe error text`() =
         runTest {
             seed()

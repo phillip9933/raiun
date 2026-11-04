@@ -20,6 +20,7 @@ import eu.opencloud.android.next.core.database.TransferDirection
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
 import eu.opencloud.android.next.core.database.VAULT_GROUP_LOCATION_KIND
+import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.database.vaultOfflineGroups
 import eu.opencloud.android.next.core.model.AppClock
 import eu.opencloud.android.next.core.model.SystemAppClock
@@ -299,7 +300,7 @@ class TransferManager(
             transfer.copy(
                 destinationPath = destination,
                 displayName = destination.substringAfterLast('/'),
-                state = TransferState.QUEUED.name,
+                state = TransferState.QUEUED.persistedValue,
                 error = null,
                 errorCode = null,
                 notBeforeEpochMillis = 0,
@@ -335,18 +336,13 @@ class TransferManager(
         scope: TransferBulkScope?,
     ): Boolean {
         require(
-            transfer.state in
-                setOf(
-                    TransferState.FAILED.name,
-                    TransferState.CANCELLED.name,
-                    TransferState.RETRY.name,
-                ),
+            transfer.typedState.allowsRetryWithoutConflictDecision,
         ) {
             "Only failed, cancelled, or waiting transfers can be retried."
         }
         val reset =
             transfer.copy(
-                state = TransferState.QUEUED.name,
+                state = TransferState.QUEUED.persistedValue,
                 error = null,
                 errorCode = null,
                 notBeforeEpochMillis = 0,
@@ -418,7 +414,7 @@ class TransferManager(
     suspend fun cancelConflict(transfer: TransferEntity) {
         store.updateTransfer(
             transfer.copy(
-                state = TransferState.CANCELLED.name,
+                state = TransferState.CANCELLED.persistedValue,
                 error = null,
                 errorCode = null,
                 notBeforeEpochMillis = 0,
@@ -558,7 +554,7 @@ class TransferManager(
     private suspend fun enqueueTransferWork(transfer: TransferEntity) {
         schedulingMutex.withLock {
             val current = store.transfer(transfer.id) ?: return@withLock
-            if (current.state !in setOf("QUEUED", "RUNNING", "RETRY")) return@withLock
+            if (!current.typedState.isRunnable) return@withLock
             val name = "transfer-${current.id}"
             val existing = workManager.getWorkInfosForUniqueWork(name).get().firstOrNull { !it.state.isFinished }
             val matchesIntent = current.workId == null || existing?.id?.toString() == current.workId

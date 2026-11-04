@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.3.3
+
+### Fixes
+
+- Keep unrecognized saved transfers visible for attention without automatically retrying them, and require a successful download before opening cached data.
+- Prevent background transfers from starting while their account is unavailable or pending removal.
+
+### Improvements
+
+- Add an **Open in web app** file action for the server's configured document apps, alongside local **Open with**. Editing and collaboration depend on the server's supported providers.
+- Strengthen saved sign-in protection by binding encrypted records to their account and credential type, with checked migration of readable existing records.
+- On Android 15/API 35+, verify the launch caller could read each incoming shared URI; preserve the existing flow on older versions.
+- Separate encrypted destination-picker job and snapshot ownership while preserving session, lock and source checks.
+
+New credential records use a versioned format that older builds cannot read; downgrade is unsupported. See [credential storage](docs/CREDENTIAL-STORAGE.md) for migration and recovery boundaries.
+
+Transfer state values and Room schema 28 remain unchanged by this hardening. Sender-provenance guarantees remain limited on API 26–34. See [Android hardening](docs/ANDROID-HARDENING.md) for scope and acceptance limits.
+
 ## 1.3.2
 
 ### Bug fixes

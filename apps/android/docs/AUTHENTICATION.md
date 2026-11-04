@@ -88,10 +88,14 @@ token-endpoint HTTP 401, proxy response or temporary failure preserves the store
 grant. Account removal waits for an active refresh and prevents its result from
 resurrecting the removed credentials.
 
-Credential encryption, aliases, account IDs and offline data formats are unchanged
-by these fixes. New pending-login records retain the issuer-support flag; older
+The published 1.3.1 authentication fixes did not change credential encryption,
+aliases, account IDs or offline data formats. New pending-login records retain the issuer-support flag; older
 pending records remain readable. Restoring existing saved accounts does not start
 a new browser login or require this optional response extension.
+
+Android 1.3.3 adds versioned account/slot binding and checked
+legacy migration; see [credential storage](CREDENTIAL-STORAGE.md). This does not
+change the OAuth flow or the supported provider profile described above.
 
 ## Verification boundaries
 

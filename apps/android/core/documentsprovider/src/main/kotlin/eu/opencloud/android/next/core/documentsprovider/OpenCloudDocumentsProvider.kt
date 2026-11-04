@@ -24,7 +24,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
@@ -372,8 +371,9 @@ class OpenCloudDocumentsProvider : DocumentsProvider() {
                 try {
                     withTimeout(30 * 60 * 1000L) {
                         val transferId = transfers.enqueueDownload(resource, offlinePin = false)
-                        store.observeTransfer(id.accountId, transferId).first { transfer ->
-                            transfer == null || transfer.state !in setOf("QUEUED", "RUNNING", "RETRY")
+                        awaitEditDownload(store.observeTransfer(id.accountId, transferId).map { it?.state }) {
+                            requireAvailable(id, readPermit)
+                            true
                         }
                         requireAvailable(id, readPermit)
                         val current = requireNotNull(store.resource(id.accountId, id.spaceId, id.resourceId))

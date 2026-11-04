@@ -61,9 +61,9 @@ internal suspend fun FileBrowserDatabase.completePendingCiphertextDownload(
         require(
             expected.locationKind == "VAULT" &&
                 expected.direction == "DOWNLOAD" &&
-                expected.state == "AWAITING_UNLOCK",
+                expected.typedState == TransferState.AWAITING_UNLOCK,
         )
-        require(replacement.state in setOf("SUCCEEDED", "FAILED"))
+        require(replacement.typedState == TransferState.SUCCEEDED || replacement.typedState == TransferState.FAILED)
         require(
             replacement.copy(
                 state = expected.state,

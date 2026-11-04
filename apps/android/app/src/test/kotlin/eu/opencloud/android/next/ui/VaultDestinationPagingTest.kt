@@ -200,6 +200,113 @@ class VaultDestinationPagingTest {
             model.leaveRoute()
         }
 
+    @Test fun `late page after dismissal cannot close a replacement picker or change its bookmarks`() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            var pending: Continuation<Unit>? = null
+            val opened = Session(file("source.txt"), (0 until 100).map { file("folder$it", true) })
+            val model = open(opened)
+            advanceUntilIdle()
+            val sourceId =
+                model.state.value.entries
+                    .single()
+                    .id
+            model.beginDestinationPicker(sourceId, "dest")
+            advanceUntilIdle()
+            val old = opened.snapshots.last()
+            old.delayPage = { suspendCoroutine { pending = it } }
+            model.destinationPage(false)
+            runCurrent()
+            model.dismissDestinationPicker()
+            advanceUntilIdle()
+            model.beginDestinationPicker(sourceId, "dest")
+            advanceUntilIdle()
+            val replacement = opened.snapshots.last()
+            requireNotNull(pending).resume(Unit)
+            advanceUntilIdle()
+            assertEquals(1, old.closeCalls)
+            assertFalse(replacement.closed)
+            assertEquals(
+                0L,
+                model.state.value.destinationPickerPage
+                    ?.offset,
+            )
+            assertFalse(
+                model.state.value.destinationPickerPage!!
+                    .hasPrevious,
+            )
+            assertEquals(41, model.state.value.destinationPickerEntries.size)
+            model.leaveRoute()
+            assertEquals(1, replacement.closeCalls)
+        }
+
+    @Test fun `locking during a page closes the snapshot before session and rejects late results`() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            var pending: Continuation<Unit>? = null
+            val opened = Session(file("source.txt"), (0 until 100).map { file("folder$it", true) })
+            val model = open(opened)
+            advanceUntilIdle()
+            model.beginDestinationPicker(
+                model.state.value.entries
+                    .single()
+                    .id,
+                "dest",
+            )
+            advanceUntilIdle()
+            val snapshot = opened.snapshots.last()
+            snapshot.delayPage = { suspendCoroutine { pending = it } }
+            model.destinationPage(false)
+            runCurrent()
+            model.lock()
+            assertEquals(1, snapshot.closeCalls)
+            assertEquals(0, opened.openSnapshotsAtClose)
+            assertTrue(opened.closed)
+            requireNotNull(pending).resume(Unit)
+            advanceUntilIdle()
+            assertEquals(1, snapshot.closeCalls)
+            assertEquals(VaultRouteMode.UNLOCK, model.state.value.mode)
+            assertNull(model.state.value.destinationPickerPath)
+            assertNull(model.state.value.destinationPickerPage)
+            assertTrue(
+                model.state.value.destinationPickerEntries
+                    .isEmpty(),
+            )
+            model.leaveRoute()
+        }
+
+    @Test fun `route replacement closes a late unadopted snapshot without publishing old sources`() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            var pending: Continuation<VaultRouteDirectorySnapshot>? = null
+            val opened = Session(file("source.txt"), listOf(file("folder", true)))
+            opened.delayDestination = { suspendCoroutine { pending = it } }
+            val model = open(opened)
+            advanceUntilIdle()
+            val sourceId =
+                model.state.value.entries
+                    .single()
+                    .id
+            model.beginDestinationPicker(sourceId, "dest")
+            runCurrent()
+            val snapshot = opened.snapshots.last()
+            model.enterRoute("replacement-account")
+            runCurrent()
+            requireNotNull(pending).resume(snapshot)
+            advanceUntilIdle()
+            assertEquals(1, snapshot.closeCalls)
+            assertTrue(opened.closed)
+            assertNull(model.state.value.destinationPickerPath)
+            assertTrue(
+                model.state.value.destinationPickerEntries
+                    .isEmpty(),
+            )
+            model.onEntryAction(sourceId, VaultEntryAction.COPY, "dest")
+            advanceUntilIdle()
+            assertEquals(0, opened.copyCalls)
+            model.leaveRoute()
+        }
+
     @Test fun `offline metadata capacity has a specific error and keeps the proven session unlocked`() =
         runTest {
             Dispatchers.setMain(StandardTestDispatcher(testScheduler))
@@ -245,6 +352,7 @@ class VaultDestinationPagingTest {
         var copyDestination: String? = null
         var sourceProofPath: String? = null
         var closed = false
+        var openSnapshotsAtClose: Int? = null
         var delayDestination: (suspend () -> VaultRouteDirectorySnapshot)? = null
         var rootEntries = listOf(source)
         private var issued = emptyList<VaultFolder>()
@@ -260,7 +368,7 @@ class VaultDestinationPagingTest {
             showHidden: Boolean,
             excludedPath: String?,
         ): VaultRouteDirectorySnapshot {
-            snapshots.lastOrNull()?.close()
+            snapshots.lastOrNull()?.revoke()
             exclusions += excludedPath
             val children =
                 when (path) {
@@ -308,8 +416,9 @@ class VaultDestinationPagingTest {
         override suspend fun exportVerifiedKeyMaterial() = ByteArray(80)
 
         override fun close() {
+            openSnapshotsAtClose = snapshots.count { !it.closed }
             closed = true
-            snapshots.forEach { it.close() }
+            snapshots.forEach { it.revoke() }
         }
     }
 
@@ -319,22 +428,33 @@ class VaultDestinationPagingTest {
     ) : VaultRouteDirectorySnapshot {
         val offsets = mutableListOf<Long>()
         var closed = false
+        var closeCalls = 0
+        private var revoked = false
+        var delayPage: (suspend () -> Unit)? = null
         override val totalCount get() = rows.size.toLong()
 
         override suspend fun page(
             offset: Long,
             limit: Int,
         ): List<VaultFolder> {
-            check(!closed)
+            check(!closed && !revoked)
             offsets += offset
-            return rows
-                .drop(offset.toInt())
-                .take(minOf(limit, 41))
-                .map { it.copy(leaseId = UUID.randomUUID().toString()) }
-                .also(publish)
+            val entries =
+                rows
+                    .drop(offset.toInt())
+                    .take(minOf(limit, 41))
+                    .map { it.copy(leaseId = UUID.randomUUID().toString()) }
+                    .also(publish)
+            delayPage?.invoke()
+            return entries
+        }
+
+        fun revoke() {
+            revoked = true
         }
 
         override fun close() {
+            closeCalls++
             closed = true
         }
     }

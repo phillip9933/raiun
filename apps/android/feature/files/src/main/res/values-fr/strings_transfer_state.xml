@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_transfer_unknown">Le transfert nécessite votre attention : %1$s</string>
+</resources>

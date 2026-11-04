@@ -6,6 +6,8 @@ import androidx.work.WorkerParameters
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.TransferEntity
+import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.typedState
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.safeMessage
@@ -115,6 +117,8 @@ class VaultUploadWorker internal constructor(
         withContext(Dispatchers.IO) {
             val transferId = inputData.getString(TransferWorker.TRANSFER_ID) ?: return@withContext Result.failure()
             val pending = store.transfer(transferId) ?: return@withContext Result.success()
+            if (pending.typedState == TransferState.UNKNOWN) return@withContext Result.failure()
+            if (!pending.typedState.isRunnable) return@withContext Result.success()
             if (pending.notBeforeEpochMillis > System.currentTimeMillis()) return@withContext Result.retry()
             val transfer =
                 store.claimTransfer(transferId, id.toString(), System.currentTimeMillis())
@@ -248,7 +252,9 @@ class VaultUploadWorker internal constructor(
     private suspend fun unclaimedResult(transferId: String): Result {
         val current = store.transfer(transferId)
         val sameWorker = current?.workId == null || current.workId == id.toString()
-        return if (sameWorker && current?.state in setOf("QUEUED", "RUNNING", "RETRY")) {
+        val unavailable = current != null && store.account(current.accountId) == null
+        if (current?.typedState == TransferState.UNKNOWN || unavailable) return Result.failure()
+        return if (sameWorker && current?.typedState?.isRunnable == true) {
             Result.retry()
         } else {
             Result.success()

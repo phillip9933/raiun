@@ -64,6 +64,7 @@ internal fun ServerWebAppDialog(
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(resource.name)
+                Text(stringResource(R.string.document_server_open_explanation))
                 WebAppModeSelector(embedded, busy, supportsEmbedded) { embedded = it }
                 WebAppLoadStatus(busy, error, choices.isEmpty())
                 choices.forEach { choice ->

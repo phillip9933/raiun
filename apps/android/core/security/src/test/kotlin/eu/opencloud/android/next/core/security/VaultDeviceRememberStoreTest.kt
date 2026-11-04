@@ -6,12 +6,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.io.File
 import java.nio.file.Files
 import javax.crypto.SecretKey
@@ -20,6 +22,16 @@ import javax.crypto.spec.SecretKeySpec
 @RunWith(RobolectricTestRunner::class)
 class VaultDeviceRememberStoreTest {
     @get:Rule val temporaryFolder = TemporaryFolder()
+
+    @Test
+    @Config(sdk = [26])
+    fun unsupportedPlatformRejectsKeyCreationBeforeKeystoreAccess() {
+        val crypto = AndroidVaultDeviceRememberCrypto()
+        assertFalse(crypto.isPlatformSupported())
+        assertThrows(IllegalStateException::class.java) {
+            crypto.create("raiun_vault_device_v1_${"a".repeat(64)}_${"b".repeat(16)}")
+        }
+    }
 
     private val identity = VaultIdentity("account-id", "https://cloud.example", "drive", "vault")
     private val otherIdentity = VaultIdentity("account-id", "https://cloud.example", "drive", "other-vault")

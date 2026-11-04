@@ -87,6 +87,44 @@ class LocalResourceWaitTest {
 
     @After fun close() = database.close()
 
+    @Test fun failedCancelledConflictingAwaitingOrUnknownOutcomesNeverReadExistingCache() =
+        runBlocking {
+            for (state in listOf("FAILED", "CANCELLED", "CONFLICT", "AWAITING_UNLOCK", "future", "SUCCEEDED ")) {
+                database.transferDao().update(transfer.copy(state = state))
+                var validations = 0
+                var rejected = false
+                try {
+                    awaitDownloadedResource(store, resource, transfer.id, { true }) {
+                        validations++
+                        true
+                    }
+                } catch (_: IllegalStateException) {
+                    rejected = true
+                }
+                assertTrue("Expected rejection of $state", rejected)
+                assertEquals(0, validations)
+            }
+        }
+
+    @Test fun removedAccountNeverReadsExistingCacheAfterTransferDisappears() =
+        runBlocking {
+            database.accountDao().upsert(
+                AccountEntity("a", "https://example.test", "u", "User", "BASIC", false, isActive = false),
+            )
+            var validations = 0
+            var rejected = false
+            try {
+                awaitDownloadedResource(store, resource, transfer.id, { true }) {
+                    validations++
+                    true
+                }
+            } catch (_: IllegalStateException) {
+                rejected = true
+            }
+            assertTrue(rejected)
+            assertEquals(0, validations)
+        }
+
     @Test fun completionReturnsCurrentAccessibleResourceAfterCacheValidation() =
         runBlocking {
             var validations = 0
