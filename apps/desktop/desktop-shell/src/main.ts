@@ -1378,6 +1378,7 @@ function transfersPage() {
   return `<div class="page-title-row"><div><div class="eyebrow">ACTIVITY</div><h1>Transfers</h1><p class="lede">Review recent provider activity, offline files, and saved edits for this account.</p></div></div>
     <div class="filter-tabs" role="group" aria-label="Provider activity filters">${filters.map(key => `<button class="filter-tab ${filter === key ? 'active' : ''}" data-filter="${key}" aria-pressed="${filter === key}">${transferTabSummary(key).label}${providerEnabled && state.agentReachable && state.status?.connected ? `<span class="tab-badge">${counts[key]}</span>` : ''}</button>`).join('')}</div>
     <p class="helper-note">${esc(summary.description)} These filters cover provider operations, including folder sync and cloud-file changes. Counts reflect the agent’s 500 most recent records, not all past activity. Offline files and saved edits stay visible below.</p>
+    ${isWindowsAgentStatus(state.status) ? windowsRecoverySettingsCard() : ''}
     ${!isWindowsAgentStatus(state.status) && state.agentReachable ? pendingOfflineWritesSection() : ''}
     ${vaultPendingFeaturesAvailable() && state.agentReachable ? encryptedOperationsTransferSection() : ''}
     ${vaultPendingFeaturesAvailable() && state.agentReachable ? encryptedRetryLatestSection() : ''}
@@ -2683,7 +2684,8 @@ function navigateToPage(page: Page) {
   if (page === 'folders') void mediaJobs.refresh();
   if (page === 'settings') { void loadNetworkProxySettings(); void loadBandwidthSettings(); }
   if (page === 'transfers') {
-    if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true);
+    if (isWindowsAgentStatus(state.status)) void loadWindowsRecoveryList();
+    else void loadPendingOfflineWrites(true);
     if (vaultAppFeaturesAvailable()) void loadEncryptedEditRecoveries(true); if (vaultPendingFeaturesAvailable()) void refreshEncryptedRetryLatestStatuses();
   } else stopEncryptedRetryLatestPolling();
   render();
