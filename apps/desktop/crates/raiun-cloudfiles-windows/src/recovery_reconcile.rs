@@ -155,7 +155,8 @@ pub trait RecoveryRemote: Send + Sync {
 /// recovery records and callback data cannot select a server, Space, or URL.
 /// The caller must retain its profile/root revocation lease for the adapter's
 /// full dispatch lifetime. Each OpenCloud request independently enforces the
-/// captured bearer generation and same-origin/no-redirect policy.
+/// captured credential owner and same-origin/no-redirect policy. Only an
+/// explicitly verified provider view can survive benign bearer renewal.
 pub struct OpenCloudRecoveryRemote {
     client: Arc<OpenCloudClient>,
     scope: EditJournalScope,
@@ -176,7 +177,8 @@ impl OpenCloudRecoveryRemote {
             CloudError::new(ErrorKind::Unauthorized, "provider scope is unavailable")
         })?;
         if origin != scope.server_origin
-            || client.token_generation() != token_generation
+            || !client.provider_generation_is_current(token_generation)
+            || !client.provider_credentials_match(&scope.account_subject, None, None)
             || token_generation == 0
             || !valid_remote_root_path(&remote_root_path)
         {
@@ -201,7 +203,13 @@ impl OpenCloudRecoveryRemote {
     }
 
     fn context(&self) -> Result<RangeReadContext, CloudError> {
-        if self.client.token_generation() != self.token_generation {
+        if !self
+            .client
+            .provider_generation_is_current(self.token_generation)
+            || !self
+                .client
+                .provider_credentials_match(&self.scope.account_subject, None, None)
+        {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -222,7 +230,13 @@ impl OpenCloudRecoveryRemote {
                 "recovery record belongs to another provider scope",
             ));
         }
-        if self.client.token_generation() != self.token_generation {
+        if !self
+            .client
+            .provider_generation_is_current(self.token_generation)
+            || !self
+                .client
+                .provider_credentials_match(&self.scope.account_subject, None, None)
+        {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",

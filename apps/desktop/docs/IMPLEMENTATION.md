@@ -1,5 +1,36 @@
 # Desktop implementation status
 
+## Windows routine renewal and ordinary upload scheduling — 5 November 2026
+
+The Agent retains one exact generation/session/account/Personal-root credential
+owner for native mounts, folder/media work and explicit ordinary recovery. Fresh
+candidate clients are published only under the current account-state fence and
+queued manager publication checks the same authentication object. Routine OAuth
+renewal verifies a cloned Session against the original cloud account/root, retains
+rotated refresh material if verification or storage is temporarily unavailable,
+then updates the shared bearer through the short-operation admission. It does not
+advance the Agent/native generation, disconnect the provider, log out vaults or
+cancel original file jobs. Blocking lifecycle status is separate from benign
+renewal. Root reconfiguration cannot race the renewal admission.
+
+Only explicitly verified SDK provider views carry the opaque security-epoch
+credential lease. They keep the original provider/journal context number across
+benign rotation, including streamed bodies, conditional readback and local
+publication. Global token generations remain observable and advance; generic
+clients and generic generation locks remain strict. Account/security transitions
+permanently revoke the shared in-memory credential owner before waiting for old
+workers; rejected-refresh cleanup reserves its exact generation until native and
+vault teardown complete. These operations neither replay nor clear pending files.
+
+Ordinary create scheduling has four exact reply-ID lanes. A bounded same-parent
+wave completes all original Prepare phases before any capture, then independently
+retains each nonce, physical file identity, original job/deadline, immutable
+capture, conditional send/readback and native completion. Sibling claims can
+coexist; exclusive namespace/vault/rename work waits for the wave. Different
+parents remain ordered. Unknown/dirty close observations still invalidate the
+whole wave, and teardown cancels/drains original flights before releasing native
+owners. Compilation and review are not native throughput or refresh acceptance.
+
 ## Current candidate — 3 November 2026
 
 The canonical Linux/Windows GUI and headless CLI source is consolidated in the

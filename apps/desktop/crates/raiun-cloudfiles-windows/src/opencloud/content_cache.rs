@@ -379,7 +379,7 @@ impl OpenCloudPlaceholderBackend {
         self.ensure_active()?;
         let (scope, version) = self.content_cache_key(binding)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(std::sync::atomic::Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -461,7 +461,9 @@ impl OpenCloudPlaceholderBackend {
                 cancellation.is_cancelled()
                     || cancellation.is_expired()
                     || self.revoked.load(std::sync::atomic::Ordering::Acquire)
-                    || self.client.token_generation() != self.token_generation
+                    || !self
+                        .client
+                        .provider_generation_is_current(self.token_generation)
             })
             .map_err(|_| BackendError::Unavailable)?;
         reader

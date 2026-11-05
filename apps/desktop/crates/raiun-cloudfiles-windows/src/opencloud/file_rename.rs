@@ -274,7 +274,9 @@ impl OpenCloudPlaceholderBackend {
     #[cfg(windows)]
     pub(crate) fn file_rename_token_is_current(&self) -> bool {
         !self.revoked.load(Ordering::Acquire)
-            && self.client.token_generation() == self.token_generation
+            && self
+                .client
+                .provider_generation_is_current(self.token_generation)
     }
 
     /// Resolve an untrusted rename pair through fresh remote parent metadata
@@ -807,7 +809,7 @@ impl LiveFileRename<'_> {
         }
         self.backend
             .client
-            .with_token_generation(self.context.token_generation, || ())?;
+            .with_provider_generation(self.context.token_generation, || ())?;
         Ok(())
     }
     fn check_parent(&self, captured_etag: bool) -> Result<(), CloudError> {
@@ -1585,7 +1587,7 @@ mod empty_directory {
             drop(state);
             self.backend
                 .client
-                .with_token_generation(b.context.token_generation, || ())?;
+                .with_provider_generation(b.context.token_generation, || ())?;
             Ok(())
         }
         fn preflight(&self, intent: &NamespaceIntent) -> Result<(), CloudError> {

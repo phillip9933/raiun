@@ -103,6 +103,7 @@ mod windows_profiles;
 #[path = "windows_recovery_policy.rs"]
 mod windows_recovery_policy;
 include!("windows_saved_cloud_check.rs");
+include!("windows_session_renewal.rs");
 use windows_headless::{PreparedWindowsAuth, mount_only, runtime_mode};
 
 type ProtectedCapturePage = (
@@ -391,6 +392,9 @@ fn budget_client(
     generation: u64,
     provider: &ProviderManager,
     store: &dyn SessionStore,
+    account_state: &Mutex<AccountState>,
+    personal_space_id: &str,
+    personal_root_id: &str,
 ) -> Result<(Arc<OpenCloudClient>, windows_bandwidth::Scope), String> {
     if generation == 0 || provider.authorized_generation.load(Ordering::Acquire) != generation {
         return Err("The account changed before bandwidth admission".into());
@@ -422,7 +426,27 @@ fn budget_client(
     let client = Arc::try_unwrap(client)
         .map_err(|_| "The account client was already published")?
         .with_transfer_budget(budget);
-    Ok((Arc::new(client), scope))
+    let state = account_state
+        .lock()
+        .map_err(|_| "Account state is unavailable")?;
+    if state.active_generation != generation
+        || !state.online_authenticated
+        || state.logout_pending
+        || state.retiring
+        || state.offline_cached
+        || !WindowsAgent::same_session(state.session.as_ref(), Some(session))
+    {
+        return Err("The account changed before client publication".into());
+    }
+    let client = provider.share_account_client(
+        Arc::new(client),
+        session,
+        generation,
+        &scope,
+        personal_space_id,
+        personal_root_id,
+    )?;
+    Ok((client, scope))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -461,6 +485,10 @@ struct AccountState {
     logout_pending: bool,
     needs_refresh: bool,
     refreshing: bool,
+    // Routine same-account renewal does not revoke the native owner or block
+    // its admitted work. Security replacement keeps using `refreshing`.
+    routine_refresh_generation: Option<u64>,
+    pending_renewal: Option<PendingSessionRenewal>,
     refresh_retry_at: u64,
     authenticating: bool,
     headless_mount_retry_at: u64,
@@ -547,6 +575,7 @@ struct ProviderManager {
     commands: std::sync::mpsc::SyncSender<ProviderCommand>,
     connected: Arc<AtomicBool>,
     authorized_generation: Arc<AtomicU64>,
+    account_client: Arc<Mutex<Option<RenewableAccountClient>>>,
     recovery_cursor_nonce: Option<[u8; 32]>,
     offline_jobs: Arc<windows_offline_jobs::OfflineJobs>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -966,6 +995,8 @@ impl ProviderManager {
         let connected = Arc::new(AtomicBool::new(false));
         let worker_connected = Arc::clone(&connected);
         let authorized_generation = Arc::new(AtomicU64::new(1));
+        let account_client = Arc::new(Mutex::new(None::<RenewableAccountClient>));
+        let worker_account_client = Arc::clone(&account_client);
         let worker_generation = Arc::clone(&authorized_generation);
         let initial_save_activation =
             Arc::new(AtomicBool::new(WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED));
@@ -1032,6 +1063,7 @@ impl ProviderManager {
                             let result = (|| {
                                 if headless { return Err("Folder sync is unavailable in mount-only mode".into()); }
                                 if worker_generation.load(Ordering::Acquire) != generation { return Err("The account changed before folder setup".into()); }
+                                if !registered_account_client(&worker_account_client, generation, &setup.client) { return Err("Folder credentials changed before publication".into()); }
                                 if folders.as_ref().is_some_and(|runtime| runtime.generation == generation) { return Ok(()); }
                                 let runtime = windows_folder_sync::Runtime::open(*setup, &worker_generation)?;
                                 let (paused, paused_space_ids) = runtime.pause_snapshot()?;
@@ -1644,6 +1676,8 @@ impl ProviderManager {
                             let candidate_backend = Arc::clone(&next_backend);
                             let result = if worker_generation.load(Ordering::Acquire) != generation {
                                 Err("The account changed before the Windows drive could connect".to_owned())
+                            } else if next_backend.vault_read_context(expected_identity).map_or(true, |(client, _)| !registered_account_client(&worker_account_client, generation, &client)) {
+                                Err("The Windows drive credentials changed before publication".to_owned())
                             } else if connection.is_some() {
                                 Err("A Windows drive connection is already active".to_owned())
                             } else {
@@ -2229,6 +2263,7 @@ impl ProviderManager {
             commands,
             connected,
             authorized_generation,
+            account_client,
             folder_generation,
             folder_revocation,
             folder_error,
@@ -3120,6 +3155,15 @@ impl ProviderManager {
     }
 
     fn authorize_generation(&self, generation: u64) {
+        if let Ok(mut registry) = self.account_client.lock()
+            && registry
+                .as_ref()
+                .is_some_and(|owner| owner.generation != generation)
+        {
+            if let Some(owner) = registry.take() {
+                let _ = owner.client.invalidate_credentials();
+            }
+        }
         self.cancel_fresh_close();
         self.bandwidth.authorize_generation(generation);
         // InstallFolders checks/publishes under this same lock. Revocation and
@@ -4345,6 +4389,8 @@ impl WindowsAgent {
             "session_cleanup_uncertain": state.session_cleanup_uncertain,
             "account_removing": state.retiring,
         });
+        status["renewing_sign_in"] =
+            json!(state.routine_refresh_generation == Some(state.active_generation));
         windows_headless::annotate_status(&mut status, runtime_mode()?);
         status["vault_move_supported"] = json!(WINDOWS_VAULT_SESSIONS_ENABLED);
         status["vault_copy_verify_supported"] = json!(WINDOWS_VAULT_SESSIONS_ENABLED);
@@ -4475,7 +4521,7 @@ impl WindowsAgent {
         let same_session = state.session.as_ref().is_some_and(|current| {
             current.server == context.session.server
                 && current.client_id == context.session.client_id
-                && current.access_token == context.session.access_token
+                && Self::same_session_authority(Some(current), Some(&context.session))
                 && current.expires_at
                     > unix_time_now().saturating_add(windows_headless::retry_seconds())
         });
@@ -4691,7 +4737,7 @@ impl WindowsAgent {
             || state.session.as_ref().is_none_or(|current| {
                 current.server != verified.session.server
                     || current.client_id != verified.session.client_id
-                    || current.access_token != verified.session.access_token
+                    || !Self::same_session_authority(Some(current), Some(&verified.session))
                     || current.expires_at
                         <= unix_time_now().saturating_add(windows_headless::retry_seconds())
             })
@@ -4777,7 +4823,7 @@ impl WindowsAgent {
         let server_origin = client
             .server_origin()
             .ok_or("The connected account server origin is invalid")?;
-        let (_, account_id, personal_root_id, spaces, context) =
+        let (personal_space_id, account_id, personal_root_id, spaces, _context) =
             verified_account_roots(&client, &session.server)?;
         if account_id != owner.account_id
             || spaces
@@ -4796,7 +4842,25 @@ impl WindowsAgent {
             agent_generation,
             &self.provider,
             self.session_store.as_ref(),
+            &self.state,
+            &personal_space_id,
+            &personal_root_id,
         )?;
+        let client = Arc::new(
+            client
+                .as_ref()
+                .clone()
+                .with_verified_provider_credentials(
+                    client.token_generation(),
+                    &personal_space_id,
+                    &personal_root_id,
+                )
+                .map_err(|_| "Could not retain the verified account credentials")?,
+        );
+        let context = RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(30),
+            token_generation: client.token_generation(),
+        };
         let provider_scope = raiun_cloudfiles_windows::ProviderScope::new(
             client.as_ref(),
             configuration.profile_scope.clone(),
@@ -4933,7 +4997,7 @@ impl WindowsAgent {
         {
             return Err("Could not bind recovery to the current account and drive folder".into());
         }
-        let client_generation = client.token_generation();
+        let client_generation = client.provider_context_generation();
         let remote = Arc::new(
             raiun_cloudfiles_windows::OpenCloudRecoveryRemote::new(
                 Arc::clone(&client),
@@ -4962,7 +5026,7 @@ impl WindowsAgent {
                     current.server != session.server
                         || current.client_id != session.client_id
                         || current.app_token_username != session.app_token_username
-                        || current.access_token != session.access_token
+                        || !Self::same_session_authority(Some(current), Some(&session))
                 })
                 || state.root_configuration.as_ref() != Some(&configuration)
             {
@@ -5065,7 +5129,7 @@ impl WindowsAgent {
             || state.session.as_ref().is_none_or(|current| {
                 current.server != session.server
                     || current.client_id != session.client_id
-                    || current.access_token != session.access_token
+                    || !Self::same_session_authority(Some(current), Some(&session))
             })
             || !self
                 .provider
@@ -5353,7 +5417,8 @@ impl WindowsAgent {
                     .opencloud_client()
                     .map_err(|_| "Could not prepare the connected account")?,
             );
-            let (_, account_id, _, spaces, _) = verified_account_roots(&client, &session.server)?;
+            let (personal_space_id, account_id, personal_root_id, spaces, _) =
+                verified_account_roots(&client, &session.server)?;
             let server = url::Url::parse(&session.server)
                 .map_err(|_| "The account server is invalid")?
                 .to_string();
@@ -5389,6 +5454,9 @@ impl WindowsAgent {
                 generation,
                 &self.provider,
                 self.session_store.as_ref(),
+                &self.state,
+                &personal_space_id,
+                &personal_root_id,
             )?;
             let origin = client
                 .server_origin()
@@ -5407,6 +5475,7 @@ impl WindowsAgent {
                             || current.client_id != session.client_id
                             || current.app_token_username != session.app_token_username
                             || current.expected_issuer != session.expected_issuer
+                            || !Self::same_session(Some(current), Some(&session))
                     })
                 {
                     return Err("The account changed during folder setup".into());
@@ -5455,6 +5524,7 @@ impl WindowsAgent {
             if !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.retiring
                 || state.logout_pending
             {
@@ -5772,6 +5842,7 @@ impl WindowsAgent {
                 state.online_authenticated
                     && !state.authenticating
                     && !state.refreshing
+                    && state.routine_refresh_generation != Some(state.active_generation)
                     && state.session.is_some()
                     && state.root_configuration.is_some()
             });
@@ -5806,7 +5877,11 @@ impl WindowsAgent {
             let state = state_mutex
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
-            if !state.online_authenticated || state.authenticating || state.refreshing {
+            if !state.online_authenticated
+                || state.authenticating
+                || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
+            {
                 return Err("Connect the account before mounting its Windows drive".into());
             }
             let session = state
@@ -5885,6 +5960,7 @@ impl WindowsAgent {
                 || !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.root_configuration.as_ref() != Some(&configuration)
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
@@ -5921,7 +5997,21 @@ impl WindowsAgent {
             generation,
             provider,
             session_store.as_ref(),
+            state_mutex,
+            &owner.personal_drive_id,
+            &personal_root_resource_id,
         )?;
+        let client = Arc::new(
+            client
+                .as_ref()
+                .clone()
+                .with_verified_provider_credentials(
+                    client.token_generation(),
+                    &owner.personal_drive_id,
+                    &personal_root_resource_id,
+                )
+                .map_err(|_| "Could not retain the verified Windows account credentials")?,
+        );
         let scope = raiun_cloudfiles_windows::ProviderScope::new(
             &client,
             configuration.profile_scope.clone(),
@@ -6000,6 +6090,7 @@ impl WindowsAgent {
                 || !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
@@ -6040,6 +6131,7 @@ impl WindowsAgent {
                 || !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
@@ -6098,6 +6190,7 @@ impl WindowsAgent {
                 || !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
@@ -6149,6 +6242,9 @@ impl WindowsAgent {
             }
         }
 
+        if self.try_start_routine_refresh()? {
+            return Ok(());
+        }
         let (session, generation, original_root) = {
             let mut state = self
                 .state
@@ -6913,6 +7009,21 @@ impl WindowsAgent {
             state.retiring = false;
             state.logout_pending = false;
         }
+    }
+
+    // Only for work already bound to this Agent generation and exact root.
+    // Benign OAuth renewal changes bearer/refresh material, never these fields;
+    // account/security replacement must advance the Agent generation first.
+    fn same_session_authority(left: Option<&auth::Session>, right: Option<&auth::Session>) -> bool {
+        let (Some(left), Some(right)) = (left, right) else {
+            return false;
+        };
+        left.server == right.server
+            && left.client_id == right.client_id
+            && left.app_token_username == right.app_token_username
+            && left.token_endpoint == right.token_endpoint
+            && left.expected_issuer == right.expected_issuer
+            && left.proxy == right.proxy
     }
 
     // Borrow credentials solely for exact currentness checks; never stage/log tokens.

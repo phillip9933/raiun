@@ -547,7 +547,7 @@ impl FileRenameRemote for FileMoveSession<'_> {
         drop(state);
         self.backend
             .client
-            .with_token_generation(b.context.token_generation, || ())?;
+            .with_provider_generation(b.context.token_generation, || ())?;
         Ok(())
     }
     fn preflight(&self, intent: &NamespaceIntent) -> Result<(), CloudError> {

@@ -108,7 +108,7 @@ struct Candidate {
     job: StreamedRecoveryJob,
     current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
 }
-pub(crate) struct Producer {
+struct Lane {
     backend: Weak<OpenCloudPlaceholderBackend>,
     generation: Arc<AtomicU64>,
     expected: u64,
@@ -121,8 +121,9 @@ pub(crate) struct Producer {
     allow_file: bool,
     allow_directory: bool,
     ordinary_candidate: bool,
+    retry_after_wave: bool,
 }
-impl Producer {
+impl Lane {
     pub(crate) fn new(
         backend: &Arc<OpenCloudPlaceholderBackend>,
         generation: &Arc<AtomicU64>,
@@ -144,6 +145,7 @@ impl Producer {
             allow_file,
             allow_directory,
             ordinary_candidate: false,
+            retry_after_wave: false,
         }
     }
     pub(crate) fn is_current(
@@ -165,9 +167,6 @@ impl Producer {
     }
     pub(crate) fn allows_directory(&self) -> bool {
         self.allow_directory
-    }
-    pub(crate) fn active_kind(&self) -> Option<CreateKind> {
-        self.candidate.as_ref().map(|candidate| candidate.kind)
     }
     pub(crate) fn active(&self) -> bool {
         self.candidate.is_some()
@@ -207,6 +206,7 @@ impl Producer {
         record_generation: u64,
         kind: CreateKind,
         workers: &mut Workers,
+        collect_only: bool,
     ) -> Result<bool, &'static str> {
         let supported_leaf = match components.first().map(String::as_str) {
             Some("Personal") => components.len() >= 2,
@@ -268,13 +268,16 @@ impl Producer {
                 current,
             });
         }
+        if collect_only {
+            return Ok(false);
+        }
         let candidate = self.candidate.as_ref().ok_or(HOLD)?;
         if candidate.job.is_stopped() {
             self.stop(connection);
             return Err(HOLD);
         }
         let step = if let Some(id) = self.flight {
-            let Some(done) = workers.poll() else {
+            let Some(done) = workers.poll_for(id) else {
                 return Ok(false);
             };
             self.flight = None;
@@ -359,6 +362,9 @@ impl Producer {
                     return Ok(false);
                 }
                 Step::BusyFile => {
+                    // A closed-writer retry must not rediscover metadata while
+                    // sibling captures are unresolved in the same wave.
+                    self.retry_after_wave = self.ordinary_candidate;
                     return Ok(false);
                 }
                 Step::Ordinary => {
@@ -391,10 +397,169 @@ impl Producer {
     }
 }
 
-impl Drop for Producer {
+impl Drop for Lane {
     fn drop(&mut self) {
         // Owner unwind must cancel before the enclosing worker executor joins.
         self.cancel_on_drop.take();
         self.deferred.take();
+    }
+}
+
+/// At most four independently owned ordinary files from one notification wave.
+/// Directory/vault work and parent changes remain serial namespace barriers.
+pub(crate) struct Producer {
+    lanes: Vec<Lane>,
+    round_ready: bool,
+}
+impl Producer {
+    pub(crate) fn new(
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        generation: &Arc<AtomicU64>,
+        expected: u64,
+        root: ConfiguredRootIdentity,
+        allow_file: bool,
+        allow_directory: bool,
+    ) -> Self {
+        Self {
+            lanes: (0..super::windows_create_executor::WORKERS)
+                .map(|_| {
+                    Lane::new(
+                        backend,
+                        generation,
+                        expected,
+                        root,
+                        allow_file,
+                        allow_directory,
+                    )
+                })
+                .collect(),
+            round_ready: false,
+        }
+    }
+    pub(crate) fn is_current(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        root: ConfiguredRootIdentity,
+    ) -> bool {
+        self.lanes.iter().all(|lane| lane.is_current(backend, root))
+    }
+    pub(crate) fn allows_file(&self) -> bool {
+        self.lanes[0].allows_file()
+    }
+    pub(crate) fn allows_directory(&self) -> bool {
+        self.lanes[0].allows_directory()
+    }
+    pub(crate) fn active(&self) -> bool {
+        self.lanes.iter().any(Lane::active)
+    }
+    pub(crate) fn active_kind_for(&self, generation: u64) -> Option<CreateKind> {
+        self.lanes.iter().find_map(|lane| {
+            lane.candidate
+                .as_ref()
+                .filter(|c| c.generation == generation)
+                .map(|c| c.kind)
+        })
+    }
+    pub(crate) fn can_join(&self, components: &[String]) -> bool {
+        !components.is_empty()
+            && self.lanes.iter().any(|lane| !lane.active())
+            && self.lanes.iter().filter(|lane| lane.active()).all(|lane| {
+                lane.ordinary_candidate
+                    && lane.candidate.as_ref().is_some_and(|candidate| {
+                        candidate.kind == CreateKind::File
+                            && candidate.components.len() == components.len()
+                            && candidate.components[..components.len() - 1]
+                                .iter()
+                                .zip(&components[..components.len() - 1])
+                                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+                    })
+            })
+    }
+    pub(crate) fn pipeline_ready(&self, generation: u64) -> bool {
+        self.lanes.iter().any(|lane| {
+            lane.ordinary_candidate
+                && lane.candidate.as_ref().is_some_and(|candidate| {
+                    candidate.generation == generation && candidate.kind == CreateKind::File
+                })
+        })
+    }
+    pub(crate) fn begin_round(&mut self, workers: &mut Workers) {
+        self.round_ready = workers.all_completed();
+    }
+    pub(crate) fn stop(&mut self, connection: &ConfiguredRootConnection) {
+        for lane in &mut self.lanes {
+            lane.stop(connection);
+        }
+    }
+    pub(crate) fn drain_held(
+        &mut self,
+        connection: &ConfiguredRootConnection,
+        workers: &mut Workers,
+    ) {
+        for lane in &mut self.lanes {
+            lane.drain_held(connection, workers);
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step(
+        &mut self,
+        connection: &ConfiguredRootConnection,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        root: ConfiguredRootIdentity,
+        components: &[String],
+        record_generation: u64,
+        kind: CreateKind,
+        workers: &mut Workers,
+    ) -> Result<bool, &'static str> {
+        let index = self.lanes.iter().position(|lane| {
+            lane.candidate
+                .as_ref()
+                .is_some_and(|candidate| candidate.generation == record_generation)
+        });
+        let inherit = index.is_none()
+            && self.active()
+            && kind == CreateKind::File
+            && self.can_join(components);
+        let index = match index {
+            Some(index) => index,
+            None => {
+                if self.active() && !inherit {
+                    return Ok(false);
+                }
+                self.lanes
+                    .iter()
+                    .position(|lane| !lane.active())
+                    .ok_or(HOLD)?
+            }
+        };
+        if self.lanes[index].retry_after_wave
+            && self
+                .lanes
+                .iter()
+                .enumerate()
+                .any(|(other, lane)| other != index && lane.active() && !lane.retry_after_wave)
+        {
+            return Ok(false);
+        }
+        let lane = &mut self.lanes[index];
+        lane.retry_after_wave = false;
+        if inherit {
+            lane.ordinary_candidate = true;
+        }
+        // Prepare's unresolved-recovery preflight is unchanged. Collect every
+        // reply in the wave before the owner captures any sibling body.
+        if lane.flight.is_some() && !self.round_ready {
+            return Ok(false);
+        }
+        lane.step(
+            connection,
+            backend,
+            root,
+            components,
+            record_generation,
+            kind,
+            workers,
+            inherit,
+        )
     }
 }

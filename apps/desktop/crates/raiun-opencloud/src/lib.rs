@@ -13,7 +13,9 @@ mod dav_upload_regressions;
 mod mkdir_cancellation_tests;
 #[cfg(test)]
 mod operation_cancellation_tests;
+mod provider_credentials;
 mod recovery_stream;
+use provider_credentials::ProviderCredentialBinding;
 pub use recovery_stream::{RecoveryCreateParent, RecoveryCreateReadback, RecoveryStreamReadback};
 pub mod avatar;
 pub mod guest_permissions;
@@ -50,7 +52,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, ThreadId},
     time::{Duration, Instant},
@@ -76,7 +78,7 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 use transfer_budget::{TransferBudget, TransferDirection};
 use url::Url;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_GRAPH_BODY: usize = 8 * 1024 * 1024;
 const MAX_DAV_RESPONSE: u64 = 32 * 1024 * 1024;
@@ -503,6 +505,8 @@ pub struct OpenCloudClient {
     token: Arc<Mutex<String>>,
     authentication: Authentication,
     token_generation: Arc<AtomicU64>,
+    credentials_revoked: Arc<AtomicBool>,
+    provider_credentials: Option<Arc<ProviderCredentialBinding>>,
     // Routine bearer rotation changes token leases, not an already-admitted
     // ordinary transfer's account/security ownership.
     security_generation: Arc<AtomicU64>,
@@ -547,7 +551,7 @@ impl OpenCloudClient {
     pub fn with_guest_sharing_deadline<T>(&self, operation: impl FnOnce() -> T) -> T {
         let _context = RangeContextGuard::enter(RangeReadContext {
             deadline: Instant::now() + Duration::from_secs(45),
-            token_generation: self.token_generation(),
+            token_generation: self.provider_context_generation(),
         });
         operation()
     }
@@ -563,7 +567,7 @@ impl OpenCloudClient {
         let context = ACTIVE_RANGE_CONTEXT.with(Cell::get).map_or_else(
             || RangeReadContext {
                 deadline,
-                token_generation: self.token_generation(),
+                token_generation: self.provider_context_generation(),
             },
             |outer| RangeReadContext {
                 deadline: outer.deadline.min(deadline),
@@ -722,11 +726,11 @@ impl OpenCloudClient {
             .ok_or_else(|| invalid("namespace probe deadline is invalid"))?;
         let context = RangeReadContext {
             deadline,
-            token_generation: self.token_generation.load(Ordering::Acquire),
+            token_generation: self.provider_context_generation(),
         };
         let _guard = RangeContextGuard::enter(context);
         let result = probe()?;
-        if self.token_generation.load(Ordering::Acquire) != context.token_generation {
+        if !self.provider_generation_is_current(context.token_generation) {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -803,6 +807,8 @@ impl OpenCloudClient {
             token: Arc::new(Mutex::new(bearer_token)),
             authentication,
             token_generation: Arc::new(AtomicU64::new(1)),
+            credentials_revoked: Arc::new(AtomicBool::new(false)),
+            provider_credentials: None,
             security_generation: Arc::new(AtomicU64::new(1)),
             bounded_operation_admission: Arc::new(BoundedOperationAdmission::default()),
             initiator_id: format!("raiun-{}", std::process::id()),
@@ -877,6 +883,12 @@ impl OpenCloudClient {
             .token
             .lock()
             .map_err(|_| invalid("authentication state unavailable"))?;
+        if self.credentials_revoked.load(Ordering::Acquire) {
+            return Err(CloudError::new(
+                ErrorKind::Unauthorized,
+                "credentials were invalidated",
+            ));
+        }
         let current = self.token_generation.load(Ordering::Acquire);
         let security = self.security_generation.load(Ordering::Acquire);
         if admission.is_some_and(|admission| {
@@ -933,6 +945,7 @@ impl OpenCloudClient {
         Arc::ptr_eq(&self.token, &other.token)
             && Arc::ptr_eq(&self.token_generation, &other.token_generation)
             && Arc::ptr_eq(&self.security_generation, &other.security_generation)
+            && Arc::ptr_eq(&self.credentials_revoked, &other.credentials_revoked)
             && Arc::ptr_eq(
                 &self.bounded_operation_admission,
                 &other.bounded_operation_admission,
@@ -964,7 +977,9 @@ impl OpenCloudClient {
             .token
             .lock()
             .map_err(|_| invalid("authentication state unavailable"))?;
-        if self.token_generation.load(Ordering::Acquire) != expected {
+        if self.credentials_revoked.load(Ordering::Acquire)
+            || self.token_generation.load(Ordering::Acquire) != expected
+        {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -985,8 +1000,10 @@ impl OpenCloudClient {
         other_expected: u64,
         publish: impl FnOnce() -> T,
     ) -> Result<T, CloudError> {
-        let generation_matches =
-            |client: &Self, expected| client.token_generation.load(Ordering::Acquire) == expected;
+        let generation_matches = |client: &Self, expected| {
+            !client.credentials_revoked.load(Ordering::Acquire)
+                && client.token_generation.load(Ordering::Acquire) == expected
+        };
         if Arc::ptr_eq(&self.token, &other.token) {
             let _token = self
                 .token
@@ -994,6 +1011,67 @@ impl OpenCloudClient {
                 .map_err(|_| invalid("authentication state unavailable"))?;
             if self_expected != other_expected
                 || !generation_matches(self, self_expected)
+                || !generation_matches(other, other_expected)
+            {
+                return Err(CloudError::new(
+                    ErrorKind::Unauthorized,
+                    "authenticated provider generation changed",
+                ));
+            }
+            return Ok(publish());
+        }
+
+        let self_first = (Arc::as_ptr(&self.token) as usize) < (Arc::as_ptr(&other.token) as usize);
+        let (_first, _second) = if self_first {
+            let first = self
+                .token
+                .lock()
+                .map_err(|_| invalid("authentication state unavailable"))?;
+            let second = other
+                .token
+                .lock()
+                .map_err(|_| invalid("authentication state unavailable"))?;
+            (first, second)
+        } else {
+            let first = other
+                .token
+                .lock()
+                .map_err(|_| invalid("authentication state unavailable"))?;
+            let second = self
+                .token
+                .lock()
+                .map_err(|_| invalid("authentication state unavailable"))?;
+            (first, second)
+        };
+        if !generation_matches(self, self_expected) || !generation_matches(other, other_expected) {
+            return Err(CloudError::new(
+                ErrorKind::Unauthorized,
+                "authenticated provider generation changed",
+            ));
+        }
+        Ok(publish())
+    }
+
+    /// Scoped counterpart used only by verified native credential owners.
+    /// Retains both original proof generations and the stable lock order.
+    pub(crate) fn with_provider_generations<T>(
+        &self,
+        other: &Self,
+        self_expected: u64,
+        other_expected: u64,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T, CloudError> {
+        if self.provider_credentials.is_none() && other.provider_credentials.is_none() {
+            return self.with_token_generations(other, self_expected, other_expected, publish);
+        }
+        let generation_matches =
+            |client: &Self, expected| client.provider_generation_is_current(expected);
+        if Arc::ptr_eq(&self.token, &other.token) {
+            let _token = self
+                .token
+                .lock()
+                .map_err(|_| invalid("authentication state unavailable"))?;
+            if !generation_matches(self, self_expected)
                 || !generation_matches(other, other_expected)
             {
                 return Err(CloudError::new(
@@ -1048,7 +1126,9 @@ impl OpenCloudClient {
                 return Err(invalid("authentication state unavailable"));
             }
         };
-        if self.token_generation.load(Ordering::Acquire) != expected {
+        if self.credentials_revoked.load(Ordering::Acquire)
+            || self.token_generation.load(Ordering::Acquire) != expected
+        {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -1058,6 +1138,18 @@ impl OpenCloudClient {
     }
 
     fn authorization(&self, token: &str) -> Result<(HeaderValue, String), CloudError> {
+        if !self.provider_generation_is_current(self.token_generation()) {
+            return Err(CloudError::new(
+                ErrorKind::Unauthorized,
+                "native credential owner changed",
+            ));
+        }
+        if token.is_empty() {
+            return Err(CloudError::new(
+                ErrorKind::Unauthorized,
+                "credentials were invalidated",
+            ));
+        }
         let (value, redactions) = match &self.authentication {
             Authentication::Offline => {
                 return Err(CloudError::new(
@@ -1112,9 +1204,9 @@ impl OpenCloudClient {
             .token
             .lock()
             .map_err(|_| invalid("authentication state unavailable"))?;
-        if context.is_some_and(|context| {
-            self.token_generation.load(Ordering::Acquire) != context.token_generation
-        }) {
+        if context
+            .is_some_and(|context| !self.provider_generation_is_current(context.token_generation))
+        {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -1163,9 +1255,9 @@ impl OpenCloudClient {
             .token
             .lock()
             .map_err(|_| invalid("authentication state unavailable"))?;
-        if context.is_some_and(|context| {
-            self.token_generation.load(Ordering::Acquire) != context.token_generation
-        }) {
+        if context
+            .is_some_and(|context| !self.provider_generation_is_current(context.token_generation))
+        {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -1523,7 +1615,7 @@ impl OpenCloudClient {
         let context = outer.map_or_else(
             || RangeReadContext {
                 deadline,
-                token_generation: self.token_generation(),
+                token_generation: self.provider_context_generation(),
             },
             |outer| RangeReadContext {
                 deadline: outer.deadline.min(deadline),
@@ -1723,12 +1815,12 @@ impl OpenCloudClient {
         } = request;
         let transfer_cancellation = self.transfer_budget.cancellation();
         let expected_token_generation = context.map(|context| context.token_generation);
-        let token_generation = Arc::clone(&self.token_generation);
+        let token_generation = self.context_generation_fence();
         let cancelled = || {
             is_cancelled()
                 || transfer_cancellation.is_cancelled()
                 || expected_token_generation
-                    .is_some_and(|expected| token_generation.load(Ordering::Acquire) != expected)
+                    .is_some_and(|expected| !token_generation.matches(expected))
         };
         ensure_not_cancelled(&cancelled)?;
         if output.len() > max_range_read
@@ -1800,8 +1892,8 @@ impl OpenCloudClient {
         let budget = self.transfer_budget.clone();
         let operation_cancellation = transfer_cancellation.clone();
         let watchdog_cancellation = operation_cancellation.clone();
-        let watchdog_token_generation = Arc::clone(&token_generation);
-        let body_token_generation = Arc::clone(&token_generation);
+        let watchdog_token_generation = token_generation.clone();
+        let body_token_generation = token_generation.clone();
         let caller_cancelled = &is_cancelled;
         let range_header = format!("bytes={offset}-{end}");
         let expected_etag_owned = expected_etag.to_owned();
@@ -1814,9 +1906,8 @@ impl OpenCloudClient {
             || {
                 caller_cancelled()
                     || watchdog_cancellation.is_cancelled()
-                    || expected_token_generation.is_some_and(|expected| {
-                        watchdog_token_generation.load(Ordering::Acquire) != expected
-                    })
+                    || expected_token_generation
+                        .is_some_and(|expected| !watchdog_token_generation.matches(expected))
             },
             move |progress| async move {
                 let response = request
@@ -1866,9 +1957,8 @@ impl OpenCloudClient {
                     || {
                         caller_cancelled()
                             || operation_cancellation.is_cancelled()
-                            || expected_token_generation.is_some_and(|expected| {
-                                body_token_generation.load(Ordering::Acquire) != expected
-                            })
+                            || expected_token_generation
+                                .is_some_and(|expected| !body_token_generation.matches(expected))
                     },
                     &progress,
                     on_body_chunk_consumed,
@@ -1883,9 +1973,8 @@ impl OpenCloudClient {
         let body = match body_result {
             Ok(body) => body,
             Err(_)
-                if expected_token_generation.is_some_and(|expected| {
-                    token_generation.load(Ordering::Acquire) != expected
-                }) =>
+                if expected_token_generation
+                    .is_some_and(|expected| !token_generation.matches(expected)) =>
             {
                 return Err(CloudError::new(
                     ErrorKind::Unauthorized,
@@ -1920,16 +2009,16 @@ impl OpenCloudClient {
         if root_after != expected_root_id {
             return Err(conflict("Space root identity changed"));
         }
-        if context.is_some_and(|context| {
-            self.token_generation.load(Ordering::Acquire) != context.token_generation
-        }) {
+        if context
+            .is_some_and(|context| !self.provider_generation_is_current(context.token_generation))
+        {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
             ));
         }
         if let Some(context) = context {
-            self.with_token_generation(context.token_generation, || {
+            self.with_provider_generation(context.token_generation, || {
                 output[..length].copy_from_slice(&body);
                 length
             })
@@ -2293,7 +2382,7 @@ impl OpenCloudClient {
     ) -> Result<(), CloudError> {
         let _guard = RangeContextGuard::enter(context);
         CloudBackend::list(self, space, path, visit)?;
-        if self.token_generation.load(Ordering::Acquire) != context.token_generation {
+        if !self.provider_generation_is_current(context.token_generation) {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -2313,7 +2402,7 @@ impl OpenCloudClient {
     ) -> Result<RemoteEntry, CloudError> {
         let _guard = RangeContextGuard::enter(context);
         let entry = CloudBackend::stat(self, space, path)?;
-        if self.token_generation.load(Ordering::Acquire) != context.token_generation {
+        if !self.provider_generation_is_current(context.token_generation) {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -2479,8 +2568,8 @@ impl OpenCloudClient {
         let budget = self.transfer_budget.clone();
         let cancellation = budget.cancellation();
         let watchdog_cancellation = cancellation.clone();
-        let watchdog_generation = Arc::clone(&self.token_generation);
-        let body_generation = Arc::clone(&self.token_generation);
+        let watchdog_generation = self.context_generation_fence();
+        let body_generation = self.context_generation_fence();
         let expected_generation = context.token_generation;
         let total_timeout = transfer_timeout_for_context(
             context,
@@ -2496,7 +2585,7 @@ impl OpenCloudClient {
             total_timeout,
             || {
                 watchdog_cancellation.is_cancelled()
-                    || watchdog_generation.load(Ordering::Acquire) != expected_generation
+                    || !watchdog_generation.matches(expected_generation)
             },
             move |progress| async move {
                 let body = async_body::budgeted_upload_stream(
@@ -2504,8 +2593,7 @@ impl OpenCloudClient {
                     content_size,
                     budget,
                     move || {
-                        cancellation.is_cancelled()
-                            || body_generation.load(Ordering::Acquire) != expected_generation
+                        cancellation.is_cancelled() || !body_generation.matches(expected_generation)
                     },
                     progress,
                 );
@@ -2586,8 +2674,8 @@ impl OpenCloudClient {
         )?;
         let cancellation = budget.cancellation();
         let watchdog_cancellation = cancellation.clone();
-        let watchdog_generation = Arc::clone(&self.token_generation);
-        let body_generation = Arc::clone(&self.token_generation);
+        let watchdog_generation = self.context_generation_fence();
+        let body_generation = self.context_generation_fence();
         let expected_generation = context.token_generation;
         let expected_etag_owned = expected_etag.to_owned();
         let expected_size = before.size;
@@ -2597,7 +2685,7 @@ impl OpenCloudClient {
             total_timeout,
             || {
                 watchdog_cancellation.is_cancelled()
-                    || watchdog_generation.load(Ordering::Acquire) != expected_generation
+                    || !watchdog_generation.matches(expected_generation)
             },
             move |progress| async move {
                 let response = request
@@ -2627,7 +2715,7 @@ impl OpenCloudClient {
                     &mut output,
                     max_bytes as u64,
                     &budget,
-                    || body_generation.load(Ordering::Acquire) != expected_generation,
+                    || !body_generation.matches(expected_generation),
                     &progress,
                 )
                 .await?;
@@ -2694,7 +2782,7 @@ impl OpenCloudClient {
 
     fn ensure_context_current(&self, context: RangeReadContext) -> Result<(), CloudError> {
         if context.remaining().is_err()
-            || self.token_generation.load(Ordering::Acquire) != context.token_generation
+            || !self.provider_generation_is_current(context.token_generation)
         {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
@@ -2725,7 +2813,7 @@ impl OpenCloudClient {
         context: RangeReadContext,
     ) -> Result<RemoteEntry, CloudError> {
         let _guard = RangeContextGuard::enter(context);
-        if self.token_generation.load(Ordering::Acquire) != context.token_generation
+        if !self.provider_generation_is_current(context.token_generation)
             || space.id.is_empty()
             || space.id.len() > MAX_DAV_ENTRY
             || space.id.chars().any(char::is_control)
@@ -2770,7 +2858,7 @@ impl OpenCloudClient {
         if !root.directory || root.id.is_empty() || root.id.chars().any(char::is_control) {
             return Err(invalid("Space root identity is invalid"));
         }
-        if self.token_generation.load(Ordering::Acquire) != context.token_generation {
+        if !self.provider_generation_is_current(context.token_generation) {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -2819,7 +2907,7 @@ impl OpenCloudClient {
         }
         let _guard = RangeContextGuard::enter(context);
         let spaces = self.discover_spaces(Some(context), max_spaces)?;
-        if self.token_generation.load(Ordering::Acquire) != context.token_generation {
+        if !self.provider_generation_is_current(context.token_generation) {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed",
@@ -3346,7 +3434,7 @@ impl OpenCloudClient {
         let inherited_context = ACTIVE_RANGE_CONTEXT.with(Cell::get);
         let body_context = inherited_context.unwrap_or(RangeReadContext {
             deadline: Instant::now() + total_timeout,
-            token_generation: self.token_generation(),
+            token_generation: self.provider_context_generation(),
         });
         let metadata_active = |context| {
             ensure_operation_active(Some(operation))?;
@@ -3420,7 +3508,7 @@ impl OpenCloudClient {
         let body_cancellation = cancellation.clone();
         let body_operation = operation.clone();
         let security = Arc::clone(&self.security_generation);
-        let generation = Arc::clone(&self.token_generation);
+        let generation = self.context_generation_fence();
         let result = async_body::run_body_operation_cancellable(
             &self.body_runtime,
             self.body_idle_timeout,
@@ -3430,15 +3518,15 @@ impl OpenCloudClient {
                     || cancellation.is_cancelled()
                     || budget.is_paused()
                     || self.security_generation.load(Ordering::Acquire) != security_generation
-                    || inherited_context
-                        .is_some_and(|context| self.token_generation() != context.token_generation)
+                    || inherited_context.is_some_and(|context| {
+                        !self.provider_generation_is_current(context.token_generation)
+                    })
             },
             move |progress| async move {
                 ensure_operation_active(Some(&body_operation))?;
                 if security.load(Ordering::Acquire) != security_generation
-                    || inherited_context.is_some_and(|context| {
-                        generation.load(Ordering::Acquire) != context.token_generation
-                    })
+                    || inherited_context
+                        .is_some_and(|context| !generation.matches(context.token_generation))
                 {
                     return Err(CloudError::new(
                         ErrorKind::Unauthorized,
@@ -3472,7 +3560,7 @@ impl OpenCloudClient {
                             || body_cancellation.is_cancelled()
                             || security.load(Ordering::Acquire) != security_generation
                             || inherited_context.is_some_and(|context| {
-                                generation.load(Ordering::Acquire) != context.token_generation
+                                !generation.matches(context.token_generation)
                             })
                     },
                     &progress,
@@ -3627,7 +3715,7 @@ impl OpenCloudClient {
         };
         let response_token = token.clone();
         let security = Arc::clone(&self.security_generation);
-        let generation = Arc::clone(&self.token_generation);
+        let generation = self.context_generation_fence();
         self.ensure_context_current(preparation_context)?;
         current()?;
         drop(preparation);
@@ -3639,8 +3727,9 @@ impl OpenCloudClient {
                 watchdog_cancellation.is_cancelled()
                     || operation.is_some_and(OperationCancellation::is_cancelled)
                     || self.security_generation.load(Ordering::Acquire) != security_generation
-                    || inherited_context
-                        .is_some_and(|context| self.token_generation() != context.token_generation)
+                    || inherited_context.is_some_and(|context| {
+                        !self.provider_generation_is_current(context.token_generation)
+                    })
             },
             move |progress| async move {
                 if is_current.is_some_and(|check| !check()) {
@@ -3648,9 +3737,8 @@ impl OpenCloudClient {
                 }
                 ensure_operation_active(body_operation.as_ref())?;
                 if security.load(Ordering::Acquire) != security_generation
-                    || inherited_context.is_some_and(|context| {
-                        generation.load(Ordering::Acquire) != context.token_generation
-                    })
+                    || inherited_context
+                        .is_some_and(|context| !generation.matches(context.token_generation))
                 {
                     return Err(CloudError::new(
                         ErrorKind::Unauthorized,
@@ -3668,7 +3756,7 @@ impl OpenCloudClient {
                                 .is_some_and(OperationCancellation::is_cancelled)
                             || security.load(Ordering::Acquire) != security_generation
                             || inherited_context.is_some_and(|context| {
-                                generation.load(Ordering::Acquire) != context.token_generation
+                                !generation.matches(context.token_generation)
                             })
                     },
                     progress,
@@ -3744,7 +3832,7 @@ impl CloudBackend for OpenCloudClient {
         let context = ACTIVE_RANGE_CONTEXT.with(Cell::get).map_or_else(
             || RangeReadContext {
                 deadline,
-                token_generation: self.token_generation(),
+                token_generation: self.provider_context_generation(),
             },
             |outer| RangeReadContext {
                 deadline: outer.deadline.min(deadline),
@@ -3890,7 +3978,7 @@ impl CloudBackend for OpenCloudClient {
                         target,
                     })
                 })();
-                if self.token_generation() != context.token_generation {
+                if !self.provider_generation_is_current(context.token_generation) {
                     return Err(CloudError::new(
                         ErrorKind::Unauthorized,
                         "authenticated provider generation changed or expired",
@@ -3899,7 +3987,7 @@ impl CloudBackend for OpenCloudClient {
                 result
             },
             |result| {
-                if self.token_generation() != context.token_generation {
+                if !self.provider_generation_is_current(context.token_generation) {
                     return Err(CloudError::new(
                         ErrorKind::Unauthorized,
                         "authenticated provider generation changed or expired",

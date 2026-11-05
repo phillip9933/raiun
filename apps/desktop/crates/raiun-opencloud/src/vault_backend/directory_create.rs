@@ -97,7 +97,9 @@ impl VaultBackend {
             || normalize_virtual_path(request.logical_path)? != request.logical_path
             || request.expected_token_generation == 0
             || request.expected_provider_generation == 0
-            || self.client.token_generation() != request.expected_token_generation
+            || !self
+                .client
+                .provider_generation_is_current(request.expected_token_generation)
             || request.provider_generation.load(Ordering::Acquire)
                 != request.expected_provider_generation
             || (request.cancelled)()

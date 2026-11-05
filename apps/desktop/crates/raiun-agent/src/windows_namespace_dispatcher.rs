@@ -350,6 +350,8 @@ mod connected {
         instance: Option<u64>,
         batch: Option<NotificationBatch>,
         cursor: Cursor,
+        pending_files: Vec<(Vec<String>, u64)>,
+        file_wave_started: bool,
         #[cfg(all(test, debug_assertions))]
         fixture_directory: bool,
         #[cfg(all(test, debug_assertions))]
@@ -411,6 +413,8 @@ mod connected {
                 instance: None,
                 batch: None,
                 cursor: Cursor::default(),
+                pending_files: Vec::new(),
+                file_wave_started: false,
                 #[cfg(all(test, debug_assertions))]
                 fixture_directory: false,
                 #[cfg(all(test, debug_assertions))]
@@ -461,6 +465,7 @@ mod connected {
         pub(crate) fn hold(&mut self) {
             self.cursor.hold();
             self.batch = None;
+            self.pending_files.clear();
             if let Some(file) = &mut self.rename {
                 file.hold();
             }
@@ -519,7 +524,7 @@ mod connected {
             backend: &Arc<OpenCloudPlaceholderBackend>,
             root: ConfiguredRootIdentity,
             save_or_command_active: bool,
-            workers: Option<&mut create::Workers>,
+            mut workers: Option<&mut create::Workers>,
         ) -> Result<(), &'static str> {
             if !self.current(backend, root) {
                 return Err(HOLD);
@@ -530,6 +535,67 @@ mod connected {
             if save_or_command_active || self.mkdir.as_ref().is_some_and(mkdir::Producer::is_paused)
             {
                 return Ok(());
+            }
+            if let (Some(create), Some(workers)) = (&mut self.create, workers.as_deref_mut()) {
+                create.begin_round(workers);
+            }
+            if !self.pending_files.is_empty() {
+                // Gather only contiguous, same-parent ordinary file hints. This
+                // classification controls scheduling; each native create still
+                // independently proves its root, parent, encryption and custody.
+                let extend = !self.file_wave_started
+                    && self.pending_files.len() < super::super::windows_create_executor::WORKERS
+                    && self.cursor.front().is_some_and(|work| {
+                        let Work::Directory(index) = work else {
+                            return false;
+                        };
+                        let Some(NotificationBatch::Hints(hints)) = self.batch.as_ref() else {
+                            return false;
+                        };
+                        let Some(hint) = hints.get(index) else {
+                            return false;
+                        };
+                        let components = hint.components();
+                        if !self
+                            .create
+                            .as_ref()
+                            .is_some_and(|create| create.can_join(components))
+                        {
+                            return false;
+                        }
+                        let refs = components.iter().map(String::as_str).collect::<Vec<_>>();
+                        connection
+                            .observe_namespace_entry(&refs)
+                            .is_ok_and(|entry| entry.kind == NamespaceEntryKind::PlainFile)
+                    });
+                if !extend {
+                    self.file_wave_started = true;
+                    let create = self.create.as_mut().ok_or(HOLD)?;
+                    let workers = workers.as_deref_mut().ok_or(HOLD)?;
+                    let pending = std::mem::take(&mut self.pending_files);
+                    for (components, generation) in pending {
+                        if !create.step(
+                            connection,
+                            backend,
+                            root,
+                            &components,
+                            generation,
+                            CreateKind::File,
+                            workers,
+                        )? {
+                            self.pending_files.push((components, generation));
+                        }
+                    }
+                    // A directory, rename, parent change, or next batch cannot
+                    // overtake unfinished original captures from this wave.
+                    if !self.pending_files.is_empty() {
+                        return Ok(());
+                    }
+                    self.file_wave_started = false;
+                }
+            }
+            if !self.cursor.pending() && self.batch.is_some() {
+                self.batch = None;
             }
             if self.batch.is_none() {
                 // Exactly ONE attach OR poll; both methods preserve connection-
@@ -707,7 +773,11 @@ mod connected {
                     if !directory_ready && self.create.is_none() {
                         return Err(HOLD);
                     }
-                    if self.create.as_ref().is_some_and(create::Producer::active) {
+                    if self
+                        .create
+                        .as_ref()
+                        .is_some_and(|create| create.active_kind_for(generation).is_some())
+                    {
                         let NotificationBatch::Hints(hints) = self.batch.as_ref().ok_or(HOLD)?
                         else {
                             return Err(HOLD);
@@ -719,7 +789,7 @@ mod connected {
                         let kind = self
                             .create
                             .as_ref()
-                            .and_then(create::Producer::active_kind)
+                            .and_then(|create| create.active_kind_for(generation))
                             .ok_or(HOLD)?;
                         if self.create.as_mut().ok_or(HOLD)?.step(
                             connection,
@@ -728,8 +798,15 @@ mod connected {
                             components,
                             generation,
                             kind,
-                            workers.ok_or(HOLD)?,
+                            workers.as_deref_mut().ok_or(HOLD)?,
                         )? {
+                            self.cursor.complete().map_err(|_| HOLD)?;
+                        } else if self
+                            .create
+                            .as_ref()
+                            .is_some_and(|create| create.pipeline_ready(generation))
+                        {
+                            self.pending_files.push((components.to_vec(), generation));
                             self.cursor.complete().map_err(|_| HOLD)?;
                         }
                     } else if !self.cursor.directory_started {
@@ -831,7 +908,7 @@ mod connected {
                             }
                             Selection::CreateFile => {
                                 let create = self.create.as_mut().ok_or(HOLD)?;
-                                let workers = workers.ok_or(HOLD)?;
+                                let workers = workers.as_deref_mut().ok_or(HOLD)?;
                                 if create.step(
                                     connection,
                                     backend,
@@ -841,6 +918,9 @@ mod connected {
                                     CreateKind::File,
                                     workers,
                                 )? {
+                                    self.cursor.complete().map_err(|_| HOLD)?;
+                                } else if create.pipeline_ready(generation) {
+                                    self.pending_files.push((components, generation));
                                     self.cursor.complete().map_err(|_| HOLD)?;
                                 }
                             }
@@ -867,7 +947,7 @@ mod connected {
             if !self.current(backend, root) {
                 return Err(HOLD);
             }
-            if !self.cursor.pending() {
+            if !self.cursor.pending() && self.pending_files.is_empty() {
                 self.batch = None;
             }
             Ok(())

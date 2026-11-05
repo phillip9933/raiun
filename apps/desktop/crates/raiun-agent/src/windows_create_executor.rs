@@ -1,4 +1,4 @@
-//! Two joined SDK workers. Undrained results retain their bounded capacity slot.
+//! Four joined SDK workers. Undrained results retain their bounded capacity slot.
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -18,7 +18,7 @@ impl Drop for CancelOnDrop {
     }
 }
 
-const WORKERS: usize = 2;
+pub(crate) const WORKERS: usize = 4;
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Failure {
     Cancelled,
@@ -34,6 +34,7 @@ pub(crate) struct Executor<T: Send + 'static, R: Send + 'static> {
     workers: Vec<JoinHandle<()>>,
     accepting: Arc<AtomicBool>,
     outstanding: Vec<u64>,
+    ready: Vec<Completion<R>>,
     next: u64,
 }
 impl<T: Send + 'static, R: Send + 'static> Executor<T, R> {
@@ -85,6 +86,7 @@ impl<T: Send + 'static, R: Send + 'static> Executor<T, R> {
             workers,
             accepting,
             outstanding: Vec::new(),
+            ready: Vec::new(),
             next: 0,
         })
     }
@@ -110,8 +112,27 @@ impl<T: Send + 'static, R: Send + 'static> Executor<T, R> {
             ) => Err(task),
         }
     }
+    fn collect(&mut self) {
+        while let Ok(result) = self.results.try_recv() {
+            self.ready.push(result);
+        }
+    }
+    /// A wave's metadata phases finish before any native capture is advanced.
+    /// Buffered replies retain capacity until their exact owner consumes them.
+    pub(crate) fn all_completed(&mut self) -> bool {
+        self.collect();
+        self.ready.len() == self.outstanding.len()
+    }
+    pub(crate) fn poll_for(&mut self, id: u64) -> Option<Completion<R>> {
+        self.collect();
+        let index = self.ready.iter().position(|result| result.id == id)?;
+        let result = self.ready.remove(index);
+        self.outstanding.retain(|value| *value != result.id);
+        Some(result)
+    }
     pub(crate) fn poll(&mut self) -> Option<Completion<R>> {
-        let result = self.results.try_recv().ok()?;
+        self.collect();
+        let result = self.ready.pop()?;
         self.outstanding.retain(|id| *id != result.id);
         Some(result)
     }

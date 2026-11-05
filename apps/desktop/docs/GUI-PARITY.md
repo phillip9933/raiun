@@ -37,12 +37,27 @@ are also enabled in production. Headless mode retains its explicit mount-only
 scope on both operating systems. Native callback chunk sizes are staging
 windows, not total-file limits.
 
-Windows OAuth refresh still reconstructs generation-bound native scopes, unlike
-the Unix ordinary-body refresh path. Cached stable-directory rename/delete and
-replacement-style editors need their missing native custody paths; they cannot
-be enabled by deleting a capability check. Recovery quotas, conditional writes,
-root/account binding and exact native completion remain required. This update
-is not an assertion of unrestricted feature or runtime performance parity.
+Routine Windows OAuth renewal now retains the account's shared authentication
+owner and native connection. A fresh token must verify the original account and
+Personal root before a short admitted credential update. An opaque provider
+credential lease retains the original native/journal generation through benign
+rotation; actual bearer generations still advance, and security/account changes
+permanently revoke the old in-memory owner before draining. Pending rotated
+refresh tokens are retained across transient storage/root-read failures. Startup,
+rejected authentication and account replacement retain the strict disconnect path.
+
+Windows ordinary uploads now use four SDK workers with per-file native custody
+and exact result routing. Up to four independently qualified new files in the
+same parent form one upload wave. Different parents, directories, renames and
+vault operations remain ordered; close/dirty-state uncertainty still fences the
+whole wave. This removes the global one-file custody bottleneck without making
+folder dependency or native completion concurrent.
+
+Cached stable-directory rename/delete and replacement-style editors still need
+their native custody paths; they cannot be enabled by deleting a capability
+check. Recovery quotas, conditional writes, root/account binding and exact native
+completion remain required. These source changes do not establish equal measured
+transfer speed or final Windows native acceptance.
 
 ## Earlier implementation — 4 November 2026
 

@@ -294,7 +294,7 @@ impl DirectoryCreateRemote for LiveDirectoryCreate<'_> {
         // any HTTP or credential exposure. The lease is only held for the check.
         self.backend
             .client
-            .with_token_generation(self.context.token_generation, || ())?;
+            .with_provider_generation(self.context.token_generation, || ())?;
         Ok(())
     }
     fn preflight(&self, intent: &NamespaceIntent) -> Result<(), CloudError> {
@@ -344,7 +344,10 @@ impl DirectoryCreateRemote for LiveDirectoryCreate<'_> {
                     || self.backend.token_generation != self.context.token_generation
                     || self.destination().parent.authorization.token_generation
                         != self.context.token_generation
-                    || self.backend.client.token_generation() != self.context.token_generation
+                    || !self
+                        .backend
+                        .client
+                        .provider_generation_is_current(self.context.token_generation)
             },
         )?;
         if let Err(error) = self.ensure_authorized(intent) {
@@ -875,7 +878,10 @@ impl OwnedDirectorySession {
                 .identity_catalog
                 .as_ref()
                 .is_none_or(|c| !Arc::ptr_eq(c, &self.catalog))
-            || self.backend.client.token_generation() != self.auth.token_generation
+            || !self
+                .backend
+                .client
+                .provider_generation_is_current(self.auth.token_generation)
         {
             return Err(BackendError::Unavailable);
         }

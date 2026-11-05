@@ -301,7 +301,9 @@ impl Admission {
                 || !current(auth)
                 || original.upgrade().is_none_or(|b| {
                     b.revoked.load(Ordering::Acquire)
-                        || b.client.token_generation() != auth.token_generation
+                        || !b
+                            .client
+                            .provider_generation_is_current(auth.token_generation)
                 })
         });
         let reader = joined
@@ -432,7 +434,9 @@ impl OpenCloudPlaceholderBackend {
             !owner(auth)
                 || original.upgrade().is_none_or(|b| {
                     b.revoked.load(Ordering::Acquire)
-                        || b.client.token_generation() != auth.token_generation
+                        || !b
+                            .client
+                            .provider_generation_is_current(auth.token_generation)
                 })
         }));
         // Bound this complete metadata phase while keeping the ORIGINAL job

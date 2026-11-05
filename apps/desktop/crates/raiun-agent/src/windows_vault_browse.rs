@@ -82,13 +82,12 @@ fn state_matches(
         && !state.session_cleanup_uncertain
         && !state.retiring
         && state.root_configuration.as_ref() == Some(configuration)
-        && session.expires_at > unix_time_now().saturating_add(30)
         && state.session.as_ref().is_some_and(|current| {
             current.server == session.server
                 && current.client_id == session.client_id
                 && current.expected_issuer == session.expected_issuer
-                && current.access_token == session.access_token
-                && current.expires_at == session.expires_at
+                && WindowsAgent::same_session_authority(Some(current), Some(session))
+                && current.expires_at > unix_time_now().saturating_add(30)
         })
 }
 fn project(entries: &[RemoteEntry]) -> Result<Value, String> {

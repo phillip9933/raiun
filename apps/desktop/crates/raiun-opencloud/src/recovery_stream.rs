@@ -396,8 +396,8 @@ impl OpenCloudClient {
         let cancel = budget.cancellation();
         let pause_budget = budget.clone();
         let body_cancel = cancel.clone();
-        let generation = Arc::clone(&self.token_generation);
-        let body_generation = Arc::clone(&generation);
+        let generation = self.context_generation_fence();
+        let body_generation = generation.clone();
         let body_job_cancelled = Arc::clone(&cancelled);
         let timeout = transfer_timeout_for_context(
             context,
@@ -415,7 +415,7 @@ impl OpenCloudClient {
                 cancelled()
                     || pause_budget.is_paused()
                     || cancel.is_cancelled()
-                    || generation.load(Ordering::Acquire) != context.token_generation
+                    || !generation.matches(context.token_generation)
             },
             move |progress| async move {
                 let body = strict_upload(StrictReader {
@@ -427,7 +427,7 @@ impl OpenCloudClient {
                     cancelled: move || {
                         body_job_cancelled()
                             || body_cancel.is_cancelled()
-                            || body_generation.load(Ordering::Acquire) != context.token_generation
+                            || !body_generation.matches(context.token_generation)
                     },
                     progress,
                     verified: witness,
@@ -802,8 +802,8 @@ impl OpenCloudClient {
         let cancel = budget.cancellation();
         let pause_budget = budget.clone();
         let body_cancel = cancel.clone();
-        let generation = Arc::clone(&self.token_generation);
-        let body_generation = Arc::clone(&generation);
+        let generation = self.context_generation_fence();
+        let body_generation = generation.clone();
         let body_job_cancelled = Arc::clone(&cancelled);
         let timeout = transfer_timeout_for_context(
             context,
@@ -821,7 +821,7 @@ impl OpenCloudClient {
                 cancelled()
                     || pause_budget.is_paused()
                     || cancel.is_cancelled()
-                    || generation.load(Ordering::Acquire) != context.token_generation
+                    || !generation.matches(context.token_generation)
             },
             move |progress| async move {
                 let body = strict_upload(StrictReader {
@@ -833,7 +833,7 @@ impl OpenCloudClient {
                     cancelled: move || {
                         body_job_cancelled()
                             || body_cancel.is_cancelled()
-                            || body_generation.load(Ordering::Acquire) != context.token_generation
+                            || !body_generation.matches(context.token_generation)
                     },
                     progress,
                     verified: witness,
@@ -1153,8 +1153,8 @@ impl OpenCloudClient {
         let cancel = budget.cancellation();
         let pause_budget = budget.clone();
         let body_cancel = cancel.clone();
-        let generation = Arc::clone(&self.token_generation);
-        let body_generation = Arc::clone(&generation);
+        let generation = self.context_generation_fence();
+        let body_generation = generation.clone();
         let body_job_cancelled = Arc::clone(&cancelled);
         let timeout = transfer_timeout_for_context(
             context,
@@ -1170,7 +1170,7 @@ impl OpenCloudClient {
                 cancelled()
                     || pause_budget.is_paused()
                     || cancel.is_cancelled()
-                    || generation.load(Ordering::Acquire) != context.token_generation
+                    || !generation.matches(context.token_generation)
             },
             move |progress| async move {
                 let response = request
@@ -1204,8 +1204,7 @@ impl OpenCloudClient {
                         let cancelled = || {
                             body_job_cancelled()
                                 || body_cancel.is_cancelled()
-                                || body_generation.load(Ordering::Acquire)
-                                    != context.token_generation
+                                || !body_generation.matches(context.token_generation)
                         };
                         if cancelled() {
                             return Err(invalid("recovery readback cancelled"));

@@ -212,7 +212,9 @@ impl ExistingOverwriteGuard<'_> {
                 "encrypted overwrite was cancelled",
             ));
         }
-        if backend.client.token_generation() != request.expected_token_generation
+        if !backend
+            .client
+            .provider_generation_is_current(request.expected_token_generation)
             || request.provider_generation.load(Ordering::Acquire)
                 != request.expected_provider_generation
         {
@@ -257,6 +259,7 @@ pub struct VaultReconciledPending {
     scope: VaultSessionScope,
     epoch: VaultSessionEpoch,
     token: Arc<AtomicU64>,
+    credentials: crate::provider_credentials::ContextGenerationFence,
     token_generation: u64,
     provider: Arc<AtomicU64>,
     provider_generation: u64,
@@ -270,7 +273,7 @@ impl VaultReconciledPending {
     }
     pub fn matches_client(&self, client: &OpenCloudClient) -> bool {
         Arc::ptr_eq(&self.token, &client.token_generation)
-            && client.token_generation() == self.token_generation
+            && client.provider_generation_is_current(self.token_generation)
             && self.provider_current()
     }
     pub fn metadata(&self) -> &VaultPendingEditMetadata {
@@ -299,7 +302,7 @@ impl VaultReconciledPending {
     /// Pure local freshness only; caller holds its original opaque epoch fence.
     pub fn provider_current(&self) -> bool {
         self.provider.load(Ordering::Acquire) == self.provider_generation
-            && self.token.load(Ordering::Acquire) == self.token_generation
+            && self.credentials.matches(self.token_generation)
             && !(self.cancelled)()
     }
 }
@@ -321,7 +324,10 @@ struct PendingReconcileGuard<'a> {
 impl PendingReconcileGuard<'_> {
     fn check(&self) -> Result<(), CloudError> {
         if self.provider.load(Ordering::Acquire) != self.expected_provider
-            || self.backend.client.token_generation() != self.token_generation
+            || !self
+                .backend
+                .client
+                .provider_generation_is_current(self.token_generation)
             || (self.cancelled)()
         {
             return Err(conflict("original reconciliation context changed"));
@@ -384,6 +390,7 @@ impl PendingReconcileGuard<'_> {
             scope: self.backend.scope.clone(),
             epoch: self.epoch.clone(),
             token: self.backend.client.token_generation.clone(),
+            credentials: self.backend.client.context_generation_fence(),
             token_generation: self.token_generation,
             provider: self.provider.clone(),
             provider_generation: self.expected_provider,
@@ -434,7 +441,7 @@ struct VaultPutExpectation<'a> {
     encoded_target: Option<&'a str>,
     parent_binding: Option<(&'a str, &'a str)>,
     expected_token_generation: Option<u64>,
-    external_token_generation: Option<(Arc<AtomicU64>, u64)>,
+    external_token_generation: Option<(crate::provider_credentials::ContextGenerationFence, u64)>,
     caller_cancelled: Option<&'a dyn Fn() -> bool>,
 }
 
@@ -2465,12 +2472,12 @@ impl VaultBackend {
     #[cfg(windows)]
     fn pending_body_cancelled(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
         let cancellation = self.client.transfer_budget().cancellation();
-        let generation = self.client.token_generation.clone();
-        let expected = self.client.token_generation();
+        let generation = self.client.context_generation_fence();
+        let expected = self.client.provider_context_generation();
         let context = crate::ACTIVE_RANGE_CONTEXT.with(Cell::get);
         Arc::new(move || {
             cancellation.is_cancelled()
-                || generation.load(Ordering::Acquire) != expected
+                || !generation.matches(expected)
                 || context
                     .is_some_and(|c| Instant::now() >= c.deadline || c.token_generation != expected)
         })
@@ -4113,7 +4120,7 @@ impl VaultBackend {
         expected_provider_generation: u64,
         cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<VaultPendingReconcileOutcome, CloudError> {
-        let token_generation = self.client.token_generation();
+        let token_generation = self.client.provider_context_generation();
         if expected_provider_generation == 0
             || token_generation == 0
             || self.offline_only
@@ -6198,7 +6205,9 @@ impl VaultBackend {
                         parent_binding: None,
                         expected_token_generation: Some(request.expected_token_generation),
                         external_token_generation: Some((
-                            Arc::clone(&request.provider_generation),
+                            crate::provider_credentials::ContextGenerationFence::strict(
+                                Arc::clone(&request.provider_generation),
+                            ),
                             request.expected_provider_generation,
                         )),
                         caller_cancelled: Some(&cancelled),
@@ -7092,7 +7101,7 @@ impl VaultBackend {
         if expectation
             .external_token_generation
             .as_ref()
-            .is_some_and(|(generation, expected)| generation.load(Ordering::Acquire) != *expected)
+            .is_some_and(|(generation, expected)| !generation.matches(*expected))
         {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
@@ -7134,7 +7143,7 @@ impl VaultBackend {
         if expectation
             .external_token_generation
             .as_ref()
-            .is_some_and(|(generation, expected)| generation.load(Ordering::Acquire) != *expected)
+            .is_some_and(|(generation, expected)| !generation.matches(*expected))
         {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
@@ -7143,7 +7152,7 @@ impl VaultBackend {
         }
         if expectation
             .expected_token_generation
-            .is_some_and(|expected| self.client.token_generation() != expected)
+            .is_some_and(|expected| !self.client.provider_generation_is_current(expected))
         {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
@@ -7199,10 +7208,8 @@ impl VaultBackend {
         let caller_cancelled = expectation.caller_cancelled;
         let expected_token_generation = expectation.expected_token_generation;
         let external_token_generation = expectation.external_token_generation;
-        let token_generation = Arc::clone(&self.client.token_generation);
-        if expected_token_generation
-            .is_some_and(|expected| token_generation.load(Ordering::Acquire) != expected)
-        {
+        let token_generation = self.client.context_generation_fence();
+        if expected_token_generation.is_some_and(|expected| !token_generation.matches(expected)) {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "authenticated provider generation changed before upload",
@@ -7210,14 +7217,14 @@ impl VaultBackend {
         }
         if external_token_generation
             .as_ref()
-            .is_some_and(|(generation, expected)| generation.load(Ordering::Acquire) != *expected)
+            .is_some_and(|(generation, expected)| !generation.matches(*expected))
         {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
                 "source provider generation changed before upload",
             ));
         }
-        let body_token_generation = Arc::clone(&token_generation);
+        let body_token_generation = token_generation.clone();
         let watchdog_external_generation = external_token_generation.clone();
         let body_external_generation = external_token_generation.clone();
         let response_result = crate::async_body::run_body_operation_cancellable(
@@ -7230,12 +7237,11 @@ impl VaultBackend {
                     || guarded.is_some_and(|guard| guard.check(self).is_err())
                     || caller_cancelled.is_some_and(|cancelled| cancelled())
                     || watchdog_cancellation.is_cancelled()
-                    || expected_token_generation.is_some_and(|expected| {
-                        token_generation.load(Ordering::Acquire) != expected
-                    })
-                    || watchdog_external_generation.as_ref().is_some_and(
-                        |(generation, expected)| generation.load(Ordering::Acquire) != *expected,
-                    )
+                    || expected_token_generation
+                        .is_some_and(|expected| !token_generation.matches(expected))
+                    || watchdog_external_generation
+                        .as_ref()
+                        .is_some_and(|(generation, expected)| !generation.matches(*expected))
             },
             move |progress| async move {
                 let body = crate::async_body::budgeted_upload_stream(
@@ -7244,13 +7250,10 @@ impl VaultBackend {
                     transfer_budget,
                     move || {
                         cancellation.is_cancelled()
-                            || expected_token_generation.is_some_and(|expected| {
-                                body_token_generation.load(Ordering::Acquire) != expected
-                            })
+                            || expected_token_generation
+                                .is_some_and(|expected| !body_token_generation.matches(expected))
                             || body_external_generation.as_ref().is_some_and(
-                                |(generation, expected)| {
-                                    generation.load(Ordering::Acquire) != *expected
-                                },
+                                |(generation, expected)| !generation.matches(*expected),
                             )
                     },
                     progress,
@@ -7282,7 +7285,7 @@ impl VaultBackend {
         }
         self.check_put_epoch(pending_epoch)?;
         if expected_token_generation
-            .is_some_and(|expected| self.client.token_generation() != expected)
+            .is_some_and(|expected| !self.client.provider_generation_is_current(expected))
         {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,
@@ -7291,7 +7294,7 @@ impl VaultBackend {
         }
         if external_token_generation
             .as_ref()
-            .is_some_and(|(generation, expected)| generation.load(Ordering::Acquire) != *expected)
+            .is_some_and(|(generation, expected)| !generation.matches(*expected))
         {
             return Err(CloudError::new(
                 ErrorKind::Unauthorized,

@@ -77,7 +77,9 @@ pub enum VaultChildFileCreateOutcome {
 fn local(backend: &VaultBackend, r: &VaultChildFileCreateRequest<'_>) -> Result<(), CloudError> {
     if (r.cancelled)()
         || Instant::now() >= r.deadline
-        || backend.client.token_generation() != r.expected_token_generation
+        || !backend
+            .client
+            .provider_generation_is_current(r.expected_token_generation)
         || r.provider_generation.load(Ordering::Acquire) != r.expected_provider_generation
     {
         return Err(conflict("encrypted file create admission changed"));
@@ -308,7 +310,7 @@ impl VaultBackend {
         before_send()?;
         self.check_child_file_context(r)?;
         let watchdog_cancellation = cancellation.clone();
-        let body_tokens = self.client.token_generation.clone();
+        let body_tokens = self.client.context_generation_fence();
         let body_provider = r.provider_generation.clone();
         let expected_token = r.expected_token_generation;
         let expected_provider = r.expected_provider_generation;
@@ -329,7 +331,7 @@ impl VaultBackend {
                         budget,
                         move || {
                             Instant::now() >= deadline
-                                || body_tokens.load(Ordering::Acquire) != expected_token
+                                || !body_tokens.matches(expected_token)
                                 || body_provider.load(Ordering::Acquire) != expected_provider
                                 || cancellation.is_cancelled()
                         },

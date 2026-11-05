@@ -1,6 +1,6 @@
 //! Explicit same-owner ordinary Personal file create; never recovered replay.
 use super::*;
-use crate::close_capture_admission::OwnedCreateAdmission;
+use crate::close_capture_admission::IndependentCreateAdmission;
 use crate::file_create_phase::{Phase, ReplyDisposition, ReplyKey, TaskFlight};
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceFileContent, NamespaceIntent,
@@ -481,7 +481,7 @@ impl ReplacementBody {
 pub(super) struct CreateOwner {
     closed: bool,
     nonce: u64,
-    attempt: Option<OwnerAttempt>,
+    attempts: Vec<OwnerAttempt>,
 }
 struct OwnerAttempt {
     key: Arc<ReplyKey>,
@@ -490,7 +490,7 @@ struct OwnerAttempt {
     backend: Arc<crate::OpenCloudPlaceholderBackend>,
     recovery: Arc<dyn PreparedEditRecovery>,
     tracker: Arc<CloseCaptureAdmission>,
-    ticket: OwnedCreateAdmission,
+    ticket: IndependentCreateAdmission,
     name: String,
     parent_components: Vec<String>,
     job: crate::StreamedRecoveryJob,
@@ -702,13 +702,31 @@ impl ConfiguredRootConnection {
         if slot.closed {
             return Err(Error::ProviderUnavailable);
         }
-        if slot.attempt.is_some() {
+        if slot.attempts.len() >= 4
+            || slot.attempts.iter().any(|attempt| {
+                let parts = attempt
+                    .parent_components
+                    .iter()
+                    .chain(std::iter::once(&attempt.name));
+                let incoming = parent_components
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(name));
+                parts.zip(incoming).all(|(a, b)| a.eq_ignore_ascii_case(b))
+            })
+        {
             return Ok(FileCreateStep::Finished(
                 crate::FreshFileCreateOutcome::BusyBeforeCapture,
             ));
         }
         let (tracker, recovery) = self.file_rename_guard_context(backend)?;
-        let Some(ticket) = tracker.try_begin_create() else {
+        let Some(ticket) = tracker.try_begin_independent_create(
+            parent_components
+                .iter()
+                .map(|part| (*part).to_owned())
+                .chain(std::iter::once(name.to_owned()))
+                .collect(),
+        ) else {
             return Ok(FileCreateStep::Finished(
                 crate::FreshFileCreateOutcome::BusyBeforeCapture,
             ));
@@ -775,7 +793,7 @@ impl ConfiguredRootConnection {
                 current,
             })),
         );
-        slot.attempt = Some(attempt);
+        slot.attempts.push(attempt);
         Ok(FileCreateStep::Task(task))
     }
     fn check_create_attempt(&self, attempt: &OwnerAttempt) -> Result<(), Error> {
@@ -810,7 +828,12 @@ impl ConfiguredRootConnection {
             .create_owner
             .try_borrow_mut()
             .map_err(|_| Error::ConnectionStateInvalid)?;
-        let expected = slot.attempt.as_ref().ok_or(Error::ConnectionStateInvalid)?;
+        let index = slot
+            .attempts
+            .iter()
+            .position(|attempt| Arc::ptr_eq(&attempt.key, &reply.key))
+            .ok_or(Error::ConnectionStateInvalid)?;
+        let expected = &slot.attempts[index];
         let disposition = ReplyKey::disposition(
             &expected.key,
             &reply.key,
@@ -829,7 +852,7 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::ConnectionStateInvalid);
         }
-        let mut attempt = slot.attempt.take().ok_or(Error::ConnectionStateInvalid)?;
+        let mut attempt = slot.attempts.remove(index);
         if disposition == ReplyDisposition::Retire || self.check_create_attempt(&attempt).is_err() {
             attempt.job.cancel();
             if attempt.local.is_none() {
@@ -858,6 +881,7 @@ impl ConfiguredRootConnection {
                     &attempt,
                     &prepared.admission,
                     &prepared.rename,
+                    &slot.attempts,
                 )? {
                     CaptureResult::Busy => {
                         return Ok(FileCreateStep::Finished(
@@ -889,7 +913,7 @@ impl ConfiguredRootConnection {
                     Phase::Send,
                     TaskKind::Send(Box::new((prepared.admission, joined))),
                 );
-                slot.attempt = Some(attempt);
+                slot.attempts.push(attempt);
                 Ok(FileCreateStep::Task(task))
             }
             ReplyKind::Sent(pair) => {
@@ -927,7 +951,7 @@ impl ConfiguredRootConnection {
                     Phase::Refresh,
                     TaskKind::Refresh(Box::new((admission, proof))),
                 );
-                slot.attempt = Some(attempt);
+                slot.attempts.push(attempt);
                 Ok(FileCreateStep::Task(task))
             }
             ReplyKind::Refreshed(pair) => {
@@ -953,14 +977,14 @@ impl ConfiguredRootConnection {
             return false;
         };
         slot.closed = true;
-        if let Some(attempt) = slot.attempt.as_ref() {
+        for attempt in &slot.attempts {
             attempt.job.cancel();
-            if !attempt.flight_done.load(Ordering::Acquire) {
-                return false;
-            }
         }
-        slot.attempt.take();
-        true
+        // Keep every original native capture until its actual SDK/body flight
+        // has disposed; no one result can release a sibling claim.
+        slot.attempts
+            .retain(|attempt| !attempt.flight_done.load(Ordering::Acquire));
+        slot.attempts.is_empty()
     }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn reconcile_fresh_personal_file_create(
@@ -994,6 +1018,7 @@ impl ConfiguredRootConnection {
         attempt: &OwnerAttempt,
         admission: &Admission,
         rename: &Arc<FileRenameStore>,
+        siblings: &[OwnerAttempt],
     ) -> Result<CaptureResult, Error> {
         use sha2::Digest;
         self.check_create_attempt(attempt)?;
@@ -1062,6 +1087,12 @@ impl ConfiguredRootConnection {
         if !same_edit_snapshot(before, snapshot)
             || snapshot.identity.volume_serial != physical.volume_serial
             || snapshot.identity == parent_snapshot.identity
+            || siblings.iter().any(|sibling| {
+                sibling
+                    .local
+                    .as_ref()
+                    .is_some_and(|local| local.snapshot.identity == snapshot.identity)
+            })
         {
             return Err(Error::ConfiguredRootChanged);
         }

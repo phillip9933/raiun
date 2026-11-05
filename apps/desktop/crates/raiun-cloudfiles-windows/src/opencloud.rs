@@ -122,7 +122,7 @@ impl ProviderScope {
         account_id: String,
         server_origin: String,
     ) -> Result<Self, BackendError> {
-        let token_generation = client.token_generation();
+        let token_generation = client.provider_context_generation();
         if !valid_scope_part(&profile_id)
             || !valid_scope_part(&account_id)
             || !valid_scope_part(&server_origin)
@@ -608,12 +608,14 @@ impl OpenCloudPlaceholderBackend {
         identity_catalog: Option<Arc<dyn ProviderIdentityCatalog>>,
     ) -> Result<Self, BackendError> {
         let client_origin = client.server_origin().ok_or(BackendError::Unavailable)?;
-        if client_origin != scope.server_origin
-            || client.token_generation() != scope.token_generation
+        if !client.provider_credentials_match(scope.account_id(), None, None)
+            || !client.provider_scope_generation_is_admitted(scope.token_generation)
+            || client_origin != scope.server_origin
+            || !client.provider_generation_is_current(scope.token_generation)
         {
             return Err(BackendError::Unavailable);
         }
-        let token_generation = client.token_generation();
+        let token_generation = client.provider_context_generation();
         Ok(Self {
             backend_id: NEXT_BACKEND_ID.fetch_add(1, Ordering::Relaxed),
             client,
@@ -725,13 +727,17 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         let account_id = derive_account_id(&self.client.configured_server_url(), &personal.id);
-        if account_id != self.scope.account_id {
+        if !self
+            .client
+            .provider_credentials_match(&account_id, Some(&personal.id), Some(&root.id))
+            || account_id != self.scope.account_id
+        {
             return Err(BackendError::Unavailable);
         }
         let catalog_scope = self.load_catalog_for_root(&personal.id, &root.id)?;
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -1055,7 +1061,7 @@ impl OpenCloudPlaceholderBackend {
         let catalog_scope = self.catalog_scope_snapshot()?;
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire)
                     || binding_count(&state) >= MAX_IDENTITY_CATALOG_ENTRIES
                 {
@@ -1165,7 +1171,7 @@ impl OpenCloudPlaceholderBackend {
         };
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(context.token_generation, || {
+            .with_provider_generation(context.token_generation, || {
                 self.ensure_active()?;
                 if binding_count(&state) >= MAX_IDENTITY_CATALOG_ENTRIES {
                     return Err(BackendError::Unavailable);
@@ -1252,7 +1258,7 @@ impl OpenCloudPlaceholderBackend {
         let catalog_scope = self.catalog_scope_snapshot()?;
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire)
                     || binding_count(&state) >= MAX_IDENTITY_CATALOG_ENTRIES
                 {
@@ -1451,7 +1457,9 @@ impl OpenCloudPlaceholderBackend {
                         personal_root_id,
                     ) == identity
             ) && !self.revoked.load(Ordering::Acquire)
-                && self.client.token_generation() == self.token_generation
+                && self
+                    .client
+                    .provider_generation_is_current(self.token_generation)
         })
     }
 
@@ -1619,7 +1627,7 @@ impl OpenCloudPlaceholderBackend {
         let path = route.root_path();
         let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -2635,7 +2643,7 @@ impl OpenCloudPlaceholderBackend {
             .collect::<Vec<_>>();
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -2878,7 +2886,7 @@ impl OpenCloudPlaceholderBackend {
         let catalog_scope = self.catalog_scope_snapshot()?;
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -3175,7 +3183,7 @@ impl OpenCloudPlaceholderBackend {
             }
             match self
                 .client
-                .try_lock_token_generation(self.token_generation)
+                .try_lock_provider_generation(self.token_generation)
                 // Token mismatch permanently fences this backend through
                 // ensure_active; publication is already locked here.
                 .map_err(map_cloud_error)?
@@ -3199,7 +3207,9 @@ impl OpenCloudPlaceholderBackend {
 
     fn ensure_active(&self) -> Result<(), BackendError> {
         if self.revoked.load(Ordering::Acquire)
-            || self.client.token_generation() != self.token_generation
+            || !self
+                .client
+                .provider_generation_is_current(self.token_generation)
         {
             Err(BackendError::Unavailable)
         } else {
@@ -3218,7 +3228,9 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
     }
     fn recovery_job_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire)
-            || self.client.token_generation() != self.token_generation
+            || !self
+                .client
+                .provider_generation_is_current(self.token_generation)
     }
     fn recovery_transfer_cancellation(&self) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
         let cancellation = self.client.transfer_budget().cancellation();
@@ -3324,7 +3336,7 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
             base_size: file.size,
         };
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     Err(BackendError::Unavailable)
                 } else {
@@ -3463,7 +3475,9 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
                 cancellation.is_cancelled()
                     || cancellation.is_expired()
                     || self.revoked.load(Ordering::Acquire)
-                    || self.client.token_generation() != self.token_generation
+                    || !self
+                        .client
+                        .provider_generation_is_current(self.token_generation)
             },
         );
         if cancellation.is_cancelled() {
@@ -3491,7 +3505,7 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
             Err(error) => return Err(self.reject_cached_cloud_error(error)),
         };
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -3625,7 +3639,9 @@ impl OpenCloudPlaceholderBackend {
                     cancellation.is_cancelled()
                         || cancellation.is_expired()
                         || self.revoked.load(Ordering::Acquire)
-                        || self.client.token_generation() != self.token_generation
+                        || !self
+                            .client
+                            .provider_generation_is_current(self.token_generation)
                 },
             );
         if cancellation.is_cancelled() {
@@ -3649,7 +3665,7 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }

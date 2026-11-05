@@ -1,5 +1,13 @@
 # Windows headless CLI candidate
 
+Current transfer update: headless and GUI Windows mounts use the same ordinary
+four-file same-parent upload scheduler and verified provider credential leases.
+Routine same-account OAuth renewal updates the retained authentication owner
+without disconnecting native mounts or cancelling original jobs. Rejected grants,
+account changes and startup verification remain strict security transitions.
+Pending recovery copies are retained; neither renewal nor reconnect retries them
+automatically. The mount-only command scope is unchanged.
+
 Local, unpublished test candidate, 28 October 2026, based on Desktop 0.7.4.
 The package contains the Rust CLI and agent, with no graphical shell, tray,
 WebView or sync scheduler. Explicit startup commands are a separate opt-in.

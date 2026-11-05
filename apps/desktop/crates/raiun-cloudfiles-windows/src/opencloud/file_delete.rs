@@ -342,7 +342,7 @@ impl LiveFileDelete<'_> {
         }
         self.backend
             .client
-            .with_token_generation(self.context.token_generation, || ())?;
+            .with_provider_generation(self.context.token_generation, || ())?;
         Ok(())
     }
     fn check_parent(&self, captured_etag: bool) -> Result<(), CloudError> {

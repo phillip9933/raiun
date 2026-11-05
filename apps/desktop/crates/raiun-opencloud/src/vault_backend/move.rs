@@ -88,8 +88,12 @@ impl VaultBackend {
                 VaultMoveReviewReason::CancelledBeforeSourceRemoval,
             ));
         }
-        if self.client.token_generation() != request.source_auth_generation
-            || destination.client.token_generation() != request.destination_auth_generation
+        if !self
+            .client
+            .provider_generation_is_current(request.source_auth_generation)
+            || !destination
+                .client
+                .provider_generation_is_current(request.destination_auth_generation)
         {
             return Ok(needs_review(
                 VaultMoveReviewReason::AuthenticationGenerationChanged,
@@ -213,8 +217,12 @@ impl VaultBackend {
                 VaultMoveReviewReason::CancelledBeforeSourceRemoval,
             ));
         }
-        if self.client.token_generation() != request.source_auth_generation
-            || destination.client.token_generation() != request.destination_auth_generation
+        if !self
+            .client
+            .provider_generation_is_current(request.source_auth_generation)
+            || !destination
+                .client
+                .provider_generation_is_current(request.destination_auth_generation)
         {
             return Ok(needs_review(
                 VaultMoveReviewReason::AuthenticationGenerationChanged,

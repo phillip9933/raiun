@@ -208,8 +208,8 @@ impl VaultBackend {
             return review(VaultCopyResolutionReason::SourceScopeMismatch);
         }
 
-        let source_generation = self.client.token_generation();
-        let destination_generation = destination.client.token_generation();
+        let source_generation = self.client.provider_context_generation();
+        let destination_generation = destination.client.provider_context_generation();
         let verified =
             (|| -> Result<(RemoteEntry, u64, String), (VaultCopyResolutionReason, CloudError)> {
                 let (source_entry, source_plaintext) = self
@@ -222,7 +222,10 @@ impl VaultBackend {
                         false,
                     )
                     .map_err(|error| {
-                        let reason = if self.client.token_generation() != source_generation {
+                        let reason = if !self
+                            .client
+                            .provider_generation_is_current(source_generation)
+                        {
                             VaultCopyResolutionReason::AuthenticationGenerationChanged
                         } else if error.kind == ErrorKind::Conflict {
                             VaultCopyResolutionReason::SourceChanged
@@ -290,14 +293,16 @@ impl VaultBackend {
                         false,
                     )
                     .map_err(|error| {
-                        let reason =
-                            if destination.client.token_generation() != destination_generation {
-                                VaultCopyResolutionReason::AuthenticationGenerationChanged
-                            } else if error.kind == ErrorKind::Conflict {
-                                VaultCopyResolutionReason::DestinationChanged
-                            } else {
-                                VaultCopyResolutionReason::VerificationUnavailable
-                            };
+                        let reason = if !destination
+                            .client
+                            .provider_generation_is_current(destination_generation)
+                        {
+                            VaultCopyResolutionReason::AuthenticationGenerationChanged
+                        } else if error.kind == ErrorKind::Conflict {
+                            VaultCopyResolutionReason::DestinationChanged
+                        } else {
+                            VaultCopyResolutionReason::VerificationUnavailable
+                        };
                         (reason, error)
                     })?;
                 let destination_hash = hex_digest(&Sha256::digest(&*destination_plaintext));
@@ -315,8 +320,12 @@ impl VaultBackend {
                 drop(destination_plaintext);
                 check_cancelled()
                     .map_err(|error| (VaultCopyResolutionReason::VerificationUnavailable, error))?;
-                if self.client.token_generation() != source_generation
-                    || destination.client.token_generation() != destination_generation
+                if !self
+                    .client
+                    .provider_generation_is_current(source_generation)
+                    || !destination
+                        .client
+                        .provider_generation_is_current(destination_generation)
                 {
                     return Err((
                         VaultCopyResolutionReason::AuthenticationGenerationChanged,
@@ -377,8 +386,12 @@ impl VaultBackend {
                         conflict("copy destination identity changed during resolution"),
                     ));
                 }
-                if self.client.token_generation() != source_generation
-                    || destination.client.token_generation() != destination_generation
+                if !self
+                    .client
+                    .provider_generation_is_current(source_generation)
+                    || !destination
+                        .client
+                        .provider_generation_is_current(destination_generation)
                 {
                     return Err((
                         VaultCopyResolutionReason::AuthenticationGenerationChanged,
@@ -514,8 +527,12 @@ impl VaultBackend {
         {
             return Err(invalid("cross-vault copy scope does not match its roots"));
         }
-        if self.client.token_generation() != request.source_auth_generation
-            || destination.client.token_generation() != request.destination_auth_generation
+        if !self
+            .client
+            .provider_generation_is_current(request.source_auth_generation)
+            || !destination
+                .client
+                .provider_generation_is_current(request.destination_auth_generation)
         {
             return Err(conflict(
                 "cross-vault copy authentication generation changed",
@@ -576,7 +593,10 @@ impl VaultBackend {
             &parent_ref,
             None,
         )?;
-        if destination.client.token_generation() != request.destination_auth_generation {
+        if !destination
+            .client
+            .provider_generation_is_current(request.destination_auth_generation)
+        {
             return Err(conflict(
                 "cross-vault copy authentication generation changed",
             ));
@@ -614,8 +634,12 @@ impl VaultBackend {
         )?;
         publish_binding(&metadata.id, metadata.revision);
 
-        if self.client.token_generation() != request.source_auth_generation
-            || destination.client.token_generation() != request.destination_auth_generation
+        if !self
+            .client
+            .provider_generation_is_current(request.source_auth_generation)
+            || !destination
+                .client
+                .provider_generation_is_current(request.destination_auth_generation)
         {
             return Ok(needs_reconciliation(
                 destination,
@@ -643,8 +667,12 @@ impl VaultBackend {
                 VaultCopyReconciliationReason::DestinationConflict,
             ));
         }
-        if self.client.token_generation() != request.source_auth_generation
-            || destination.client.token_generation() != request.destination_auth_generation
+        if !self
+            .client
+            .provider_generation_is_current(request.source_auth_generation)
+            || !destination
+                .client
+                .provider_generation_is_current(request.destination_auth_generation)
         {
             return Ok(needs_reconciliation(
                 destination,
@@ -693,7 +721,7 @@ impl VaultBackend {
                 expected_token_generation: Some(request.destination_auth_generation),
                 caller_cancelled: Some(cancelled),
                 external_token_generation: Some((
-                    Arc::clone(&self.client.token_generation),
+                    self.client.context_generation_fence(),
                     request.source_auth_generation,
                 )),
             },
@@ -701,8 +729,12 @@ impl VaultBackend {
         let uploaded = match uploaded {
             Ok(entry) => entry,
             Err(error) => {
-                let reason = if self.client.token_generation() != request.source_auth_generation
-                    || destination.client.token_generation() != request.destination_auth_generation
+                let reason = if !self
+                    .client
+                    .provider_generation_is_current(request.source_auth_generation)
+                    || !destination
+                        .client
+                        .provider_generation_is_current(request.destination_auth_generation)
                 {
                     VaultCopyReconciliationReason::AuthenticationGenerationChanged
                 } else if error.kind == ErrorKind::Conflict {
@@ -752,8 +784,12 @@ impl VaultBackend {
                 VaultCopyReconciliationReason::DestinationReadbackMismatch,
             ));
         }
-        if self.client.token_generation() != request.source_auth_generation
-            || destination.client.token_generation() != request.destination_auth_generation
+        if !self
+            .client
+            .provider_generation_is_current(request.source_auth_generation)
+            || !destination
+                .client
+                .provider_generation_is_current(request.destination_auth_generation)
         {
             cache.set_pending_edit_state(
                 &metadata.id,
@@ -805,12 +841,14 @@ impl VaultBackend {
             ),
         };
         let Some(verified_destination) = readback else {
-            let reason =
-                if destination.client.token_generation() != request.destination_auth_generation {
-                    VaultCopyReconciliationReason::AuthenticationGenerationChanged
-                } else {
-                    readback_reason
-                };
+            let reason = if !destination
+                .client
+                .provider_generation_is_current(request.destination_auth_generation)
+            {
+                VaultCopyReconciliationReason::AuthenticationGenerationChanged
+            } else {
+                readback_reason
+            };
             cache.set_pending_edit_state(
                 &metadata.id,
                 metadata.revision,
@@ -852,8 +890,12 @@ impl VaultBackend {
                 VaultCopyReconciliationReason::SourceChangedAfterCopy,
             ));
         }
-        if self.client.token_generation() != request.source_auth_generation
-            || destination.client.token_generation() != request.destination_auth_generation
+        if !self
+            .client
+            .provider_generation_is_current(request.source_auth_generation)
+            || !destination
+                .client
+                .provider_generation_is_current(request.destination_auth_generation)
         {
             cache.set_pending_edit_state(
                 &metadata.id,
@@ -902,7 +944,11 @@ impl VaultBackend {
         cancelled: &dyn Fn() -> bool,
         retain_verified_ciphertext: bool,
     ) -> Result<(RemoteEntry, zeroize::Zeroizing<Vec<u8>>), CloudError> {
-        if cancelled() || self.client.token_generation() != expected_generation {
+        if cancelled()
+            || !self
+                .client
+                .provider_generation_is_current(expected_generation)
+        {
             return Err(conflict(
                 "cross-vault copy authentication generation changed",
             ));
@@ -968,7 +1014,7 @@ impl VaultBackend {
             move || {
                 watchdog_cancellation.is_cancelled()
                     || cancelled()
-                    || client.token_generation() != expected_generation
+                    || !client.provider_generation_is_current(expected_generation)
             },
             move |progress| async move {
                 let response = request
@@ -990,7 +1036,7 @@ impl VaultBackend {
                     move || {
                         cancellation.is_cancelled()
                             || cancelled()
-                            || body_client.token_generation() != expected_generation
+                            || !body_client.provider_generation_is_current(expected_generation)
                     },
                     &progress,
                 )
@@ -1012,7 +1058,10 @@ impl VaultBackend {
         }
         ciphertext.as_file_mut().flush().map_err(io_error)?;
         ciphertext.as_file().sync_all().map_err(io_error)?;
-        if self.client.token_generation() != expected_generation {
+        if !self
+            .client
+            .provider_generation_is_current(expected_generation)
+        {
             return Err(conflict(
                 "cross-vault copy authentication generation changed",
             ));
@@ -1055,7 +1104,11 @@ impl VaultBackend {
             ));
         }
         if let Some(cache_epoch) = source_cache_epoch {
-            if cancelled() || self.client.token_generation() != expected_generation {
+            if cancelled()
+                || !self
+                    .client
+                    .provider_generation_is_current(expected_generation)
+            {
                 return Err(conflict(
                     "cross-vault move source authorization changed before cache publication",
                 ));
@@ -1077,7 +1130,11 @@ impl VaultBackend {
             }
             let mut parent_path = String::from("/");
             for (index, component) in components.iter().enumerate() {
-                if cancelled() || self.client.token_generation() != expected_generation {
+                if cancelled()
+                    || !self
+                        .client
+                        .provider_generation_is_current(expected_generation)
+                {
                     return Err(conflict(
                         "cross-vault move source authorization changed during cache listing",
                     ));
@@ -1132,7 +1189,9 @@ impl VaultBackend {
             // a protected copy in the durable journal.
             cache.ciphertext_sha256(&self.sessions, path, &after.id, &after.etag)?;
             if cache.ciphertext_epoch()? != cache_epoch
-                || self.client.token_generation() != expected_generation
+                || !self
+                    .client
+                    .provider_generation_is_current(expected_generation)
                 || cancelled()
             {
                 return Err(conflict("cross-vault move source cache generation changed"));
@@ -1163,7 +1222,7 @@ fn retire_verified_copy(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CloudError> {
     before_admission();
-    guard.source_client.with_token_generations(
+    guard.source_client.with_provider_generations(
         guard.destination_client,
         guard.source_generation,
         guard.destination_generation,
@@ -1207,7 +1266,7 @@ fn claim_copy_attempt(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CloudError> {
     before_admission();
-    guard.source_client.with_token_generations(
+    guard.source_client.with_provider_generations(
         guard.destination_client,
         guard.source_generation,
         guard.destination_generation,
