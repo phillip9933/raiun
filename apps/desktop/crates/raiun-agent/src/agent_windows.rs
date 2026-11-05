@@ -1526,7 +1526,16 @@ impl ProviderManager {
                                 Err("The Windows drive changed before support inspection".to_owned())
                             } else if let Some(active) = connection.as_ref() {
                                 let observation = active.vault_cleanup_diagnostics();
-                                let namespace_history = active.namespace_recovery_summary().ok().map(|summary| json!({
+                                let namespace_history = active.namespace_recovery_summary().ok().map(|summary| {
+                                    let classifications: Vec<_> = summary.file_pending_classifications.iter().map(|row| {
+                                        let mut value = json!(row);
+                                        value["personal_space_relation"] = json!(row.relation_to_verified_space(
+                                            &binding.personal_space_id,
+                                            &binding.personal_root_resource_id,
+                                        ));
+                                        value
+                                    }).collect();
+                                    json!({
                                     "rename_records": summary.rename_records,
                                     "rename_unresolved": summary.rename_unresolved,
                                     "directory_records": summary.directory_records,
@@ -1534,10 +1543,11 @@ impl ProviderManager {
                                     "file_records": summary.file_records,
                                     "file_unresolved": summary.file_unresolved,
                                     "file_acknowledged_join_gaps": summary.file_acknowledged_join_gaps,
-                                    "file_pending_classifications": summary.file_pending_classifications,
+                                    "file_pending_classifications": classifications,
                                     "delete_records": summary.delete_records,
                                     "delete_unresolved": summary.delete_unresolved,
-                                }));
+                                    })
+                                });
                                 Ok(json!({
                                     "namespace_history_status": if namespace_history.is_some() { "available" } else { "unavailable" },
                                     "namespace_history": namespace_history,

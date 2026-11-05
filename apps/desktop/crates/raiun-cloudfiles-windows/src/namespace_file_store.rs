@@ -14,7 +14,7 @@ const MAX_SCOPES: usize = 256;
 
 /// Authenticated support metadata grouped without record IDs, paths or report
 /// text. These historical categories grant no native or recovery authority.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct PendingFileCreateClassification {
     pub phase: &'static str,
     pub attention: &'static str,
@@ -27,6 +27,52 @@ pub struct PendingFileCreateClassification {
     pub eligible: bool,
     pub exclusion: &'static str,
     pub count: usize,
+    // Authenticated metadata retained only long enough for the original owner
+    // to label the root relation. Neither serialization nor Debug exports IDs.
+    #[serde(skip)]
+    space_id: String,
+    #[serde(skip)]
+    root_resource_id: String,
+}
+impl PendingFileCreateClassification {
+    /// Fixed relation only, not an identity accessor or recovery permission.
+    /// The caller supplies its original verified Personal identity, not a path.
+    pub fn relation_to_verified_space(
+        &self,
+        space_id: &str,
+        root_resource_id: &str,
+    ) -> &'static str {
+        if [space_id, root_resource_id].iter().any(|value| {
+            value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control)
+        }) {
+            return "unknown";
+        }
+        match (
+            self.space_id == space_id,
+            self.root_resource_id == root_resource_id,
+        ) {
+            (true, true) => "same_space_and_root",
+            (false, false) => "different_space_and_root",
+            _ => "overlapping_identity",
+        }
+    }
+}
+impl std::fmt::Debug for PendingFileCreateClassification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingFileCreateClassification")
+            .field("phase", &self.phase)
+            .field("attention", &self.attention)
+            .field("sequence", &self.sequence)
+            .field("local_completed", &self.local_completed)
+            .field("continued", &self.continued)
+            .field("snapshot_state", &self.snapshot_state)
+            .field("attempt_id", &self.attempt_id)
+            .field("attempts", &self.attempts)
+            .field("eligible", &self.eligible)
+            .field("exclusion", &self.exclusion)
+            .field("count", &self.count)
+            .finish_non_exhaustive()
+    }
 }
 
 fn pending_classification(
@@ -111,6 +157,8 @@ fn pending_classification(
         eligible,
         exclusion,
         count: 0,
+        space_id: loaded.record.key.scope.space_id.clone(),
+        root_resource_id: loaded.record.key.scope.root_resource_id.clone(),
     }
 }
 

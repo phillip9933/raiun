@@ -78,6 +78,11 @@ It includes no paths, record identifiers or server text, opens no body handles,
 and uses the same bounded metadata budget and quota lease. These extra reads
 run only for requested diagnostics, never ordinary status or admission scans;
 they grant no retry, completion, cleanup or other recovery authority.
+The original connected owner labels each pending group only as the same verified
+Personal Space/root, a different Space/root, or overlapping/unknown identity.
+Protected identifiers stay private and are omitted from serialization and debug
+output. This metadata-only relation does not call the legacy recovery-list path,
+read any saved body, or grant creation/recovery authority.
 
 An acknowledged original snapshot remains selectable while its file-create join
 is incomplete. Snapshot and join discovery share one bounded metadata allowance
