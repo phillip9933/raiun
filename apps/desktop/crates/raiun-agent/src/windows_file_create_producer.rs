@@ -1,5 +1,5 @@
 //! Owner-only create phase driver. Candidates are hints, never replay authority.
-use super::windows_create_executor::{CancelOnDrop, Executor};
+use super::windows_create_executor::{CancelOnDrop, Executor, Failure};
 use super::windows_namespace_dispatcher::{CreateKind, matching_create_completion};
 use raiun_cloudfiles_windows::{
     CancellationToken, ConfiguredRootConnection, ConfiguredRootIdentity, DirectoryCreateReply,
@@ -61,33 +61,120 @@ impl Reply {
     }
 }
 pub(crate) type Workers = Executor<Task, Reply>;
+// These diagnostics name only boundaries/outcomes visible to this owner. They
+// never format backend errors, paths, reply contents or credential state.
+#[derive(Clone, Copy)]
+enum Stage {
+    Begin,
+    Advance,
+}
+macro_rules! stage_hold {
+    ($stage:expr, $route:literal, $outcome:literal) => {
+        match $stage {
+            Stage::Begin => concat!(
+                "Creation sync needs attention: ",
+                $route,
+                " begin ",
+                $outcome,
+                ". Existing recovery files have been kept."
+            ),
+            Stage::Advance => concat!(
+                "Creation sync needs attention: ",
+                $route,
+                " advance ",
+                $outcome,
+                ". Existing recovery files have been kept."
+            ),
+        }
+    };
+}
+macro_rules! kind_hold {
+    ($kind:expr, $reason:literal) => {
+        match $kind {
+            CreateKind::File => concat!(
+                "Creation sync needs attention: file ",
+                $reason,
+                ". Existing recovery files have been kept."
+            ),
+            CreateKind::Directory => concat!(
+                "Creation sync needs attention: directory ",
+                $reason,
+                ". Existing recovery files have been kept."
+            ),
+        }
+    };
+}
 enum Step {
     Task(Task),
     BusyFile,
     BusyVaultTask(Task),
     Ordinary,
     Completed,
-    Held,
+    Held(&'static str),
 }
-fn file_step(step: FileCreateStep) -> Step {
+fn file_step(step: FileCreateStep, stage: Stage) -> Step {
     match step {
         FileCreateStep::Task(task) => Step::Task(Task::File(Box::new(task))),
         FileCreateStep::Finished(FreshFileCreateOutcome::BusyBeforeCapture) => Step::BusyFile,
         FileCreateStep::Finished(FreshFileCreateOutcome::LocallyCompleted) => Step::Completed,
-        FileCreateStep::Finished(_) => Step::Held,
+        FileCreateStep::Finished(FreshFileCreateOutcome::CapturedLocalIncomplete) => Step::Held(
+            stage_hold!(stage, "ordinary file", "captured local incomplete"),
+        ),
+        FileCreateStep::Finished(FreshFileCreateOutcome::SubmittedUncertain) => {
+            Step::Held(stage_hold!(stage, "ordinary file", "submitted uncertain"))
+        }
+        FileCreateStep::Finished(FreshFileCreateOutcome::RemoteVerifiedLocalIncomplete) => {
+            Step::Held(stage_hold!(
+                stage,
+                "ordinary file",
+                "remote verified local incomplete"
+            ))
+        }
     }
 }
-fn directory_step(step: DirectoryCreateStep) -> Step {
+fn directory_step(step: DirectoryCreateStep, stage: Stage) -> Step {
+    use raiun_cloudfiles_windows::namespace_reconcile::DirectoryCreateOutcome as D;
     match step {
         DirectoryCreateStep::Task(task) => Step::Task(Task::Directory(Box::new(task))),
-        DirectoryCreateStep::Finished(
-            raiun_cloudfiles_windows::namespace_reconcile::DirectoryCreateOutcome::LocalCompleted,
-        ) => Step::Completed,
-        // Deferred conflates pre-intent busy with post-intent refusal. Never retry.
-        DirectoryCreateStep::Finished(_) => Step::Held,
+        DirectoryCreateStep::BusyBeforeCapture => Step::BusyFile,
+        DirectoryCreateStep::Finished(D::LocalCompleted) => Step::Completed,
+        DirectoryCreateStep::Finished(D::RemoteVerifiedLocalPending) => Step::Held(stage_hold!(
+            stage,
+            "ordinary directory",
+            "remote verified local pending"
+        )),
+        // Only explicit BusyBeforeCapture is retryable; Deferred can own an intent.
+        DirectoryCreateStep::Finished(D::Deferred) => {
+            Step::Held(stage_hold!(stage, "ordinary directory", "deferred"))
+        }
+        DirectoryCreateStep::Finished(D::Conflict) => {
+            Step::Held(stage_hold!(stage, "ordinary directory", "conflict"))
+        }
+        DirectoryCreateStep::Finished(D::Uncertain) => {
+            Step::Held(stage_hold!(stage, "ordinary directory", "uncertain"))
+        }
+        DirectoryCreateStep::Finished(D::Retained) => {
+            Step::Held(stage_hold!(stage, "ordinary directory", "retained"))
+        }
     }
 }
-fn vault_step(step: raiun_cloudfiles_windows::VaultChildCreateStep) -> Step {
+fn vault_hold(stage: Stage, kind: CreateKind) -> &'static str {
+    match kind {
+        CreateKind::File => stage_hold!(stage, "vault file", "held"),
+        CreateKind::Directory => stage_hold!(stage, "vault directory", "held"),
+    }
+}
+fn vault_refused(stage: Stage, kind: CreateKind) -> &'static str {
+    match kind {
+        CreateKind::File => stage_hold!(stage, "vault file", "owner refused"),
+        CreateKind::Directory => stage_hold!(stage, "vault directory", "owner refused"),
+    }
+}
+fn vault_step(
+    step: raiun_cloudfiles_windows::VaultChildCreateStep,
+    stage: Stage,
+    kind: CreateKind,
+) -> Step {
     use raiun_cloudfiles_windows::VaultChildCreateStep as V;
     match step {
         V::Task(t) => Step::Task(Task::Vault(Box::new(t))),
@@ -95,7 +182,7 @@ fn vault_step(step: raiun_cloudfiles_windows::VaultChildCreateStep) -> Step {
         V::Busy => Step::BusyFile,
         V::BusyBeforeCapture(task) => Step::BusyVaultTask(Task::Vault(Box::new(task))),
         V::Completed => Step::Completed,
-        V::Held => Step::Held,
+        V::Held => Step::Held(vault_hold(stage, kind)),
     }
 }
 pub(crate) const PRODUCTION_ENABLED: bool = true;
@@ -213,26 +300,35 @@ impl Lane {
             Some("Spaces") => components.len() >= 3,
             _ => false,
         };
-        if !supported_leaf
-            || components.len() > 256
-            || (kind == CreateKind::File && !self.allow_file)
+        let validation = if !supported_leaf || components.len() > 256 {
+            Some(kind_hold!(kind, "candidate namespace refused"))
+        } else if (kind == CreateKind::File && !self.allow_file)
             || (kind == CreateKind::Directory && !self.allow_directory)
-            || self.held
-            || !self.is_current(backend, root)
         {
+            Some(kind_hold!(kind, "creation disabled"))
+        } else if self.held {
+            Some(kind_hold!(kind, "owner already stopped"))
+        } else if !self.is_current(backend, root) {
+            Some(kind_hold!(kind, "original context changed"))
+        } else {
+            None
+        };
+        if let Some(reason) = validation {
             self.stop(connection);
             self.drain_held(connection, workers);
-            return Err(HOLD);
+            return Err(reason);
         }
         if self.candidate.as_ref().is_some_and(|old| {
             old.components != components || old.generation != record_generation || old.kind != kind
         }) {
             self.stop(connection);
-            return Err(HOLD);
+            return Err(kind_hold!(kind, "candidate identity changed"));
         }
         if self.candidate.is_none() {
             // Capture the original backend transfer-cancel epoch BEFORE first prepare.
-            let cancelled = backend.recovery_transfer_cancellation().ok_or(HOLD)?;
+            let cancelled = backend
+                .recovery_transfer_cancellation()
+                .ok_or(kind_hold!(kind, "initial cancellation context unavailable"))?;
             let generations = self.generation.clone();
             let expected = self.expected;
             let original = Arc::downgrade(backend);
@@ -271,10 +367,13 @@ impl Lane {
         if collect_only {
             return Ok(false);
         }
-        let candidate = self.candidate.as_ref().ok_or(HOLD)?;
+        let candidate = self
+            .candidate
+            .as_ref()
+            .ok_or(kind_hold!(kind, "candidate unavailable"))?;
         if candidate.job.is_stopped() {
             self.stop(connection);
-            return Err(HOLD);
+            return Err(kind_hold!(kind, "original job stopped"));
         }
         let step = if let Some(id) = self.flight {
             let Some(done) = workers.poll_for(id) else {
@@ -287,27 +386,45 @@ impl Lane {
                 {
                     reply
                 }
-                _ => {
+                result => {
+                    let reason = match result {
+                        Ok(_) => kind_hold!(kind, "executor completion identity mismatch"),
+                        Err(Failure::Cancelled) => kind_hold!(kind, "executor cancelled"),
+                        Err(Failure::Panicked) => kind_hold!(kind, "executor panicked"),
+                    };
                     self.stop(connection);
-                    return Err(HOLD);
+                    return Err(reason);
                 }
             };
             Some(match reply {
-                Reply::Vault(reply) => vault_step(
-                    connection
-                        .advance_fresh_vault_child_create(*reply)
-                        .map_err(|_| HOLD)?,
-                ),
-                Reply::File(reply) => file_step(
-                    connection
-                        .advance_fresh_personal_file_create(*reply)
-                        .map_err(|_| HOLD)?,
-                ),
-                Reply::Directory(reply) => directory_step(
-                    connection
-                        .advance_fresh_personal_directory_create(*reply)
-                        .map_err(|_| HOLD)?,
-                ),
+                Reply::Vault(reply) => {
+                    let failure = reply.failure_context();
+                    vault_step(
+                        connection
+                            .advance_fresh_vault_child_create(*reply)
+                            .map_err(|_| failure)?,
+                        Stage::Advance,
+                        kind,
+                    )
+                }
+                Reply::File(reply) => {
+                    let failure = reply.failure_context();
+                    file_step(
+                        connection
+                            .advance_fresh_personal_file_create(*reply)
+                            .map_err(|_| failure)?,
+                        Stage::Advance,
+                    )
+                }
+                Reply::Directory(reply) => {
+                    let failure = reply.failure_context();
+                    directory_step(
+                        connection
+                            .advance_fresh_personal_directory_create(*reply)
+                            .map_err(|_| failure)?,
+                        Stage::Advance,
+                    )
+                }
             })
         } else if self.deferred.is_none() {
             let auth = CapturedAuthorization {
@@ -318,9 +435,36 @@ impl Lane {
                 .iter()
                 .map(String::as_str)
                 .collect();
-            let name = candidate.components.last().ok_or(HOLD)?;
+            let name = candidate
+                .components
+                .last()
+                .ok_or(kind_hold!(kind, "candidate leaf unavailable"))?;
             if !self.ordinary_candidate {
-                Some(vault_step(connection.begin_fresh_vault_child_create(backend,&parents,name,match candidate.kind {CreateKind::File=>raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::File,CreateKind::Directory=>raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::Directory},auth,record_generation,&candidate.job,candidate.current.clone(),self.generation.clone()).map_err(|_|HOLD)?))
+                let object_kind = match candidate.kind {
+                    CreateKind::File => {
+                        raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::File
+                    }
+                    CreateKind::Directory => {
+                        raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::Directory
+                    }
+                };
+                Some(vault_step(
+                    connection
+                        .begin_fresh_vault_child_create(
+                            backend,
+                            &parents,
+                            name,
+                            object_kind,
+                            auth,
+                            record_generation,
+                            &candidate.job,
+                            candidate.current.clone(),
+                            self.generation.clone(),
+                        )
+                        .map_err(|_| vault_refused(Stage::Begin, kind))?,
+                    Stage::Begin,
+                    kind,
+                ))
             } else {
                 Some(match candidate.kind {
                     CreateKind::File => file_step(
@@ -334,7 +478,10 @@ impl Lane {
                                 &candidate.job,
                                 candidate.current.clone(),
                             )
-                            .map_err(|_| HOLD)?,
+                            .map_err(|_| {
+                                stage_hold!(Stage::Begin, "ordinary file", "owner refused")
+                            })?,
+                        Stage::Begin,
                     ),
                     CreateKind::Directory => directory_step(
                         connection
@@ -347,7 +494,10 @@ impl Lane {
                                 &candidate.job,
                                 candidate.current.clone(),
                             )
-                            .map_err(|_| HOLD)?,
+                            .map_err(|_| {
+                                stage_hold!(Stage::Begin, "ordinary directory", "owner refused")
+                            })?,
+                        Stage::Begin,
                     ),
                 })
             }
@@ -377,16 +527,16 @@ impl Lane {
                     self.cancel_on_drop.take();
                     return Ok(true);
                 }
-                Step::Held => {
+                Step::Held(reason) => {
                     self.stop(connection);
-                    return Err(HOLD);
+                    return Err(reason);
                 }
             }
         }
         if let Some(task) = self.deferred.take() {
             if task.kind() != kind {
                 self.stop(connection);
-                return Err(HOLD);
+                return Err(kind_hold!(kind, "executor task kind mismatch"));
             }
             match workers.submit(task) {
                 Ok(id) => self.flight = Some(id),

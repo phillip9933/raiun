@@ -99,6 +99,22 @@ impl CloseCaptureAdmission {
         })
     }
 
+    /// Scheduling information before any new ticket/capture/intent exists.
+    /// Unknown bookkeeping never becomes retry authority through this query.
+    #[cfg(windows)]
+    pub(crate) fn known_busy_for_create(&self) -> bool {
+        if self.unknown.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(state) = self.try_state() else {
+            return false;
+        };
+        !self.unknown.load(Ordering::Acquire)
+            && (state.active_closes != 0
+                || state.rename_claimed
+                || !state.ordinary_creates.is_empty())
+    }
+
     fn try_begin_ticket(&self) -> Option<TicketState> {
         if self.unknown.load(Ordering::Acquire) {
             return None;

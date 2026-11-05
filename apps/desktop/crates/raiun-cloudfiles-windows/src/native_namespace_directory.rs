@@ -650,8 +650,32 @@ pub struct DirectoryCreateReply {
     phase: Phase,
     kind: DirectoryReplyKind,
 }
+impl DirectoryCreateReply {
+    /// A fixed diagnostic boundary, not authorization to retry a retained intent.
+    pub fn failure_context(&self) -> &'static str {
+        match &self.kind {
+            DirectoryReplyKind::Prepared(Err(_)) => {
+                "Folder creation paused: account-bound parent or recovery preparation failed. Recovery files have been kept."
+            }
+            DirectoryReplyKind::Prepared(Ok(_)) => {
+                "Folder creation paused: native directory admission or protected intent publication failed. Recovery files have been kept."
+            }
+            DirectoryReplyKind::Preflight(_, _) => {
+                "Folder creation paused: conditional cloud preflight or dispatch admission failed. Recovery files have been kept."
+            }
+            DirectoryReplyKind::Sent(_, _) => {
+                "Folder creation paused: cloud result verification or protected result persistence failed. Recovery files have been kept."
+            }
+            DirectoryReplyKind::Refreshed(_, _) => {
+                "Folder creation paused: verified directory publication or native completion failed. Recovery files have been kept."
+            }
+        }
+    }
+}
 pub enum DirectoryCreateStep {
     Task(DirectoryCreateTask),
+    /// No new ticket, native capture or durable intent was created.
+    BusyBeforeCapture,
     Finished(DirectoryCreateOutcome),
 }
 enum DirectoryTaskKind {
@@ -816,12 +840,13 @@ impl ConfiguredRootConnection {
             return Err(Error::ProviderUnavailable);
         }
         if slot.attempt.is_some() {
-            return Ok(DirectoryCreateStep::Finished(
-                DirectoryCreateOutcome::Deferred,
-            ));
+            return Ok(DirectoryCreateStep::BusyBeforeCapture);
         }
         let (tracker, recovery) = self.file_rename_guard_context(backend)?;
         let Some(admission) = tracker.try_begin_directory() else {
+            if tracker.known_busy_for_create() {
+                return Ok(DirectoryCreateStep::BusyBeforeCapture);
+            }
             return Ok(DirectoryCreateStep::Finished(
                 DirectoryCreateOutcome::Deferred,
             ));
@@ -1186,6 +1211,9 @@ impl ConfiguredRootConnection {
         )?;
         loop {
             step = match step {
+                DirectoryCreateStep::BusyBeforeCapture => {
+                    return Ok(DirectoryCreateOutcome::Deferred);
+                }
                 DirectoryCreateStep::Finished(outcome) => return Ok(outcome),
                 DirectoryCreateStep::Task(task) => {
                     self.advance_fresh_personal_directory_create(task.execute())?

@@ -40,6 +40,17 @@ paths, server text or native error strings are surfaced. Windows UI history is
 labelled as Sync Folders history, with a persistent current-account warning on
 Transfers. No observer reattach, automatic rescan or held-file replay is added.
 
+Creation now distinguishes a known busy owner before capture from retained or
+uncertain work. Directory and vault creation may wait on the original candidate
+and deadline only before a new ticket, body or intent exists; unknown bookkeeping
+and every post-intent refusal still stop. An ordinary file that changed only in
+size or modification time between its metadata probe and exclusive source open
+also waits before capture, after the same physical identity, shape, single link,
+root, parent and final path have been verified. No captured file is recaptured or
+replayed. Fixed begin/reply/outcome reasons preserve the creation failure boundary
+without exposing paths or arbitrary server text. The physical bulk-copy failure
+remains failed until a corrected exact package is actually exercised.
+
 ## Current candidate — 3 November 2026
 
 The canonical Linux/Windows GUI and headless CLI source is consolidated in the

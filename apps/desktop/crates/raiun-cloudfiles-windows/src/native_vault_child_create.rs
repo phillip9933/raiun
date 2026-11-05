@@ -257,6 +257,25 @@ pub struct VaultChildCreateReply {
     phase: Phase,
     reply: ReplyKind,
 }
+impl VaultChildCreateReply {
+    /// Fixed phase information only, including discovery of ordinary parents.
+    pub fn failure_context(&self) -> &'static str {
+        match &self.reply {
+            ReplyKind::Discovered(Err(_)) => {
+                "Creation paused: account-bound parent classification failed. Recovery files have been kept."
+            }
+            ReplyKind::Discovered(Ok(_)) => {
+                "Creation paused: parent classification reply or native source admission failed. Recovery files have been kept."
+            }
+            ReplyKind::Prepared(_) => {
+                "Encrypted creation paused: protected source preparation or durable intent publication failed. Recovery files have been kept."
+            }
+            ReplyKind::Sent(_) => {
+                "Encrypted creation paused: cloud verification or native completion failed. Recovery files have been kept."
+            }
+        }
+    }
+}
 pub enum VaultChildCreateStep {
     Task(VaultChildCreateTask),
     Ordinary,
@@ -625,9 +644,11 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::EditRecoveryUnavailable);
         }
-        let ticket = tracker
-            .try_begin_create()
-            .ok_or(Error::EditRecoveryUnavailable)?;
+        let ticket = match tracker.try_begin_create() {
+            Some(ticket) => ticket,
+            None if tracker.known_busy_for_create() => return Ok(VaultChildCreateStep::Busy),
+            None => return Err(Error::EditRecoveryUnavailable),
+        };
         let observation = ticket.observation_probe();
         let original = current.clone();
         let current: crate::opencloud::file_create::Current =

@@ -552,6 +552,25 @@ pub struct FileCreateReply {
     store: Option<Arc<SnapshotStore>>,
     kind: ReplyKind,
 }
+impl FileCreateReply {
+    /// Fixed failure boundary only; never exposes paths, credentials or server text.
+    pub fn failure_context(&self) -> &'static str {
+        match &self.kind {
+            ReplyKind::Prepared(Err(_)) => {
+                "File creation paused: account-bound parent or recovery preparation failed. Recovery files have been kept."
+            }
+            ReplyKind::Prepared(Ok(_)) => {
+                "File creation paused: local source admission or protected capture failed. Recovery files have been kept."
+            }
+            ReplyKind::Sent(_) => {
+                "File creation paused: upload verification or protected result persistence failed. Recovery files have been kept."
+            }
+            ReplyKind::Refreshed(_) => {
+                "File creation paused: verified file publication or native completion failed. Recovery files have been kept."
+            }
+        }
+    }
+}
 pub enum FileCreateStep {
     Task(FileCreateTask),
     Finished(crate::FreshFileCreateOutcome),
@@ -1084,7 +1103,10 @@ impl ConfiguredRootConnection {
         };
         let reference = source.reference()?;
         let (snapshot, usn) = plain(&reference)?;
-        if !same_edit_snapshot(before, snapshot)
+        if before.identity != snapshot.identity
+            || before.file_attributes != snapshot.file_attributes
+            || before.reparse_tag != snapshot.reparse_tag
+            || before.placeholder_state != snapshot.placeholder_state
             || snapshot.identity.volume_serial != physical.volume_serial
             || snapshot.identity == parent_snapshot.identity
             || siblings.iter().any(|sibling| {
@@ -1104,6 +1126,15 @@ impl ConfiguredRootConnection {
             &expected,
         ) {
             return Err(Error::ConfiguredRootChanged);
+        }
+        // Explorer may finish its last write between the metadata probe and
+        // the exclusive source open. No body, intent or dispatch exists yet.
+        // Keep the original candidate/deadline and reacquire all admission on
+        // the next turn; identity, shape, link and path mismatches above hold.
+        if before.file_size != snapshot.file_size
+            || before.last_write_time != snapshot.last_write_time
+        {
+            return Ok(CaptureResult::Busy);
         }
         drop(probe); // No leaf share restriction remains during network phases.
         let verify = || -> Result<(), Error> {
