@@ -21,6 +21,17 @@ pub(crate) struct Admission {
     backend: std::sync::Weak<OpenCloudPlaceholderBackend>,
 }
 impl Admission {
+    /// This token describes only the exact freshly verified parent used by
+    /// this admission. It is never selected from an event or caller scope.
+    pub(crate) fn fresh_create_space(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+    ) -> Result<crate::FreshCreateSpace, BackendError> {
+        self.check(backend)?;
+        let space = crate::FreshCreateSpace::from_verified_scope(self.parent.scope.clone());
+        self.check(backend)?;
+        Ok(space)
+    }
     fn child_path(&self, leaf: &str) -> Result<String, BackendError> {
         let components: Vec<_> = self.parent_components.iter().map(String::as_str).collect();
         let relative =

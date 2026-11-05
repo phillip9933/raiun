@@ -451,6 +451,16 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         self.has_unresolved()
     }
 
+    /// Joint custody health for the same retained SDK-verified create Space.
+    /// Other-Space isolation never changes generic history or grants a replay.
+    #[cfg(windows)]
+    fn has_unresolved_for_fresh_create_in_space(
+        &self,
+        _space: &crate::FreshCreateSpace,
+    ) -> Result<bool, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     /// Counts authenticated namespace metadata only at this original account/root.
     /// Unknown or unsupported evidence is unavailable, never an empty summary.
     /// This grants no replay, dispatch, native completion or cleanup authority.

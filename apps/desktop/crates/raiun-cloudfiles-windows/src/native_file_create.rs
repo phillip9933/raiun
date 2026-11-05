@@ -591,12 +591,7 @@ impl FileCreateTask {
             TaskKind::Prepare(prep) => {
                 let result = (|| {
                     prep.job.check()?;
-                    if !(prep.current)(self.key.authorization)
-                        || prep.recovery.has_unresolved_namespace_for_fresh_create()?
-                        || prep
-                            .recovery
-                            .has_unresolved_content_authenticated_legacy()?
-                    {
+                    if !(prep.current)(self.key.authorization) {
                         return Err(BackendError::Unavailable);
                     }
                     let parent_components: Vec<_> =
@@ -609,17 +604,25 @@ impl FileCreateTask {
                         prep.current.clone(),
                     )?;
                     admission.check(&self.backend)?;
-                    if prep.recovery.has_unresolved_namespace_for_fresh_create()?
-                        || prep
-                            .recovery
-                            .has_unresolved_content_authenticated_legacy()?
+                    let space = admission.fresh_create_space(&self.backend)?;
+                    if prep
+                        .recovery
+                        .has_unresolved_for_fresh_create_in_space(&space)?
                     {
                         return Err(BackendError::Unavailable);
                     }
+                    admission.check(&self.backend)?;
                     let rename = prep
                         .recovery
                         .file_rename_store(&admission.parent.scope, self.key.authorization)?
                         .ok_or(BackendError::Unavailable)?;
+                    admission.check(&self.backend)?;
+                    if prep
+                        .recovery
+                        .has_unresolved_for_fresh_create_in_space(&space)?
+                    {
+                        return Err(BackendError::Unavailable);
+                    }
                     admission.check(&self.backend)?;
                     Ok(Box::new(Prepared { admission, rename }))
                 })();
@@ -914,19 +917,26 @@ impl ConfiguredRootConnection {
                     }
                     CaptureResult::Ready(captured) => *captured,
                 };
-                if self.check_create_attempt(&attempt).is_err()
-                    || local.lease.mark_submitted().is_err()
-                {
+                if self.check_create_attempt(&attempt).is_err() {
                     return Ok(FileCreateStep::Finished(
                         crate::FreshFileCreateOutcome::CapturedLocalIncomplete,
                     ));
                 }
+                // Claim the original live ticket before writing Submitted. A
+                // refused claim has no send and must retain a pending capture.
                 if !attempt.ticket.claim_dispatch() {
                     return Ok(FileCreateStep::Finished(
                         crate::FreshFileCreateOutcome::CapturedLocalIncomplete,
                     ));
                 }
                 attempt.dispatched.store(true, Ordering::Release);
+                // Write-ahead history still precedes construction of any Send
+                // task; a persistence refusal cannot dispatch the body.
+                if local.lease.mark_submitted().is_err() {
+                    return Ok(FileCreateStep::Finished(
+                        crate::FreshFileCreateOutcome::CapturedLocalIncomplete,
+                    ));
+                }
                 attempt.local = Some(local);
                 let task = attempt.task(
                     Phase::Send,

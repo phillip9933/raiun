@@ -805,6 +805,14 @@ pub(crate) struct RefreshedDirectory {
 }
 #[cfg(windows)]
 impl OwnedDirectorySession {
+    /// Mint only from this original SDK-verified parent, which is retained
+    /// through directory send/publication. The token grants no native custody.
+    pub(crate) fn fresh_create_space(&self) -> Result<crate::FreshCreateSpace, BackendError> {
+        self.check()?;
+        let space = crate::FreshCreateSpace::from_verified_scope(self.captured.scope.clone());
+        self.check()?;
+        Ok(space)
+    }
     pub(crate) fn prepare(
         backend: Arc<OpenCloudPlaceholderBackend>,
         components: &[&str],

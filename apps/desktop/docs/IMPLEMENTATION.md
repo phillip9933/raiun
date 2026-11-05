@@ -87,8 +87,18 @@ historical native ACK0/0 with an attention-free verified original join from an
 unfinished upload. Generic recovery counts, cleanup and legacy mutation barriers
 still treat the join as unresolved; no history is changed or old file replayed.
 Every fresh create retains its own current content-health, native, account/root,
-opaque-parent and conditional-create checks. Other pending or uncertain history
-still blocks admission.
+opaque-parent and conditional-create checks. A joint bounded custody scan can
+also isolate an exact retained Submitted/sequence-1, attention-free file create
+with its original NotAttempted snapshot from a different SDK-verified Space AND
+remote root. The same quota lease and metadata allowance cover namespace,
+exact original-key matching, other content and legacy checks. Same-Space work,
+unmatched snapshots, other pending operations and unknown evidence still block.
+This proves neither absence nor success of the old request and changes none of
+its records, bytes or recovery status. The new operation keeps its original SDK
+parent, ticket, native pins, retained FileID collision fence and create-only write.
+Encrypted routing keeps its strict pending guard before capture; ordinary routing
+must pass the joint check. Dispatch admission is claimed before the write-ahead
+Submitted marker, and the marker still precedes creation of any Send task.
 
 Explicit continuation of an already acknowledged original stops before capture,
 staging or PUT and returns a retained review result. GUI and CLI validate the

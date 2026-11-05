@@ -180,11 +180,61 @@ fn history_summary_existing_inner(
     }
     lock.lock_exclusive()?;
     lock.verify()?;
+    let (result, _) = history_summary_existing_locked(
+        Arc::clone(&root),
+        protector,
+        policy,
+        provider,
+        physical_root,
+        &mut budget,
+        include_details,
+        None,
+    )?;
+    lock.verify()?;
+    Ok(result)
+}
+
+/// The caller retains the exact root's quota lease and cumulative budget
+/// through namespace, snapshot and legacy classification. No nested lock.
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn history_summary_for_fresh_create_space_existing_locked(
+    root: Arc<dyn Directory>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+    candidate_scope: &EditJournalScope,
+    budget: &mut Budget,
+) -> Result<(NamespaceHistorySummary, Vec<StreamedRecordKey>), StoreError> {
+    history_summary_existing_locked(
+        root,
+        protector,
+        policy,
+        provider,
+        physical_root,
+        budget,
+        false,
+        Some(candidate_scope),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_summary_existing_locked(
+    root: Arc<dyn Directory>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    include_details: bool,
+    candidate_scope: Option<&EditJournalScope>,
+) -> Result<(NamespaceHistorySummary, Vec<StreamedRecordKey>), StoreError> {
     // Re-enumerate only after locking; charge both bounded observations to the
     // same allowance rather than resetting it per catalog or remote scope.
     let names = root.entries(budget.remaining_entries())?;
     budget.entries(names.len())?;
-    let catalogs = validate_root_catalog_scope_union(&*root, &*protector, &names, &mut budget)?;
+    let catalogs = validate_root_catalog_scope_union(&*root, &*protector, &names, budget)?;
     let mut result = NamespaceHistorySummary {
         directory_evidence: names.iter().any(|name| name == namespace_store::ROOT),
         file_evidence: names.iter().any(|name| name == namespace_file_store::ROOT),
@@ -193,11 +243,12 @@ fn history_summary_existing_inner(
             .any(|name| name == namespace_file_delete_store::ROOT),
         ..NamespaceHistorySummary::default()
     };
+    let mut space_exemptions = Vec::new();
     if names.iter().any(|name| name == ROOT) {
         let rename = root.child(ROOT, false)?;
         for scope in catalogs.rename {
             let directory = rename.child(&scope_key(&scope)?, false)?;
-            let names = record_names(&*directory, &mut budget)?;
+            let names = record_names(&*directory, budget)?;
             if scope.profile_id == provider.profile_id()
                 && scope.server_origin == provider.server_origin()
                 && scope.account_subject == provider.account_id()
@@ -223,8 +274,7 @@ fn history_summary_existing_inner(
                             .ok_or(StoreError::ScanLimit)?,
                     )
                     .ok_or(StoreError::ScanLimit)?;
-                let rows =
-                    decoder.load_records(&*directory, &scope, &names, &mut budget, remaining)?;
+                let rows = decoder.load_records(&*directory, &scope, &names, budget, remaining)?;
                 result.records += rows.len();
                 result.unresolved += rows
                     .iter()
@@ -258,7 +308,7 @@ fn history_summary_existing_inner(
                 &scope,
                 provider,
                 physical_root,
-                &mut budget,
+                budget,
                 remaining,
             )?;
             result.directory_records += records;
@@ -278,29 +328,44 @@ fn history_summary_existing_inner(
                     .ok_or(StoreError::ScanLimit)?,
             )
             .ok_or(StoreError::ScanLimit)?;
-        let (records, unresolved, acknowledged_join_gaps, classifications) = if include_details {
-            namespace_file_store::history_counts_detailed_existing(
-                Arc::clone(&root),
-                Arc::clone(&protector),
-                policy,
-                provider,
-                physical_root,
-                &mut budget,
-                remaining,
-            )?
-        } else {
-            let (records, unresolved, gaps) =
-                namespace_file_store::history_counts_with_acknowledged_gaps_existing(
+        let (records, unresolved, acknowledged_join_gaps, classifications) =
+            if let Some(candidate) = candidate_scope {
+                let (records, unresolved, gaps, keys) =
+                    namespace_file_store::history_counts_for_fresh_create_space_existing(
+                        Arc::clone(&root),
+                        Arc::clone(&protector),
+                        policy,
+                        provider,
+                        physical_root,
+                        budget,
+                        remaining,
+                        candidate,
+                    )?;
+                space_exemptions = keys;
+                (records, unresolved, gaps, Vec::new())
+            } else if include_details {
+                namespace_file_store::history_counts_detailed_existing(
                     Arc::clone(&root),
                     Arc::clone(&protector),
                     policy,
                     provider,
                     physical_root,
-                    &mut budget,
+                    budget,
                     remaining,
-                )?;
-            (records, unresolved, gaps, Vec::new())
-        };
+                )?
+            } else {
+                let (records, unresolved, gaps) =
+                    namespace_file_store::history_counts_with_acknowledged_gaps_existing(
+                        Arc::clone(&root),
+                        Arc::clone(&protector),
+                        policy,
+                        provider,
+                        physical_root,
+                        budget,
+                        remaining,
+                    )?;
+                (records, unresolved, gaps, Vec::new())
+            };
         result.file_records += records;
         result.file_unresolved += unresolved;
         result.file_acknowledged_join_gaps += acknowledged_join_gaps;
@@ -323,15 +388,14 @@ fn history_summary_existing_inner(
             &catalogs.delete,
             provider,
             physical_root,
-            &mut budget,
+            budget,
             remaining,
         )?;
         result.delete_records += records;
         result.delete_unresolved += unresolved;
     }
     root.verify()?;
-    lock.verify()?;
-    Ok(result)
+    Ok((result, space_exemptions))
 }
 
 /// A verified record returned by read-only discovery. It is not a publication

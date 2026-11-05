@@ -309,6 +309,22 @@ pub struct VaultCleanupDiagnostics {
     pub inventory_complete: Option<bool>,
 }
 
+/// An exact Space identity captured by the retained SDK create admission.
+/// This read-only health input grants no dispatch or old-record authority.
+#[cfg(windows)]
+pub struct FreshCreateSpace {
+    scope: EditJournalScope,
+}
+#[cfg(windows)]
+impl FreshCreateSpace {
+    pub(crate) fn from_verified_scope(scope: EditJournalScope) -> Self {
+        Self { scope }
+    }
+    pub(crate) fn scope(&self) -> &EditJournalScope {
+        &self.scope
+    }
+}
+
 #[cfg(windows)]
 pub use streamed_store::namespace_file_store::PendingFileCreateClassification;
 

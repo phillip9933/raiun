@@ -1527,9 +1527,9 @@ pub(super) fn history_counts_with_acknowledged_gaps_existing(
     remaining: usize,
 ) -> Result<(usize, usize, usize), StoreError> {
     history_counts_existing_inner(
-        root, protector, policy, provider, physical, budget, remaining, false,
+        root, protector, policy, provider, physical, budget, remaining, false, None,
     )
-    .map(|(records, unresolved, gaps, _)| (records, unresolved, gaps))
+    .map(|(records, unresolved, gaps, _, _)| (records, unresolved, gaps))
 }
 
 /// Explicit support inspection only. Original snapshot history is authenticated
@@ -1544,9 +1544,45 @@ pub(super) fn history_counts_detailed_existing(
     remaining: usize,
 ) -> Result<(usize, usize, usize, Vec<PendingFileCreateClassification>), StoreError> {
     history_counts_existing_inner(
-        root, protector, policy, provider, physical, budget, remaining, true,
+        root, protector, policy, provider, physical, budget, remaining, true, None,
     )
+    .map(|(records, unresolved, gaps, details, _)| (records, unresolved, gaps, details))
 }
+
+/// Caller retains the original quota lease. Keys identify only exact historical
+/// originals in a different Space AND remote root, never replay/native custody.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn history_counts_for_fresh_create_space_existing(
+    root: Arc<dyn Directory>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+    candidate_scope: &EditJournalScope,
+) -> Result<(usize, usize, usize, Vec<StreamedRecordKey>), StoreError> {
+    history_counts_existing_inner(
+        root,
+        protector,
+        policy,
+        provider,
+        physical,
+        budget,
+        remaining,
+        false,
+        Some(candidate_scope),
+    )
+    .map(|(records, unresolved, gaps, _, keys)| (records, unresolved, gaps, keys))
+}
+
+type FileHistoryScan = (
+    usize,
+    usize,
+    usize,
+    Vec<PendingFileCreateClassification>,
+    Vec<StreamedRecordKey>,
+);
 
 #[allow(clippy::too_many_arguments)]
 fn history_counts_existing_inner(
@@ -1558,13 +1594,15 @@ fn history_counts_existing_inner(
     budget: &mut Budget,
     remaining: usize,
     include_details: bool,
-) -> Result<(usize, usize, usize, Vec<PendingFileCreateClassification>), StoreError> {
+    candidate_scope: Option<&EditJournalScope>,
+) -> Result<FileHistoryScan, StoreError> {
     let files = root.child(ROOT, false)?;
     let scopes = catalogs(&*files, &*protector, budget)?;
     let mut records = 0usize;
     let mut unresolved = 0usize;
     let mut acknowledged_join_gaps = 0usize;
     let mut classifications = std::collections::BTreeMap::new();
+    let mut space_exemptions = Vec::new();
     for (key, scope) in scopes {
         let directory = files.child(&key, false)?;
         let names = directory.entries(budget.remaining_entries())?;
@@ -1616,6 +1654,35 @@ fn history_counts_existing_inner(
                 unresolved += usize::from(!loaded.record.progress.recorded_complete);
                 let eligible = decoder.acknowledged_original(&loaded, budget)?;
                 acknowledged_join_gaps += usize::from(eligible);
+                let progress = loaded.record.progress;
+                if candidate_scope.is_some_and(|candidate| {
+                    scope.space_id != candidate.space_id
+                        && scope.root_resource_id != candidate.root_resource_id
+                }) && progress.remote == NamespacePhase::Submitted
+                    && progress.sequence == 1
+                    && progress.attention.is_none()
+                    && !progress.local_completed
+                    && !progress.continued
+                    && !progress.recorded_complete
+                {
+                    let (manifest, original_directory) = decoder.reference_manifest_metadata(
+                        &loaded.record.joined,
+                        &loaded.record.key.scope,
+                        budget,
+                    )?;
+                    if decoder.base.create_original_state_metadata(
+                        &manifest,
+                        &*original_directory,
+                        budget,
+                    )? == StreamedAttemptState::NotAttempted
+                    {
+                        let key = StreamedRecordKey::from_manifest(&manifest)?;
+                        if space_exemptions.contains(&key) {
+                            return Err(StoreError::CorruptEvidence);
+                        }
+                        space_exemptions.push(key);
+                    }
+                }
                 if include_details && !loaded.record.progress.recorded_complete {
                     let (manifest, original_directory) = decoder.reference_manifest_metadata(
                         &loaded.record.joined,
@@ -1644,7 +1711,13 @@ fn history_counts_existing_inner(
             row
         })
         .collect();
-    Ok((records, unresolved, acknowledged_join_gaps, classifications))
+    Ok((
+        records,
+        unresolved,
+        acknowledged_join_gaps,
+        classifications,
+        space_exemptions,
+    ))
 }
 
 pub(super) fn accounted_usage(

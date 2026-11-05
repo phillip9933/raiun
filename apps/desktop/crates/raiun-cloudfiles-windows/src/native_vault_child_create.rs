@@ -552,6 +552,7 @@ struct Attempt {
     phase: Phase,
     done: Arc<AtomicBool>,
     backend: Arc<crate::OpenCloudPlaceholderBackend>,
+    recovery: Arc<dyn PreparedEditRecovery>,
     components: Vec<String>,
     name: String,
     job: crate::StreamedRecoveryJob,
@@ -643,18 +644,6 @@ impl ConfiguredRootConnection {
             return Ok(VaultChildCreateStep::Busy);
         }
         let (tracker, recovery) = self.file_create_guard_context(backend)?;
-        if recovery
-            .has_unresolved_namespace_for_fresh_create()
-            .map_err(|_| refused(S::RecoveryScan))?
-        {
-            return Err(refused(S::RecoveryPending));
-        }
-        if recovery
-            .has_unresolved_content_authenticated_legacy()
-            .map_err(|_| refused(S::ContentScan))?
-        {
-            return Err(refused(S::ContentPending));
-        }
         let ticket = match tracker.try_begin_create() {
             Some(ticket) => ticket,
             None if tracker.known_busy_for_create() => return Ok(VaultChildCreateStep::Busy),
@@ -685,6 +674,7 @@ impl ConfiguredRootConnection {
             phase: Phase::Discover,
             done: Arc::new(AtomicBool::new(true)),
             backend: backend.clone(),
+            recovery,
             components: components.iter().map(|c| (*c).to_owned()).collect(),
             name: name.into(),
             job: job.clone(),
@@ -736,6 +726,31 @@ impl ConfiguredRootConnection {
                         completed = true;
                         return Ok(VaultChildCreateStep::Ordinary);
                     };
+                    parent.check().map_err(|_| Error::EditRecoveryUnavailable)?;
+                    // Discovery is read-only. Actual vault work retains the
+                    // original global namespace/content refusal before any
+                    // native pin, capture, protected stage or remote send.
+                    use crate::CreateAdmissionStage as S;
+                    let refused = |stage| Error::CreateAdmission { stage };
+                    let (_, recovery) = self.file_create_guard_context(&attempt.backend)?;
+                    if !Arc::ptr_eq(&recovery, &attempt.recovery) {
+                        return Err(refused(S::RecoveryContext));
+                    }
+                    if attempt
+                        .recovery
+                        .has_unresolved_namespace_for_fresh_create()
+                        .map_err(|_| refused(S::RecoveryScan))?
+                    {
+                        return Err(refused(S::RecoveryPending));
+                    }
+                    if attempt
+                        .recovery
+                        .has_unresolved_content_authenticated_legacy()
+                        .map_err(|_| refused(S::ContentScan))?
+                    {
+                        return Err(refused(S::ContentPending));
+                    }
+                    attempt.check(self)?;
                     parent.check().map_err(|_| Error::EditRecoveryUnavailable)?;
                     let pins = match attempt.key.kind {
                         NamespaceObjectKind::File => {

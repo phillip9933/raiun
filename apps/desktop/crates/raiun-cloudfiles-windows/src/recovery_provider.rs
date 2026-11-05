@@ -1977,6 +1977,46 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
     }
 
     #[cfg(windows)]
+    fn has_unresolved_for_fresh_create_in_space(
+        &self,
+        space: &crate::FreshCreateSpace,
+    ) -> Result<bool, BackendError> {
+        let candidate = space.scope();
+        if !valid_scope_binding(&self.scope, self.root_identity)
+            || !scope_matches_provider(candidate, &self.scope, self.root_identity)
+            || validate_catalog_scope(candidate).is_err()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        // An unconfigured namespace consumer cannot reinterpret retained
+        // history or gain writer admission from this health query.
+        let context = self
+            .namespace_rename
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?;
+        if context.admission.state_identity() != context.state.identity()
+            || context.state.path() != self.catalog.state_directory
+        {
+            return Err(BackendError::Unavailable);
+        }
+        crate::streamed_store::SnapshotStore::fresh_create_space_pending_existing(
+            Arc::clone(&context.state),
+            Arc::clone(&self.catalog.protector),
+            context.policy,
+            &self.scope,
+            self.root_identity,
+            candidate,
+            true,
+            |budget| {
+                self.catalog
+                    .content_presence_authenticated_bounded(&self.scope, self.root_identity, budget)
+                    .map_err(|_| crate::streamed_store::StoreError::IncompleteEvidence)
+            },
+        )
+        .map_err(|_| BackendError::Unavailable)
+    }
+
+    #[cfg(windows)]
     fn namespace_recovery_summary(&self) -> Result<crate::NamespaceRecoverySummary, BackendError> {
         let summary = namespace_storage::namespace_history_diagnostics(
             self.namespace_rename.as_ref(),

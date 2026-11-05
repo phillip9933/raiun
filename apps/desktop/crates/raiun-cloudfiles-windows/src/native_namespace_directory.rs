@@ -729,11 +729,6 @@ impl DirectoryCreateTask {
             } => {
                 let result = (|| {
                     job.check()?;
-                    if recovery.has_unresolved_namespace_for_fresh_create()?
-                        || recovery.has_unresolved_content_authenticated_legacy()?
-                    {
-                        return Err(BackendError::Unavailable);
-                    }
                     let refs: Vec<_> = components.iter().map(String::as_str).collect();
                     let session = OwnedDirectorySession::prepare(
                         backend,
@@ -743,15 +738,20 @@ impl DirectoryCreateTask {
                         job,
                         current,
                     )?;
+                    session.check()?;
+                    let space = session.fresh_create_space()?;
+                    if recovery.has_unresolved_for_fresh_create_in_space(&space)? {
+                        return Err(BackendError::Unavailable);
+                    }
+                    session.check()?;
                     let store = recovery
                         .directory_intent_store(&session.captured.scope, self.key.authorization)?
                         .ok_or(BackendError::Unavailable)?;
                     session.check()?;
-                    if recovery.has_unresolved_namespace_for_fresh_create()?
-                        || recovery.has_unresolved_content_authenticated_legacy()?
-                    {
+                    if recovery.has_unresolved_for_fresh_create_in_space(&space)? {
                         return Err(BackendError::Unavailable);
                     }
+                    session.check()?;
                     Ok((session, store))
                 })();
                 (Phase::Prepare, DirectoryReplyKind::Prepared(result))
