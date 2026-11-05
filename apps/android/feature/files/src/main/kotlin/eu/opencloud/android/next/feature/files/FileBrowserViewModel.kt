@@ -40,35 +40,24 @@ import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.sync.DISCOVERY_ERROR
 import eu.opencloud.android.next.core.sync.FileOperationNameConflictException
 import eu.opencloud.android.next.core.sync.SearchRepositoryResult
-import eu.opencloud.android.next.core.sync.SharedFolderBrowser
-import eu.opencloud.android.next.core.sync.SharedFolderPage
-import eu.opencloud.android.next.core.sync.SharedFolderPageCursorSnapshot
-import eu.opencloud.android.next.core.sync.SharedFolderRequest
-import eu.opencloud.android.next.core.sync.SharedRootDiscovery
-import eu.opencloud.android.next.core.sync.SharedUploadDestinationResolver
 import eu.opencloud.android.next.core.sync.SpaceCreationResult
 import eu.opencloud.android.next.core.sync.TransferManager
 import eu.opencloud.android.next.core.sync.VaultLocation
-import eu.opencloud.android.next.core.sync.VaultRepository
 import eu.opencloud.android.next.core.sync.createSearchRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.mapLatest
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -109,6 +98,10 @@ class FileBrowserViewModel(
             },
         )
     private var accountJob: Job? = null
+    private val accountContext = BrowserAccountContext()
+    private val accountBindings = MutableStateFlow<BrowserAccountBinding?>(null)
+    private val offlineBindings = MutableStateFlow<Pair<BrowserAccountBinding, Long>?>(null)
+    private var exportInFlight = false
     private val directoryOptions = MutableStateFlow(DirectoryPageOptions())
     private val transfers = TransferManager(application, store)
     private val operations =
@@ -121,19 +114,8 @@ class FileBrowserViewModel(
         eu.opencloud.android.next.core.datastore
             .RecentFiles(application)
     private val mutableState = MutableStateFlow(FileBrowserUiState())
-    private var placementInFlight = false
-    private var placementTarget: FileOperationPlacementTarget? = null
     private val activeLocation = MutableStateFlow<BrowserLocation?>(null)
-    private val backupPickerLocation = MutableStateFlow<BrowserLocation?>(null)
-    private val backupPickerOffset = MutableStateFlow(0)
-    private var backupPickerRevision = 0
-    private var backupPickerVaultRevision = 0
-    private var backupPickerSharedSnapshot: SharedBackupPickerSnapshot? = null
-    private val backupPickerVaults = VaultRepository(application, store)
-    private val sharedRoots = SharedRootDiscovery.create(application)
     private val sharedInventory = IncomingShareStore(FileBrowserDatabase.create(application))
-    private val sharedBrowser = SharedFolderBrowser.create(application)
-    private val sharedDestinationResolver = SharedUploadDestinationResolver.create(application)
     private val searchQuery = MutableStateFlow("")
     private val collectionSearchOnly = MutableStateFlow(false)
     val state: StateFlow<FileBrowserUiState> = mutableState.asStateFlow()
@@ -141,6 +123,69 @@ class FileBrowserViewModel(
     private var accountId: String? = null
     private var latestDiscovery: UUID? = null
     private var creatingSpace = false
+    private val locationLoader =
+        BrowserLocationLoader(
+            context = accountContext,
+            read = store::resource,
+            publish = { request, trail ->
+                val folder = trail.lastOrNull()?.id
+                reduce {
+                    if (request.restoring) {
+                        copy(spaceId = request.spaceId, currentFolderId = folder, folderTrail = trail)
+                    } else {
+                        copy(
+                            spaceId = request.spaceId,
+                            currentFolderId = folder,
+                            folderTrail = trail,
+                            selectedIds = emptySet(),
+                            searchQuery = "",
+                            searchResults = emptyList(),
+                        )
+                    }
+                }
+                setActiveLocation(request.spaceId, folder)
+                if (!request.restoring) {
+                    observeDiscovery(transfers.refreshFolder(request.binding.accountId, request.spaceId, folder))
+                }
+            },
+            incomplete = { request ->
+                reportOpenError("The folder location is incomplete. Refresh its Space and try again.")
+                if (activeLocation.value == null) {
+                    val space = admittedBrowserSpace(state.value.spaces, null, state.value.spaceId)
+                    if (space != null) {
+                        reduce { copy(spaceId = space.driveId, currentFolderId = null, folderTrail = emptyList()) }
+                        setActiveLocation(space.driveId, null)
+                        observeDiscovery(transfers.refreshFolder(request.binding.accountId, space.driveId, null))
+                    }
+                }
+            },
+        )
+    private val placement =
+        OrdinaryPlacementOwner(
+            scope = viewModelScope,
+            state = state,
+            currentAccount = { accountId },
+            reduce = ::reduce,
+            failureMessage = { it.toOpenCloudError().safeMessage(getApplication()) },
+            enqueue = { source, space, parent, name, move, namingBase ->
+                operations.enqueue(source, space, parent, name, move, namingBase)
+            },
+        )
+    private val backupPicker =
+        BackupDestinationPickerOwner(
+            application = application,
+            scope = viewModelScope,
+            directoryPaging = directoryPaging,
+            store = store,
+            refreshFolder = transfers::refreshFolder,
+            createFolder = { account, space, parent, name ->
+                transfers.createFolder(account, space, parent, name)
+            },
+            state = state,
+            currentAccount = { accountId },
+            reduce = ::reduce,
+            observeDiscovery = ::observeDiscovery,
+        )
     private val encryptedFolders =
         EncryptedFolderDiscovery(application, store, viewModelScope) { entries, error ->
             reduce { withEncryptedFolders(entries, error) }
@@ -165,21 +210,24 @@ class FileBrowserViewModel(
             store,
             viewModelScope,
             onBusy = { busy -> reduce { copy(encryptedCreationBusy = busy) } },
-            onCreated = { created, parent ->
-                if (accountId == created.accountId) {
+            onCreated = { binding, created, parent ->
+                if (accountContext.binding == binding) {
                     if (parent == null) {
                         observeDiscovery(transfers.refreshAccount(created.accountId))
                         reduce { copy(encryptedSpaceCreationRevision = encryptedSpaceCreationRevision + 1) }
-                    } else if (activeLocation.value ==
-                        BrowserLocation(parent.accountId, parent.driveId, parent.folderId)
+                    } else if (activeLocation.value?.let {
+                            it.accountId == parent.accountId &&
+                                it.spaceId == parent.driveId &&
+                                it.folderId == parent.folderId
+                        } == true
                     ) {
                         observeDiscovery(transfers.refreshFolder(parent.accountId, parent.driveId, parent.folderId))
                         encryptedFolders.refresh(parent.accountId, parent.driveId, parent.folderId)
                     }
                 }
             },
-            onUncertain = { account ->
-                if (accountId == account) {
+            onUncertain = { binding ->
+                if (accountContext.binding == binding) {
                     reduce {
                         copy(
                             error =
@@ -194,37 +242,64 @@ class FileBrowserViewModel(
 
     init {
         transfers.scheduleCleanup()
+        observeOfflineContent()
         viewModelScope.launch(Dispatchers.IO) {
-            offlinePager.state.collectLatest { cached ->
-                if (cached.request?.account == accountId) {
+            settings.settings.collectLatest { settings ->
+                withContext(Dispatchers.Main.immediate) {
+                    directoryOptions.update { it.copy(showHidden = settings.fileDisplay.showHidden) }
                     reduce {
                         copy(
-                            offlineResources =
-                                cached.result
-                                    ?.page
-                                    ?.entries
-                                    ?.mapNotNull { it.resource }
-                                    .orEmpty(),
-                            offlinePage = cached.result?.page,
-                            offlineBytes = cached.bytes,
-                            error = cached.error?.toOpenCloudError()?.safeMessage(getApplication()) ?: error,
+                            layout = settings.browserLayout.toBrowserLayout(),
+                            fileDisplay = settings.fileDisplay,
+                            temporaryCopyRetentionHours = settings.temporaryCopyRetentionHours,
                         )
                     }
                 }
             }
         }
+        observeDirectoryContent()
+        observeSearchContent()
+        backupPicker.start()
+    }
+
+    private fun observeOfflineContent() {
         viewModelScope.launch(Dispatchers.IO) {
-            settings.settings.collectLatest { settings ->
-                directoryOptions.update { it.copy(showHidden = settings.fileDisplay.showHidden) }
-                reduce {
-                    copy(
-                        layout = settings.browserLayout.toBrowserLayout(),
-                        fileDisplay = settings.fileDisplay,
-                        temporaryCopyRetentionHours = settings.temporaryCopyRetentionHours,
-                    )
+            offlineBindings
+                .flatMapLatest { owner ->
+                    offlinePager.state.map { cached -> Triple(owner?.first, owner?.second, cached) }
+                }.collectLatest { (binding, revision, cached) ->
+                    if (binding != null) {
+                        accountContext.publishAccount(binding) {
+                            val request = cached.request
+                            if (request != null &&
+                                request.account == binding.accountId &&
+                                request.accountRevision == revision &&
+                                offlinePager.isCurrent(request)
+                            ) {
+                                reduce {
+                                    copy(
+                                        offlineResources =
+                                            cached.result
+                                                ?.page
+                                                ?.entries
+                                                ?.mapNotNull { it.resource }
+                                                .orEmpty(),
+                                        offlinePage = cached.result?.page,
+                                        offlineBytes = cached.bytes,
+                                        error =
+                                            cached.error?.toOpenCloudError()?.safeMessage(
+                                                getApplication(),
+                                            ) ?: error,
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
-            }
         }
+    }
+
+    private fun observeDirectoryContent() {
         viewModelScope.launch(Dispatchers.IO) {
             combine(activeLocation, directoryOptions) { location, options -> location to options }
                 .flatMapLatest { (location, options) ->
@@ -236,123 +311,78 @@ class FileBrowserViewModel(
                         }
                     }
                 }.collectLatest { result ->
-                    if (result != null &&
-                        activeLocation.value == result.first &&
-                        directoryOptions.value == result.second
-                    ) {
-                        reduce {
-                            copy(
-                                resources = result.third.entries.mapNotNull { it.resource },
-                                directoryPage = result.third,
-                                selectedIds = if (result.third.accessible) selectedIds else emptySet(),
-                            )
+                    if (result != null) {
+                        accountContext.publishAccount(result.first.binding) {
+                            if (activeLocation.value == result.first && directoryOptions.value == result.second) {
+                                reduce {
+                                    copy(
+                                        resources = result.third.entries.mapNotNull { it.resource },
+                                        directoryPage = result.third,
+                                        selectedIds = if (result.third.accessible) selectedIds else emptySet(),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
         }
+    }
+
+    private fun observeSearchContent() {
         viewModelScope.launch(Dispatchers.IO) {
-            searchQuery
-                .combine(collectionSearchOnly) { query, cachedOnly -> query to cachedOnly }
-                .flatMapLatest { (query, cachedOnly) ->
-                    val account = accountId
-                    if (cachedOnly || account == null || query.isBlank()) {
-                        flowOf(SearchRepositoryResult(emptyList(), remoteSupported = false))
-                    } else {
-                        searchRepository.search(account, query)
-                    }
-                }.onStart { emit(SearchRepositoryResult(emptyList(), remoteSupported = false)) }
-                .collectLatest { result ->
-                    reduce {
-                        copy(
-                            searchResults = result.resources,
-                            remoteSearchSupported = result.remoteSupported,
-                            isRemoteSearchLoading = result.remoteLoading,
-                            remoteSearchError = result.remoteError,
-                        )
-                    }
+            combine(accountBindings, searchQuery, collectionSearchOnly) { binding, query, cachedOnly ->
+                BrowserSearchRequest(binding, query, cachedOnly)
+            }.flatMapLatest { request ->
+                val binding = request.binding
+                if (request.cachedOnly || binding == null || request.query.isBlank()) {
+                    flowOf(request to SearchRepositoryResult(emptyList(), remoteSupported = false))
+                } else {
+                    searchRepository.search(binding.accountId, request.query).map { request to it }
                 }
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            backupPickerLocation
-                .filterNotNull()
-                .flatMapLatest { location ->
-                    directoryPaging
-                        .invalidations(location.accountId, location.spaceId, location.folderId)
-                        .mapLatest {
-                            loadBackupPickerOverlays(location)
-                        }.combine(backupPickerOffset) { overlays, offset ->
-                            BackupPickerQuery(location, overlays, offset)
+            }.collectLatest { (request, result) ->
+                request.binding?.let { binding ->
+                    accountContext.publishAccount(binding) {
+                        if (request.query == searchQuery.value && request.cachedOnly == collectionSearchOnly.value) {
+                            reduce {
+                                copy(
+                                    searchResults = result.resources,
+                                    remoteSearchSupported = result.remoteSupported,
+                                    isRemoteSearchLoading = result.remoteLoading,
+                                    remoteSearchError = result.remoteError,
+                                )
+                            }
                         }
-                }.collectLatest { (location, overlays, offset) ->
-                    val pickerRevision = backupPickerRevision
-                    if (!isCurrentBackupPickerLocation(location, pickerRevision)) return@collectLatest
-                    if (overlays == null) {
-                        backupPickerVaultRevision++
-                        return@collectLatest
                     }
-                    val revision = ++backupPickerVaultRevision
-                    reduce {
-                        copy(
-                            backupPickerLoading = true,
-                            backupPickerCanSelect = false,
-                            backupPickerError = null,
-                        )
-                    }
-                    loadBackupPickerResourcePage(location, overlays, offset, revision, pickerRevision)
                 }
+            }
         }
     }
 
     fun load(accountId: String) {
         if (this.accountId == accountId) return
+        placement.contextChanged()
         accountJob?.cancel()
         this.accountId = accountId
-        offlinePager.account(accountId)
+        val binding = accountContext.beginAccount(accountId)
+        latestDiscovery = null
+        val offlineRevision = offlinePager.account(accountId).accountRevision
         searchQuery.value = ""
         activeLocation.value = null
         directoryOptions.value = DirectoryPageOptions(showHidden = state.value.fileDisplay.showHidden)
-        reduce {
-            copy(
-                transfers = emptyList(),
-                transferOverview = TransferBrowserOverview(),
-                bulkConflictCancelling = false,
-                selectedIds = emptySet(),
-                resources = emptyList(),
-                directoryPage = null,
-                offlineResources = emptyList(),
-                offlinePage = null,
-                offlineBytes = 0,
-                offlinePins = emptyList(),
-                recentResources = emptyList(),
-                searchResults = emptyList(),
-                searchQuery = "",
-                actionResource = null,
-            )
-        }
-        backupPickerRevision++
-        backupPickerLocation.value = null
-        reduce {
-            copy(
-                backupPickerDestination = null,
-                backupPickerSharedRoots = emptyList(),
-                backupPickerSharedNames = emptyMap(),
-                backupPickerSharedFolders = emptyList(),
-                backupPickerResources = emptyList(),
-                backupPickerTrail = emptyList(),
-            )
-        }
+        reduce { forAccountLoad(binding) }
+        backupPicker.resetForAccount()
+        encryptedFolders.invalidate()
+        offlineBindings.value = binding to offlineRevision
+        accountBindings.value = binding
         accountJob =
             viewModelScope.launch(Dispatchers.IO) {
                 launch {
                     sharedInventory.observe(accountId).collectLatest { shares ->
-                        if (this@FileBrowserViewModel.accountId == accountId) {
+                        accountContext.publishAccount(binding) {
                             reduce {
                                 copy(
                                     backupPickerSharedNames =
-                                        shares.filter { it.isFolder }.associate {
-                                            it.id to
-                                                it.name
-                                        },
+                                        shares.filter { it.isFolder }.associate { it.id to it.name },
                                 )
                             }
                         }
@@ -370,16 +400,18 @@ class FileBrowserViewModel(
                                     }
                                 }
                             }
-                        }.collectLatest { values -> reduce { copy(recentResources = values) } }
+                        }.collectLatest { values ->
+                            accountContext.publishAccount(binding) { reduce { copy(recentResources = values) } }
+                        }
                 }
                 launch {
                     store.transferInventory().invalidations(accountId).collectLatest {
-                        refreshTransferOverview(accountId)
+                        refreshTransferOverview(binding)
                     }
                 }
                 launch {
                     store.observeBackups(accountId).collectLatest { backups ->
-                        reduce { copy(backups = backups) }
+                        accountContext.publishAccount(binding) { reduce { copy(backups = backups) } }
                     }
                 }
                 launch {
@@ -389,47 +421,79 @@ class FileBrowserViewModel(
                         .combine(collectionPaging.invalidations(accountId)) { resources, _ -> resources }
                         .collectLatest { resources ->
                             val pins = collectionPaging.keptOffline(resources)
-                            if (this@FileBrowserViewModel.accountId == accountId) reduce { copy(offlinePins = pins) }
+                            accountContext.publishAccount(binding) { reduce { copy(offlinePins = pins) } }
                         }
                 }
                 launch { transfers.reconcile() }
                 launch { operations.reconcile() }
                 launch {
                     operations.observe(accountId).collectLatest { values ->
-                        reduce { copy(operations = values) }
+                        accountContext.publishAccount(binding) { reduce { copy(operations = values) } }
                     }
                 }
-                observeDiscovery(transfers.refreshAccount(accountId))
-                store.observeSpaces(accountId).collectLatest { spaces ->
-                    val selectedSpace =
-                        mutableState.value.spaceId
-                            ?.let { selectedId -> spaces.find { it.driveId == selectedId } }
-                            ?: preferredInitialBrowserSpace(spaces)
-                    reduce {
-                        copy(
-                            spaces = spaces,
-                            spaceId = spaceId ?: selectedSpace?.driveId,
-                        )
-                    }
-                    if (activeLocation.value == null && selectedSpace != null) {
-                        restoreLocation(selectedSpace.driveId)
-                    }
-                }
+                accountContext.publishAccount(binding) { observeDiscovery(transfers.refreshAccount(accountId)) }
+                observeAccountSpaces(binding)
             }
     }
 
+    private suspend fun observeAccountSpaces(binding: BrowserAccountBinding) {
+        store.observeSpaces(binding.accountId).collectLatest { spaces ->
+            var restore: BrowserLocationRequest? = null
+            accountContext.publishAccount(binding) {
+                val active = activeLocation.value
+                val selectedSpace = admittedBrowserSpace(spaces, active?.spaceId, state.value.spaceId)
+                val removed = active != null && spaces.none { it.driveId == active.spaceId }
+                if (removed) {
+                    accountContext.locationUnavailable()
+                    placement.contextChanged()
+                    activeLocation.value = null
+                    reduce {
+                        copy(
+                            currentFolderId = null,
+                            folderTrail = emptyList(),
+                            resources = emptyList(),
+                            directoryPage = null,
+                            selectedIds = emptySet(),
+                        )
+                    }
+                }
+                reduce { copy(spaces = spaces, spaceId = selectedSpace?.driveId) }
+                if (activeLocation.value == null && selectedSpace != null) {
+                    val folder =
+                        restoredFolder.takeIf {
+                            !removed && restoredAccount == binding.accountId && restoredSpace == selectedSpace.driveId
+                        }
+                    restore = accountContext.restore(binding, selectedSpace.driveId, folder)
+                }
+            }
+            restore?.let { locationLoader.resolve(it) }
+        }
+    }
+
     fun selectSpace(spaceId: String) {
+        accountContext.userNavigation()
         reduce { copy(spaceId = spaceId, currentFolderId = null, folderTrail = emptyList(), selectedIds = emptySet()) }
         setActiveLocation(spaceId, null)
         accountId?.let { observeDiscovery(transfers.refreshFolder(it, spaceId, null)) }
     }
 
-    fun recordOpened(resource: ResourceEntity) =
+    fun recordOpened(resource: ResourceEntity) {
+        if (accountContext.admitResource(resource) == null) return
         recentFiles.record(resource.accountId, resource.spaceId, resource.remoteId)
+    }
 
-    suspend fun prepareExternalFile(resource: ResourceEntity): ResourceEntity =
-        eu.opencloud.android.next.core.sync
-            .prepareLocalResource(getApplication(), resource)
+    suspend fun prepareExternalFile(resource: ResourceEntity): ResourceEntity {
+        val binding =
+            accountContext.admitResource(resource)
+                ?: throw CancellationException("Resource account is no longer shown")
+        val prepared =
+            eu.opencloud.android.next.core.sync
+                .prepareLocalResource(getApplication(), resource)
+        withContext(Dispatchers.Main.immediate) {
+            if (accountContext.binding != binding) throw CancellationException("Resource account is no longer shown")
+        }
+        return prepared
+    }
 
     fun exportFile(
         spaceId: String,
@@ -437,18 +501,22 @@ class FileBrowserViewModel(
         destination: Uri,
         removeLocal: Boolean,
     ) {
-        val account = accountId ?: return
-        if (state.value.exporting) return
+        val binding = accountContext.binding ?: return
+        val account = binding.accountId
+        if (exportInFlight) return
+        exportInFlight = true
         reduce { copy(exporting = true, exportStatus = "Preparing export…") }
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val resource = requireNotNull(store.resource(account, spaceId, resourceId))
-                val ready = prepareExternalFile(resource)
-                reduce { copy(exportStatus = "Exporting ${ready.name}…") }
+                val ready =
+                    eu.opencloud.android.next.core.sync
+                        .prepareLocalResource(getApplication(), resource)
+                reduce(binding) { copy(exportStatus = "Exporting ${ready.name}…") }
                 eu.opencloud.android.next.core.sync
                     .exportCachedFile(getApplication(), ready, destination)
                 if (removeLocal) transfers.removeLocalCopy(ready, requireSameCopy = true)
-                reduce {
+                reduce(binding) {
                     copy(
                         exportStatus =
                             if (removeLocal) {
@@ -461,7 +529,7 @@ class FileBrowserViewModel(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                reduce {
+                reduce(binding) {
                     copy(
                         exportStatus =
                             "Export did not finish. Your cloud file is unchanged. " +
@@ -469,7 +537,10 @@ class FileBrowserViewModel(
                     )
                 }
             } finally {
-                reduce { copy(exporting = false) }
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    exportInFlight = false
+                    reduce(binding) { copy(exporting = false) }
+                }
             }
         }
     }
@@ -483,7 +554,8 @@ class FileBrowserViewModel(
     }
 
     fun open(resource: ResourceEntity) {
-        if (resource.kind != ResourceKind.FOLDER) return
+        if (accountContext.admitResource(resource) == null || resource.kind != ResourceKind.FOLDER) return
+        accountContext.userNavigation()
         reduce {
             copy(
                 currentFolderId = resource.remoteId,
@@ -497,42 +569,15 @@ class FileBrowserViewModel(
     }
 
     fun browseSharedResource(resource: ResourceEntity) {
-        val account = accountId ?: return
-        if (resource.accountId != account) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val trail = mutableListOf<FolderCrumb>()
-            val visited = mutableSetOf<String>()
-            var pendingId = if (resource.kind == ResourceKind.FOLDER) resource.remoteId else resource.parentId
-            var folder = pendingId?.let { store.resource(account, resource.spaceId, it) }
-            while (folder?.kind == ResourceKind.FOLDER && visited.size < 256) {
-                if (!visited.add(folder.remoteId)) break
-                trail.add(FolderCrumb(folder.remoteId, folder.name))
-                pendingId = folder.parentId
-                folder = pendingId?.let { store.resource(account, resource.spaceId, it) }
-            }
-            if (pendingId != null) {
-                reportOpenError("The folder location is incomplete. Refresh its Space and try again.")
-                return@launch
-            }
-            val folderId = trail.firstOrNull()?.id
-            reduce {
-                copy(
-                    spaceId = resource.spaceId,
-                    currentFolderId = folderId,
-                    folderTrail = trail.asReversed(),
-                    selectedIds = emptySet(),
-                    searchQuery = "",
-                    searchResults = emptyList(),
-                )
-            }
-            setActiveLocation(resource.spaceId, folderId)
-            observeDiscovery(transfers.refreshFolder(account, resource.spaceId, folderId))
-        }
+        val binding = accountContext.admitResource(resource) ?: return
+        val request = accountContext.shortcut(binding, resource) ?: return
+        viewModelScope.launch(Dispatchers.IO) { locationLoader.resolve(request) }
     }
 
     fun navigateUp() {
         val trail = state.value.folderTrail
         if (trail.isEmpty()) return
+        accountContext.userNavigation()
         val nextTrail = trail.dropLast(1)
         reduce { copy(currentFolderId = nextTrail.lastOrNull()?.id, folderTrail = nextTrail, selectedIds = emptySet()) }
         state.value.spaceId?.let { spaceId -> setActiveLocation(spaceId, nextTrail.lastOrNull()?.id) }
@@ -547,15 +592,16 @@ class FileBrowserViewModel(
     }
 
     @Suppress("TooGenericExceptionCaught") // Keep the verified overview and future invalidations after a read failure.
-    private suspend fun refreshTransferOverview(account: String) {
+    private suspend fun refreshTransferOverview(binding: BrowserAccountBinding) {
         try {
-            val overview = store.transferInventory().overview(account)
-            currentCoroutineContext().ensureActive()
-            if (accountId == account) reduce { copy(transferOverview = overview) }
+            val overview = store.transferInventory().overview(binding.accountId)
+            accountContext.publishAccount(binding) { reduce { copy(transferOverview = overview) } }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
-            if (accountId == account) reduce { copy(error = failure.toOpenCloudError().safeMessage(getApplication())) }
+            accountContext.publishAccount(binding) {
+                reduce { copy(error = failure.toOpenCloudError().safeMessage(getApplication())) }
+            }
         }
     }
 
@@ -580,8 +626,10 @@ class FileBrowserViewModel(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
-            if (activeLocation.value == location && directoryOptions.value == options) {
-                reduce { copy(error = failure.toOpenCloudError().safeMessage(getApplication())) }
+            accountContext.publishAccount(location.binding) {
+                if (activeLocation.value == location && directoryOptions.value == options) {
+                    reduce { copy(error = failure.toOpenCloudError().safeMessage(getApplication())) }
+                }
             }
             null
         }
@@ -663,7 +711,10 @@ class FileBrowserViewModel(
             if (resource.hasLocalCopy && resource.kind == ResourceKind.FILE) transfers.removeLocalCopy(resource)
         }
 
-    fun showActions(resource: ResourceEntity?) = reduce { copy(actionResource = resource) }
+    fun showActions(resource: ResourceEntity?) {
+        if (resource != null && accountContext.admitResource(resource) == null) return
+        reduce { copy(actionResource = resource) }
+    }
 
     fun dismissActions() = reduce { copy(actionResource = null) }
 
@@ -674,28 +725,30 @@ class FileBrowserViewModel(
         name: String,
         password: CharArray,
     ) {
+        val binding = accountContext.binding
         val location = activeLocation.value
-        if (location == null || location.accountId != accountId) {
+        if (binding == null || location == null || location.binding != binding) {
             password.fill('\u0000')
             return
         }
-        encryptedCreation.folder(location.accountId, location.spaceId, location.folderId, name, password)
+        encryptedCreation.folder(binding, location.spaceId, location.folderId, name, password)
     }
 
     fun createEncryptedSpace(
         name: String,
         password: CharArray,
     ) {
-        val account = accountId
-        if (account == null) {
+        val binding = accountContext.binding
+        if (binding == null) {
             password.fill('\u0000')
             return
         }
-        encryptedCreation.space(account, name, password)
+        encryptedCreation.space(binding, name, password)
     }
 
     fun createSpace(name: String) {
-        val account = accountId ?: return
+        val binding = accountContext.binding ?: return
+        val account = binding.accountId
         if (creatingSpace) return
         creatingSpace = true
         viewModelScope.launch {
@@ -703,11 +756,11 @@ class FileBrowserViewModel(
                 runCatching { createProjectSpace(getApplication(), store, account, name) }
                     .onSuccess { result ->
                         if (accountId == account && result is SpaceCreationResult.AwaitingDiscovery) {
-                            reduce { copy(message = result.message(getApplication())) }
+                            reduce(binding) { copy(message = result.message(getApplication())) }
                         }
                     }.onFailure {
                         val message = it.toOpenCloudError().safeMessage(getApplication())
-                        if (accountId == account) reduce { copy(error = message) }
+                        if (accountId == account) reduce(binding) { copy(error = message) }
                     }
             } finally {
                 creatingSpace = false
@@ -718,7 +771,7 @@ class FileBrowserViewModel(
     fun rename(
         resource: ResourceEntity,
         name: String,
-    ) = mutate { _, _, _ ->
+    ) = mutateResource(resource) {
         if (name != resource.name) {
             try {
                 operations.enqueue(resource, resource.spaceId, resource.parentId, name, true)
@@ -728,15 +781,15 @@ class FileBrowserViewModel(
         }
     }
 
-    fun move(resource: ResourceEntity) =
-        reduce {
-            copy(clipboard = resource, clipboardItems = emptyList(), moving = true, actionResource = null)
-        }
+    fun move(resource: ResourceEntity) {
+        if (accountContext.admitResource(resource) == null) return
+        reduce { copy(clipboard = resource, clipboardItems = emptyList(), moving = true, actionResource = null) }
+    }
 
-    fun copy(resource: ResourceEntity) =
-        reduce {
-            copy(clipboard = resource, clipboardItems = emptyList(), moving = false, actionResource = null)
-        }
+    fun copy(resource: ResourceEntity) {
+        if (accountContext.admitResource(resource) == null) return
+        reduce { copy(clipboard = resource, clipboardItems = emptyList(), moving = false, actionResource = null) }
+    }
 
     fun moveSelection() = prepareSelection(true)
 
@@ -748,7 +801,7 @@ class FileBrowserViewModel(
         val captured = selectedResources()
         if (captured.isEmpty()) return
         val location = activeLocation.value
-        val owner = accountId ?: return
+        val owner = accountContext.binding ?: return
         val selection = state.value.selectedIds
         viewModelScope.launch {
             runCatching {
@@ -760,7 +813,7 @@ class FileBrowserViewModel(
                         }
                     }
                 ensureSelectionContext(location, selection, owner)
-                reduce {
+                reduce(owner) {
                     copy(
                         clipboard = sources.firstOrNull(),
                         clipboardItems = sources,
@@ -768,171 +821,15 @@ class FileBrowserViewModel(
                         selectedIds = emptySet(),
                     )
                 }
-            }.onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
+            }.onFailure { reduce(owner) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
         }
     }
 
-    fun cancelPlacement() = reduce { copy(clipboard = null, clipboardItems = emptyList(), placementConflict = null) }
+    fun cancelPlacement() = placement.cancelPlacement()
 
-    // Cancellation is rethrown; preserve explicit batch and stale-context exits.
-    @Suppress("TooGenericExceptionCaught", "CyclomaticComplexMethod", "ReturnCount")
-    fun place() {
-        val current = state.value
-        val account = accountId ?: return
-        val space = current.spaceId ?: return
-        val parent = current.currentFolderId
-        val sources = current.clipboardItems.ifEmpty { listOfNotNull(current.clipboard) }
-        if (sources.isEmpty() || placementInFlight) return
-        if (sources.any { it.accountId != account }) {
-            cancelPlacement()
-            return
-        }
-        placementInFlight = true
-        placementTarget = FileOperationPlacementTarget(account, space, parent)
-        reduce { copy(placementBusy = true) }
-        viewModelScope.launch {
-            try {
-                for (source in sources) {
-                    if (!isPlacementContextCurrent(account, space, parent)) return@launch
-                    val failure =
-                        try {
-                            withContext(Dispatchers.IO) {
-                                operations.enqueue(source, space, parent, source.name, current.moving)
-                            }
-                            null
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (error: Exception) {
-                            error
-                        }
-                    if (!isPlacementContextCurrent(account, space, parent)) return@launch
-                    if (failure is FileOperationNameConflictException) {
-                        reduce {
-                            copy(
-                                placementConflict =
-                                    FileOperationPlacementConflict(
-                                        source,
-                                        space,
-                                        parent,
-                                        current.moving,
-                                        failure.suggestedName,
-                                    ),
-                            )
-                        }
-                        return@launch
-                    }
-                    if (failure != null) {
-                        reduce { copy(error = failure.toOpenCloudError().safeMessage(getApplication())) }
-                        return@launch
-                    }
-                    removePlacementSource(source)
-                }
-                if (isPlacementContextCurrent(account, space, parent)) {
-                    reduce { copy(selectedIds = emptySet(), actionResource = null) }
-                }
-            } finally {
-                placementInFlight = false
-                if (isPlacementContextCurrent(account, space, parent)) {
-                    if (placementTarget == FileOperationPlacementTarget(account, space, parent)) {
-                        placementTarget = null
-                    }
-                    reduce { copy(placementBusy = false) }
-                }
-            }
-        }
-    }
+    fun place() = placement.place()
 
-    // Cancellation is rethrown; preserve explicit retry and stale-context exits.
-    @Suppress("TooGenericExceptionCaught", "ReturnCount")
-    fun keepBothPlacementConflict() {
-        val conflict = state.value.placementConflict ?: return
-        val account = accountId
-        val current = state.value
-        if (placementInFlight) return
-        if (account != conflict.source.accountId ||
-            current.spaceId != conflict.destinationSpaceId ||
-            current.currentFolderId != conflict.parentId
-        ) {
-            cancelPlacement()
-            return
-        }
-        val target =
-            FileOperationPlacementTarget(conflict.source.accountId, conflict.destinationSpaceId, conflict.parentId)
-        placementInFlight = true
-        placementTarget = target
-        reduce { copy(placementBusy = true) }
-        viewModelScope.launch {
-            try {
-                val failure =
-                    try {
-                        withContext(Dispatchers.IO) {
-                            operations.enqueue(
-                                conflict.source,
-                                conflict.destinationSpaceId,
-                                conflict.parentId,
-                                conflict.suggestedName,
-                                conflict.moving,
-                                namingBase = conflict.source.name,
-                            )
-                        }
-                        null
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (error: Exception) {
-                        error
-                    }
-                if (!isPlacementContextCurrent(target.accountId, target.spaceId, target.parentId)) return@launch
-                when (failure) {
-                    is FileOperationNameConflictException ->
-                        reduce { copy(placementConflict = conflict.copy(suggestedName = failure.suggestedName)) }
-                    null -> {
-                        reduce { copy(placementConflict = null) }
-                        removePlacementSource(conflict.source)
-                    }
-                    else -> {
-                        reduce {
-                            copy(
-                                placementConflict = null,
-                                error = failure.toOpenCloudError().safeMessage(getApplication()),
-                            )
-                        }
-                    }
-                }
-            } finally {
-                placementInFlight = false
-                if (isPlacementContextCurrent(target.accountId, target.spaceId, target.parentId)) {
-                    if (placementTarget == target) placementTarget = null
-                    reduce { copy(placementBusy = false) }
-                }
-            }
-        }
-    }
-
-    private fun isPlacementContextCurrent(
-        account: String,
-        space: String,
-        parent: String?,
-    ): Boolean = accountId == account && state.value.spaceId == space && state.value.currentFolderId == parent
-
-    private fun clearPlacementBusyWhenContextChanges(
-        account: String,
-        space: String,
-        parent: String?,
-    ) {
-        val target = placementTarget ?: return
-        if (target != FileOperationPlacementTarget(account, space, parent)) {
-            reduce { copy(placementBusy = false, placementConflict = null) }
-        }
-    }
-
-    private fun removePlacementSource(source: ResourceEntity) =
-        reduce {
-            val remaining =
-                (clipboardItems.ifEmpty { listOfNotNull(clipboard) }).filterNot {
-                    it.remoteId == source.remoteId && it.spaceId == source.spaceId
-                }
-            copy(clipboard = remaining.firstOrNull(), clipboardItems = remaining, placementConflict = null)
-        }
+    fun keepBothPlacementConflict() = placement.keepBothPlacementConflict()
 
     fun retryOperation(id: String) =
         mutate { account, _, _ ->
@@ -941,10 +838,11 @@ class FileBrowserViewModel(
 
     fun dismissOperation(id: String) = mutate { account, _, _ -> operations.dismiss(id, account) }
 
-    fun delete(resource: ResourceEntity) = mutate { _, _, _ -> transfers.delete(resource) }
+    fun delete(resource: ResourceEntity) = mutateResource(resource) { transfers.delete(resource) }
 
     fun upload(uri: Uri) {
-        val account = accountId ?: return
+        val binding = accountContext.binding ?: return
+        val account = binding.accountId
         val space = state.value.spaceId ?: return
         val parentPath =
             state.value.folderTrail
@@ -952,31 +850,33 @@ class FileBrowserViewModel(
                 .takeIf { state.value.folderTrail.isNotEmpty() }
         viewModelScope.launch {
             runCatching { withContext(Dispatchers.IO) { transfers.enqueueUpload(account, space, parentPath, uri) } }
-                .onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
+                .onFailure { reduce(binding) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
         }
     }
 
-    fun removeLocalCopy(resource: ResourceEntity) = mutate { _, _, _ -> transfers.removeLocalCopy(resource) }
+    fun removeLocalCopy(resource: ResourceEntity) = mutateResource(resource) { transfers.removeLocalCopy(resource) }
 
     fun downloadForOffline(resource: ResourceEntity) {
+        val binding = accountContext.admitResource(resource) ?: return
         viewModelScope.launch {
             runCatching { withContext(Dispatchers.IO) { transfers.makeAvailableOffline(resource) } }
-                .onSuccess { reduce { copy(actionResource = null) } }
-                .onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
+                .onSuccess { reduce(binding) { copy(actionResource = null) } }
+                .onFailure { reduce(binding) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
         }
     }
 
     fun toggleFavorite(resource: ResourceEntity) {
+        val binding = accountContext.admitResource(resource) ?: return
         viewModelScope.launch {
             runCatching { withContext(Dispatchers.IO) { transfers.setFavorite(resource, !resource.isFavorite) } }
                 .onSuccess {
-                    reduce {
+                    reduce(binding) {
                         copy(
                             actionResource = null,
                             message = null,
                         )
                     }
-                }.onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
+                }.onFailure { reduce(binding) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
         }
     }
 
@@ -994,7 +894,8 @@ class FileBrowserViewModel(
         sourceTreeUri: Uri,
         draft: BackupDraft,
     ) {
-        val account = accountId ?: return
+        val binding = accountContext.binding ?: return
+        val account = binding.accountId
         val space = draft.spaceId ?: return
         viewModelScope.launch {
             val backup =
@@ -1021,13 +922,13 @@ class FileBrowserViewModel(
                 )
             runCatching { withContext(Dispatchers.IO) { transfers.saveBackup(backup) } }
                 .onSuccess {
-                    reduce {
+                    reduce(binding) {
                         copy(
                             message =
                                 getApplication<Application>().localizedString(R.string.browser_backup_configured),
                         )
                     }
-                }.onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
+                }.onFailure { reduce(binding) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
         }
     }
 
@@ -1072,6 +973,8 @@ class FileBrowserViewModel(
         draft: BackupDraft,
         selectedSource: Uri? = null,
     ) {
+        val binding = accountContext.binding ?: return
+        if (backup.accountId != binding.accountId) return
         viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
@@ -1097,443 +1000,35 @@ class FileBrowserViewModel(
                         ),
                     )
                 }
-            }.onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
+            }.onFailure { reduce(binding) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
         }
     }
 
-    @Suppress("TooGenericExceptionCaught") // UI boundary converts discovery errors and rethrows cancellation.
-    private suspend fun loadBackupPickerOverlays(location: BrowserLocation): List<DirectoryOverlay>? =
-        try {
-            val path =
-                state.value.backupPickerTrail
-                    .lastOrNull()
-                    ?.path
-                    ?.trim('/') ?: ""
-            backupPickerVaults.encryptedFolders(location.accountId, location.spaceId, path).map { root ->
-                DirectoryOverlay(root.directoryOverlayId, root.title, root.remoteVaultId, root.vaultPath)
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            if (accountId == location.accountId && backupPickerLocation.value == location) {
-                reduce {
-                    copy(
-                        backupPickerResources = emptyList(),
-                        backupPickerLoading = false,
-                        backupPickerCanSelect = false,
-                        backupPickerError = failure.toOpenCloudError().safeMessage(getApplication()),
-                    )
-                }
-            }
-            null
-        }
+    fun openBackupPicker() = backupPicker.openBackupPicker()
 
-    private fun isCurrentBackupPickerLocation(
-        location: BrowserLocation,
-        pickerRevision: Int,
-    ): Boolean =
-        pickerRevision == backupPickerRevision &&
-            accountId == location.accountId &&
-            backupPickerLocation.value == location &&
-            state.value.backupPickerDestination?.let {
-                it.destinationKind == "SPACE" && it.spaceId == location.spaceId
-            } == true &&
-            state.value.backupPickerTrail
-                .lastOrNull()
-                ?.id == location.folderId
+    fun openBackupPickerSpace(space: SpaceEntity) = backupPicker.openBackupPickerSpace(space)
 
-    @Suppress("TooGenericExceptionCaught") // Convert bounded page failures at this UI boundary; propagate cancellation.
-    private suspend fun loadBackupPickerResourcePage(
-        location: BrowserLocation,
-        overlays: List<DirectoryOverlay>,
-        offset: Int,
-        pageRevision: Int,
-        pickerRevision: Int,
-    ) {
-        try {
-            val page =
-                directoryPaging.load(
-                    location.accountId,
-                    location.spaceId,
-                    location.folderId,
-                    offset,
-                    DirectorySort.Name,
-                    true,
-                    true,
-                    overlays,
-                    onlyFolders = true,
-                    includeOverlays = false,
-                )
-            if (pageRevision == backupPickerVaultRevision && isCurrentBackupPickerLocation(location, pickerRevision)) {
-                reduce {
-                    copy(
-                        backupPickerResources = page.entries.mapNotNull { it.resource },
-                        backupPickerPage = BackupPickerPageState(page.offset, page.total, RESOURCE_DIRECTORY_PAGE_SIZE),
-                        backupPickerLoading = false,
-                        backupPickerCanSelect = page.accessible,
-                        backupPickerError = null,
-                    )
-                }
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            if (pageRevision == backupPickerVaultRevision && isCurrentBackupPickerLocation(location, pickerRevision)) {
-                reduce {
-                    copy(
-                        backupPickerResources = emptyList(),
-                        backupPickerLoading = false,
-                        backupPickerCanSelect = false,
-                        backupPickerError = failure.toOpenCloudError().safeMessage(getApplication()),
-                    )
-                }
-            }
-        }
-    }
+    fun openBackupPickerShare(root: BackupSharedRoot) = backupPicker.openBackupPickerShare(root)
 
-    fun openBackupPicker() {
-        val account = accountId ?: return
-        backupPickerRevision++
-        backupPickerSharedSnapshot = null
-        backupPickerOffset.value = 0
-        backupPickerLocation.value = null
-        reduce {
-            copy(
-                backupPickerDestination = null,
-                backupPickerTrail = emptyList(),
-                backupPickerResources = emptyList(),
-                backupPickerSharedFolders = emptyList(),
-                backupPickerPage = null,
-                backupPickerSharedRoots = emptyList(),
-                backupPickerLoading = true,
-                backupPickerCanSelect = false,
-                backupPickerError = null,
-            )
-        }
-        val revision = backupPickerRevision
-        viewModelScope.launch {
-            runCatching { withContext(Dispatchers.IO) { sharedRoots.discover(account) } }
-                .onSuccess { catalog ->
-                    if (accountId == account &&
-                        revision == backupPickerRevision
-                    ) {
-                        reduce {
-                            copy(
-                                backupPickerSharedRoots =
-                                    catalog.roots.map {
-                                        BackupSharedRoot(it.name, it.shareId, it.scopeId, it.rootItemId)
-                                    },
-                                backupPickerLoading = false,
-                            )
-                        }
-                    }
-                }.onFailure {
-                    if (accountId == account &&
-                        revision == backupPickerRevision
-                    ) {
-                        reduce {
-                            copy(
-                                backupPickerLoading = false,
-                                backupPickerError = it.toOpenCloudError().safeMessage(getApplication()),
-                            )
-                        }
-                    }
-                }
-        }
-    }
+    fun pageBackupPicker(previous: Boolean) = backupPicker.pageBackupPicker(previous)
 
-    fun openBackupPickerSpace(space: SpaceEntity) {
-        val account = accountId ?: return
-        if (space.accountId != account ||
-            space.isDisabled ||
-            space.isDeleted ||
-            space.type.contains("encrypted", true)
-        ) {
-            return
-        }
-        backupPickerRevision++
-        backupPickerSharedSnapshot = null
-        backupPickerOffset.value = 0
-        val category =
-            if (space.type.equals(
-                    "personal",
-                    true,
-                )
-            ) {
-                R.string.backup_destination_personal
-            } else {
-                R.string.backup_destination_spaces
-            }
-        val label = "${getApplication<Application>().localizedString(category)} · ${space.name}"
-        reduce {
-            copy(
-                backupPickerDestination = BackupDestination(space.driveId, "/", "SPACE", null, null, label),
-                backupPickerTrail = emptyList(),
-                backupPickerResources = emptyList(),
-                backupPickerSharedFolders = emptyList(),
-                backupPickerPage = null,
-                backupPickerLoading = true,
-                backupPickerCanSelect = false,
-                backupPickerError = null,
-            )
-        }
-        backupPickerLocation.value = null
-        backupPickerLocation.value = BrowserLocation(account, space.driveId, null)
-        observeDiscovery(transfers.refreshFolder(account, space.driveId, null))
-    }
-
-    fun openBackupPickerShare(root: BackupSharedRoot) {
-        val account = accountId ?: return
-        backupPickerOffset.value = 0
-        backupPickerLocation.value = null
-        val label = "${getApplication<Application>().localizedString(
-            R.string.backup_destination_shared_with_me,
-        )} · ${root.name}"
-        val destination = BackupDestination(root.scopeId, "/", "SHARED_FOLDER", root.shareId, root.rootItemId, label)
-        loadSharedBackupFolder(account, destination, emptyList())
-    }
-
-    private fun loadSharedBackupFolder(
-        account: String,
-        destination: BackupDestination,
-        trail: List<BackupFolderCrumb>,
-    ) {
-        val revision = ++backupPickerRevision
-        backupPickerSharedSnapshot = null
-        reduce {
-            copy(
-                backupPickerDestination = destination,
-                backupPickerTrail = trail,
-                backupPickerResources = emptyList(),
-                backupPickerSharedFolders = emptyList(),
-                backupPickerPage = null,
-                backupPickerLoading = true,
-                backupPickerError = null,
-                backupPickerCanSelect = false,
-            )
-        }
-        viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    val request =
-                        SharedFolderRequest(
-                            account,
-                            requireNotNull(destination.sharedShareId),
-                            destination.spaceId,
-                            requireNotNull(destination.sharedFolderId),
-                            destination.path,
-                        )
-                    val page = sharedBrowser.openFolderMetadata(request)
-                    val selectable =
-                        try {
-                            sharedDestinationResolver.prepare(request, page)
-                            true
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (_: Exception) {
-                            false
-                        }
-                    val snapshot = sharedBrowser.captureDisplaySnapshot(page)
-                    val entries = sharedBrowser.displayPage(page, 0, snapshot.revision)
-                    Pair(
-                        SharedBackupPickerSnapshot(request, page, snapshot, selectable),
-                        entries.filter { it.isFolder }.map { BackupSharedFolder(it.remoteId, it.name, it.path) },
-                    )
-                }
-            }.onSuccess { (snapshot, folders) ->
-                if (accountId == account &&
-                    revision == backupPickerRevision
-                ) {
-                    backupPickerSharedSnapshot = snapshot
-                    reduce {
-                        copy(
-                            backupPickerSharedFolders = folders,
-                            backupPickerPage = BackupPickerPageState(0, snapshot.cursor.total, 256),
-                            backupPickerCanSelect = snapshot.canSelect,
-                            backupPickerLoading = false,
-                        )
-                    }
-                }
-            }.onFailure {
-                if (accountId == account &&
-                    revision == backupPickerRevision
-                ) {
-                    reduce {
-                        copy(
-                            backupPickerLoading = false,
-                            backupPickerError = it.toOpenCloudError().safeMessage(getApplication()),
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    fun pageBackupPicker(previous: Boolean) {
-        val page = state.value.backupPickerPage ?: return
-        if (previous && !page.hasPrevious) return
-        if (!previous && !page.hasNext) return
-        val offset = (page.offset + if (previous) -page.pageSize else page.pageSize).coerceAtLeast(0)
-        val destination = state.value.backupPickerDestination ?: return
-        if (destination.destinationKind == "SPACE") {
-            backupPickerOffset.value = offset
-            return
-        }
-        val snapshot = backupPickerSharedSnapshot ?: return
-        val account = accountId ?: return
-        requestSharedBackupPickerPage(account, destination, snapshot, page, offset)
-    }
-
-    @Suppress("TooGenericExceptionCaught") // Convert revision-pinned paging errors at this UI boundary.
-    private fun requestSharedBackupPickerPage(
-        account: String,
-        destination: BackupDestination,
-        snapshot: SharedBackupPickerSnapshot,
-        page: BackupPickerPageState,
-        offset: Int,
-    ) {
-        val shareId = destination.sharedShareId ?: return
-        val folderId = destination.sharedFolderId ?: return
-        val expectedRequest = SharedFolderRequest(account, shareId, destination.spaceId, folderId, destination.path)
-        if (snapshot.request != expectedRequest) return
-        val revision = ++backupPickerRevision
-        reduce { copy(backupPickerLoading = true, backupPickerError = null) }
-        viewModelScope.launch {
-            try {
-                val folders =
-                    withContext(Dispatchers.IO) {
-                        sharedBrowser
-                            .displayPage(snapshot.page, offset, snapshot.cursor.revision)
-                            .filter { it.isFolder }
-                            .map { BackupSharedFolder(it.remoteId, it.name, it.path) }
-                    }
-                if (isCurrentSharedBackupPicker(account, revision, destination, snapshot)) {
-                    reduce {
-                        copy(
-                            backupPickerSharedFolders = folders,
-                            backupPickerPage = page.copy(offset = offset),
-                            backupPickerLoading = false,
-                            backupPickerCanSelect = snapshot.canSelect,
-                        )
-                    }
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                if (accountId == account && revision == backupPickerRevision) {
-                    backupPickerSharedSnapshot = null
-                    reduce {
-                        copy(
-                            backupPickerLoading = false,
-                            backupPickerCanSelect = false,
-                            backupPickerError = failure.toOpenCloudError().safeMessage(getApplication()),
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    private fun isCurrentSharedBackupPicker(
-        account: String,
-        revision: Int,
-        destination: BackupDestination,
-        snapshot: SharedBackupPickerSnapshot,
-    ): Boolean =
-        accountId == account &&
-            revision == backupPickerRevision &&
-            state.value.backupPickerDestination == destination &&
-            backupPickerSharedSnapshot === snapshot
-
-    fun openBackupPickerSharedFolder(folder: BackupSharedFolder) {
-        val account = accountId ?: return
-        val current = state.value.backupPickerDestination ?: return
-        if (current.destinationKind != "SHARED_FOLDER") return
-        loadSharedBackupFolder(
-            account,
-            current.copy(path = folder.path, sharedFolderId = folder.id),
-            state.value.backupPickerTrail + BackupFolderCrumb(folder.id, folder.name, folder.path),
-        )
-    }
+    fun openBackupPickerSharedFolder(folder: BackupSharedFolder) = backupPicker.openBackupPickerSharedFolder(folder)
 
     fun openBackupPickerFolder(folder: ResourceEntity) {
-        if (folder.kind != ResourceKind.FOLDER) return
-        val account = accountId ?: return
-        val current = state.value.backupPickerDestination ?: return
-        if (current.destinationKind != "SPACE" || folder.spaceId != current.spaceId) return
-        backupPickerOffset.value = 0
-        reduce { copy(backupPickerPage = null) }
-        reduce {
-            copy(
-                backupPickerDestination = current.copy(path = folder.path),
-                backupPickerTrail = backupPickerTrail + BackupFolderCrumb(folder.remoteId, folder.name, folder.path),
-                backupPickerResources = emptyList(),
-                backupPickerLoading = true,
-                backupPickerCanSelect = false,
-                backupPickerError = null,
-            )
-        }
-        backupPickerLocation.value = null
-        backupPickerLocation.value = BrowserLocation(account, folder.spaceId, folder.remoteId)
-        observeDiscovery(transfers.refreshFolder(account, folder.spaceId, folder.remoteId))
+        if (accountContext.admitResource(folder) == null) return
+        backupPicker.openBackupPickerFolder(folder)
     }
 
-    fun navigateBackupPickerUp() {
-        val account = accountId ?: return
-        val current = state.value.backupPickerDestination ?: return
-        val nextTrail = state.value.backupPickerTrail.dropLast(1)
-        if (current.destinationKind == "SHARED_FOLDER") {
-            val root = state.value.backupPickerSharedRoots.firstOrNull { it.shareId == current.sharedShareId } ?: return
-            val last = nextTrail.lastOrNull()
-            loadSharedBackupFolder(
-                account,
-                current.copy(
-                    path = last?.path ?: "/",
-                    sharedFolderId =
-                        last?.id ?: root.rootItemId,
-                ),
-                nextTrail,
-            )
-        } else {
-            backupPickerOffset.value = 0
-            reduce { copy(backupPickerPage = null) }
-            reduce {
-                copy(
-                    backupPickerDestination = current.copy(path = nextTrail.lastOrNull()?.path ?: "/"),
-                    backupPickerTrail = nextTrail,
-                    backupPickerResources = emptyList(),
-                    backupPickerLoading = true,
-                    backupPickerCanSelect = false,
-                    backupPickerError = null,
-                )
-            }
-            backupPickerLocation.value = null
-            backupPickerLocation.value = BrowserLocation(account, current.spaceId, nextTrail.lastOrNull()?.id)
-            observeDiscovery(transfers.refreshFolder(account, current.spaceId, nextTrail.lastOrNull()?.id))
-        }
-    }
+    fun navigateBackupPickerUp() = backupPicker.navigateBackupPickerUp()
 
-    fun createBackupPickerFolder(name: String) {
-        val account = accountId ?: return
-        val space =
-            state.value.backupPickerDestination
-                ?.takeIf { it.destinationKind == "SPACE" }
-                ?.spaceId ?: return
-        val parentId =
-            state.value.backupPickerTrail
-                .lastOrNull()
-                ?.id
-        viewModelScope.launch {
-            runCatching { withContext(Dispatchers.IO) { transfers.createFolder(account, space, parentId, name) } }
-                .onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
-        }
-    }
+    fun createBackupPickerFolder(name: String) = backupPicker.createBackupPickerFolder(name)
 
     fun resolveConflict(
         transfer: TransferEntity,
         decision: ConflictDecision,
     ) {
         if (transfer.accountId != accountId || state.value.bulkConflictCancelling) return
+        val binding = accountContext.binding ?: return
         viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
@@ -1548,12 +1043,13 @@ class FileBrowserViewModel(
                         ConflictDecision.CANCEL -> transfers.cancelConflict(transfer)
                     }
                 }
-            }.onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
+            }.onFailure { reduce(binding) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
         }
     }
 
     fun cancelUploadConflicts() {
-        val account = accountId ?: return
+        val binding = accountContext.binding ?: return
+        val account = binding.accountId
         if (account.isBlank()) return
         val hasConflicts =
             state.value.transfers.any {
@@ -1567,7 +1063,7 @@ class FileBrowserViewModel(
             runCatching { withContext(Dispatchers.IO) { transfers.cancelUploadConflicts(account) } }
                 .onFailure { failure ->
                     if (accountId == account) {
-                        reduce {
+                        reduce(binding) {
                             copy(
                                 bulkConflictCancelling = false,
                                 error = failure.toOpenCloudError().safeMessage(getApplication()),
@@ -1575,7 +1071,7 @@ class FileBrowserViewModel(
                         }
                     }
                 }.onSuccess {
-                    if (accountId == account) reduce { copy(bulkConflictCancelling = false) }
+                    if (accountId == account) reduce(binding) { copy(bulkConflictCancelling = false) }
                 }
         }
     }
@@ -1591,14 +1087,21 @@ class FileBrowserViewModel(
     fun clearMessage() = reduce { copy(message = null, error = null) }
 
     private fun observeDiscovery(workId: UUID) {
+        val binding = accountContext.binding ?: return
         latestDiscovery = workId
         reduce { copy(discoveryError = null) }
         viewModelScope.launch {
             workManager.getWorkInfoByIdFlow(workId).collectLatest { workInfo ->
-                if (latestDiscovery == workId) reduce { copy(refreshing = workInfo?.state == WorkInfo.State.RUNNING) }
-                if (latestDiscovery == workId && workInfo?.state == WorkInfo.State.FAILED) {
-                    val message = workInfo.outputData.getString(DISCOVERY_ERROR)
-                    reduce { copy(discoveryError = message ?: "Remote discovery failed.") }
+                accountContext.publishAccount(binding) {
+                    if (latestDiscovery ==
+                        workId
+                    ) {
+                        reduce { copy(refreshing = workInfo?.state == WorkInfo.State.RUNNING) }
+                    }
+                    if (latestDiscovery == workId && workInfo?.state == WorkInfo.State.FAILED) {
+                        val message = workInfo.outputData.getString(DISCOVERY_ERROR)
+                        reduce { copy(discoveryError = message ?: "Remote discovery failed.") }
+                    }
                 }
             }
         }
@@ -1609,9 +1112,9 @@ class FileBrowserViewModel(
         folderId: String?,
     ) {
         accountId?.let { accountId ->
-            clearPlacementBusyWhenContextChanges(accountId, spaceId, folderId)
-            val next = BrowserLocation(accountId, spaceId, folderId)
+            val next = BrowserLocation(requireNotNull(accountContext.binding), spaceId, folderId)
             if (activeLocation.value != next) {
+                placement.contextChanged()
                 directoryOptions.update { it.copy(offset = 0, overlays = emptyList()) }
                 reduce { copy(resources = emptyList(), directoryPage = null, selectedIds = emptySet()) }
             }
@@ -1625,32 +1128,24 @@ class FileBrowserViewModel(
         }
     }
 
-    private suspend fun restoreLocation(spaceId: String) {
-        val account = requireNotNull(accountId)
-        val folderId = restoredFolder.takeIf { restoredAccount == account && restoredSpace == spaceId }
-        val trail = mutableListOf<FolderCrumb>()
-        val visited = mutableSetOf<String>()
-        var current = folderId?.let { store.resource(account, spaceId, it) }
-        while (current?.kind == ResourceKind.FOLDER && visited.size < 256) {
-            if (!visited.add(current.remoteId)) break
-            trail.add(FolderCrumb(current.remoteId, current.name))
-            current = current.parentId?.let { store.resource(account, spaceId, it) }
-        }
-        val restored = trail.asReversed().takeIf { current == null }.orEmpty()
-        if (activeLocation.value != null) return // A shortcut or user navigation superseded saved-location loading.
-        reduce { copy(currentFolderId = restored.lastOrNull()?.id, folderTrail = restored) }
-        setActiveLocation(spaceId, restored.lastOrNull()?.id)
+    private fun mutateResource(
+        resource: ResourceEntity,
+        action: suspend () -> Unit,
+    ) {
+        if (accountContext.admitResource(resource) == null) return
+        mutate { _, _, _ -> action() }
     }
 
     private fun mutate(action: suspend (String, String, String?) -> Unit) {
-        val account = accountId ?: return
+        val binding = accountContext.binding ?: return
+        val account = binding.accountId
         val space = state.value.spaceId ?: return
         val parent = state.value.currentFolderId
         viewModelScope.launch {
             runCatching { withContext(Dispatchers.IO) { action(account, space, parent) } }
-                .onSuccess { reduce { copy(selectedIds = emptySet(), actionResource = null) } }
+                .onSuccess { reduce(binding) { copy(selectedIds = emptySet(), actionResource = null) } }
                 .onFailure {
-                    reduce {
+                    reduce(binding) {
                         copy(
                             error = it.toOpenCloudError().safeMessage(getApplication()),
                         )
@@ -1674,7 +1169,7 @@ class FileBrowserViewModel(
         val selected = selectedResources()
         if (selected.isEmpty()) return
         val location = activeLocation.value
-        val owner = accountId ?: return
+        val owner = accountContext.binding ?: return
         val selection = state.value.selectedIds
         viewModelScope.launch {
             runCatching {
@@ -1691,23 +1186,28 @@ class FileBrowserViewModel(
                     }
                 }
                 ensureSelectionContext(location, selection, owner)
-            }.onSuccess { reduce { copy(selectedIds = emptySet()) } }
-                .onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
+            }.onSuccess { reduce(owner) { copy(selectedIds = emptySet()) } }
+                .onFailure { reduce(owner) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
         }
     }
 
     private fun ensureSelectionContext(
         location: BrowserLocation?,
         selection: Set<String>,
-        owner: String,
+        owner: BrowserAccountBinding,
     ) {
         if (activeLocation.value != location ||
             state.value.selectedIds != selection ||
-            owner != accountId
+            owner != accountContext.binding
         ) {
             throw CancellationException("Selection is no longer current")
         }
     }
+
+    private suspend fun reduce(
+        binding: BrowserAccountBinding,
+        transform: FileBrowserUiState.() -> FileBrowserUiState,
+    ) = accountContext.publishAccount(binding) { reduce(transform) }
 
     private fun reduce(transform: FileBrowserUiState.() -> FileBrowserUiState) {
         mutableState.update { previous ->
@@ -1800,6 +1300,7 @@ data class FileBrowserUiState(
     val error: String? = null,
     val refreshing: Boolean = false,
     val discoveryError: String? = null,
+    val accountRevision: Long = 0,
 )
 
 data class FileOperationPlacementConflict(
@@ -1808,12 +1309,6 @@ data class FileOperationPlacementConflict(
     val parentId: String?,
     val moving: Boolean,
     val suggestedName: String,
-)
-
-private data class FileOperationPlacementTarget(
-    val accountId: String,
-    val spaceId: String,
-    val parentId: String?,
 )
 
 data class FolderCrumb(
@@ -1828,9 +1323,17 @@ data class BackupFolderCrumb(
 )
 
 private data class BrowserLocation(
-    val accountId: String,
+    val binding: BrowserAccountBinding,
     val spaceId: String,
     val folderId: String?,
+) {
+    val accountId: String get() = binding.accountId
+}
+
+private data class BrowserSearchRequest(
+    val binding: BrowserAccountBinding?,
+    val query: String,
+    val cachedOnly: Boolean,
 )
 
 enum class BrowserLayout {
@@ -1863,12 +1366,6 @@ private data class DirectoryPageOptions(
     val overlays: List<DirectoryOverlay> = emptyList(),
 )
 
-private data class BackupPickerQuery(
-    val location: BrowserLocation,
-    val overlays: List<DirectoryOverlay>?,
-    val offset: Int,
-)
-
 data class BackupPickerPageState(
     val offset: Int,
     val total: Int,
@@ -1877,13 +1374,6 @@ data class BackupPickerPageState(
     val hasPrevious: Boolean get() = offset > 0
     val hasNext: Boolean get() = offset.toLong() + pageSize < total
 }
-
-private data class SharedBackupPickerSnapshot(
-    val request: SharedFolderRequest,
-    val page: SharedFolderPage,
-    val cursor: SharedFolderPageCursorSnapshot,
-    val canSelect: Boolean,
-)
 
 internal val VaultLocation.directoryOverlayId: String get() = "$driveId\u0000$remoteVaultId\u0000$vaultPath"
 

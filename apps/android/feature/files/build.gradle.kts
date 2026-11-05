@@ -21,7 +21,14 @@ android {
                 .toInt()
     }
 
-    testOptions { unitTests.isIncludeAndroidResources = true }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+        // The UI test APK uses the app target, rather than the library's minimum SDK default.
+        targetSdk =
+            libs.versions.targetSdk
+                .get()
+                .toInt()
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -65,4 +72,5 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
 }

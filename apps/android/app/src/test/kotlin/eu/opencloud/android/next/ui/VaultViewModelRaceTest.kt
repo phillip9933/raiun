@@ -647,7 +647,7 @@ class VaultViewModelRaceTest {
             ),
     )
 
-    private object UnsupportedDeviceRememberAccess : VaultDeviceRememberAccess {
+    internal object UnsupportedDeviceRememberAccess : VaultDeviceRememberAccess {
         override fun isSupported() = false
 
         override fun begin(
@@ -678,7 +678,7 @@ class VaultViewModelRaceTest {
         override fun forget(identity: VaultIdentity) = Unit
     }
 
-    private class TestVaultOfferPreferences : VaultOfferPreferences {
+    internal class TestVaultOfferPreferences : VaultOfferPreferences {
         private val values = mutableMapOf<VaultIdentity, VaultPreferenceStatus>()
 
         override fun status(identity: VaultIdentity) = values[identity]
@@ -775,7 +775,7 @@ class VaultViewModelRaceTest {
         }
     }
 
-    private class TestBiometricStore : VaultBiometricKeyStore {
+    internal class TestBiometricStore : VaultBiometricKeyStore {
         val forgottenIdentities = mutableListOf<VaultIdentity>()
 
         override fun hasEnrollment(identity: VaultIdentity) = false

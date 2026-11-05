@@ -2,6 +2,13 @@
 
 Android and desktop have independent versions and release pages.
 
+## Android 1.5.0 — 2026-11-05
+
+Fix delayed results after account or folder changes, backup destination browsing
+and encrypted-session interruptions. Remove unnecessary remembered-key diagnostic lookups
+and simplify file-browser and encrypted-location maintenance. See the
+[Android 1.5.0 release notes](apps/android/docs/RELEASE-NOTES-1.5.0.md).
+
 ## Android 1.4.0 — 2026-11-04
 
 Apply connection settings more consistently, add a review step before uploading

@@ -6,7 +6,7 @@ Start with [README](../README.md) for installation and current limitations, and 
 | --- | --- |
 | [Current architecture](CURRENT-ARCHITECTURE.md) | Module ownership, data flow, runtime invariants and version boundaries |
 | [Android hardening](ANDROID-HARDENING.md) | Destination ownership, compatible typed transfer states, caller URI checks and acceptance limits |
-| [Release shrinking evaluation](RELEASE-SHRINKING.md) | Opt-in minimized test variant, runtime pins, native/reflection blockers and measurement limits |
+| [Release shrinking](RELEASE-SHRINKING.md) | Production shrinking, runtime diagnostics and acceptance boundaries |
 | [Product backlog](../../../docs/PRODUCT-BACKLOG.md) | Queued Android and shared product improvements |
 | [OpenCloud 9 compatibility](OPENCLOUD-9.md) | Published-server review and guest invitation creation/management boundaries |
 | [Testing](TESTING.md) | Quality commands, device requirements and validation limits |
@@ -19,6 +19,7 @@ Start with [README](../README.md) for installation and current limitations, and 
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Shared design mapping](SHARED-DESIGN.md) | Native Material theme, account accents and scoped accessibility checks |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
+| [Android 1.5.0 release notes](RELEASE-NOTES-1.5.0.md) | Account and folder result isolation, backup browsing, encrypted-session fixes and remembered-key improvements |
 | [Android 1.4.0 release notes](RELEASE-NOTES-1.4.0.md) | Connection settings, incoming-share review, encrypted-location passwords and transfer improvements |
 | [Android 1.3.3 release notes](RELEASE-NOTES-1.3.3.md) | Server document apps, credential protection and transfer/share hardening |
 | [Android 1.3.2 release notes](RELEASE-NOTES-1.3.2.md) | Published maintenance, recovery and credential-handling fixes |
