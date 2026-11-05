@@ -154,8 +154,22 @@ struct Loaded {
 pub struct VerifiedFileJoin {
     record: StoredFileJoin,
     snapshot: VerifiedPinnedSnapshot,
+    #[cfg(windows)]
+    remote_report: Option<crate::namespace_intent::NamespaceDestinationReport>,
 }
 impl VerifiedFileJoin {
+    #[cfg(windows)]
+    pub(crate) fn matches_snapshot_key(&self, key: &StreamedRecordKey) -> Result<bool, StoreError> {
+        Ok(StreamedRecordKey::from_manifest(self.manifest())? == *key)
+    }
+
+    /// Protected historical metadata only, never replay/native authority.
+    #[cfg(windows)]
+    pub(crate) fn remote_report(
+        &self,
+    ) -> Option<&crate::namespace_intent::NamespaceDestinationReport> {
+        self.remote_report.as_ref()
+    }
     pub fn record(&self) -> &StoredFileJoin {
         &self.record
     }
@@ -357,6 +371,8 @@ impl FileCreateStore {
             verified: VerifiedFileJoin {
                 record: loaded.record,
                 snapshot,
+                #[cfg(windows)]
+                remote_report: loaded.remote,
             },
         })
     }
@@ -439,6 +455,8 @@ impl FileCreateStore {
         Ok(VerifiedFileJoin {
             record: loaded.record,
             snapshot,
+            #[cfg(windows)]
+            remote_report: loaded.remote,
         })
     }
     pub fn acquire_dispatch(

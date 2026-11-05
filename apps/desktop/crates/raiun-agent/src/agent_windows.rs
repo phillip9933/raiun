@@ -102,6 +102,7 @@ mod windows_profile_registry;
 mod windows_profiles;
 #[path = "windows_recovery_policy.rs"]
 mod windows_recovery_policy;
+include!("windows_saved_cloud_check.rs");
 use windows_headless::{PreparedWindowsAuth, mount_only, runtime_mode};
 
 type ProtectedCapturePage = (
@@ -3956,6 +3957,7 @@ impl WindowsAgent {
                 Ok((self.upload_windows_vault_capture_request(request)?, false))
             }
             "windows_recovery_retry" => Ok((self.retry_recovered_edit(request)?, false)),
+            "windows_recovery_check_cloud" => Ok((self.check_saved_edit_cloud(request)?, false)),
             "windows_device_cache_quota_set" => {
                 Ok((self.windows_device_cache_quota_set(request)?, false))
             }
@@ -4328,6 +4330,7 @@ impl WindowsAgent {
             "bandwidth_limits_supported": true,
             "network_proxy_supported": true,
             "windows_recovery_retry_supported": true,
+            "windows_recovery_cloud_check_supported": true,
             "proxy_edit_requires_sign_out": state.session.is_some(),
             "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
             "vaults_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
@@ -7586,6 +7589,31 @@ impl AgentGenerationRecoveryRemote<'_> {
 }
 
 impl raiun_cloudfiles_windows::RecoveryRemote for AgentGenerationRecoveryRemote<'_> {
+    fn check_created_copy(
+        &self,
+        scope: &raiun_cloudfiles_windows::EditJournalScope,
+        relative_path: &str,
+        parent: &raiun_cloudfiles_windows::RemoteEditBaseline,
+        expected_resource_id: Option<&str>,
+        content_len: u64,
+        sha256: [u8; 32],
+        job: &raiun_cloudfiles_windows::StreamedRecoveryJob,
+    ) -> Result<raiun_cloudfiles_windows::SavedEditCloudCheck, raiun_core::backend::CloudError>
+    {
+        self.ensure_current(scope)?;
+        let result = self.inner.remote().check_created_copy(
+            scope,
+            relative_path,
+            parent,
+            expected_resource_id,
+            content_len,
+            sha256,
+            job,
+        );
+        self.ensure_current(scope)?;
+        result
+    }
+
     fn begin_recovery_job(
         &self,
         policy: raiun_cloudfiles_windows::StreamedRecoveryPolicy,
@@ -8392,6 +8420,11 @@ fn request_value(request: &Value) -> Result<(), String> {
         .map_err(|_| "Raiun agent is not running for this Windows user".to_owned())?;
     write_json_line(&mut stream, &request)
         .map_err(|_| "Could not send control request".to_owned())?;
+    if request["action"].as_str() == Some("windows_recovery_check_cloud") {
+        // This read-only full-content comparison can use the configured
+        // recovery job's 24-hour maximum; connecting/sending stays bounded.
+        stream.set_io_timeout(Duration::from_secs(24 * 60 * 60 + 30));
+    }
     let mut response = Vec::new();
     stream
         .take(raiun_control::MAX_CONTROL_MESSAGE_BYTES as u64 + 1)

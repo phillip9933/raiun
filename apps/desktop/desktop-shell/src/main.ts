@@ -24,7 +24,7 @@ import { isVaultFailureClass, vaultEditRetryStatusMessage, vaultFailureMessage, 
 import { windowsPortabilityLabel } from './windows-compatibility';
 import { loadProviderSyncData, providerAvailable, providerFeatureAvailable } from './provider-capabilities';
 import { eligibleWindowsRecoveryContext, WindowsRecoveryController, windowsRecoveryContextKey } from './windows-recovery-controller';
-import { WINDOWS_RECOVERY_PAGE_LIMIT, windowsRecoveryRetryMessage } from './windows-recovery';
+import { WINDOWS_RECOVERY_PAGE_LIMIT, windowsRecoveryRetryMessage, windowsRecoveryCloudCheckMessage } from './windows-recovery';
 import { validateWindowsDeviceCacheUsage, type WindowsDeviceCacheUsage } from './windows-device-cache';
 import { WindowsOfflineFileController, windowsOfflineFileContextKey, windowsOfflineJobMessage, type WindowsOfflineFileContext, type WindowsOfflineFileRow } from './windows-offline-file';
 import { WindowsOfflineFolderPanel } from './windows-offline-folder-panel';
@@ -38,7 +38,7 @@ import { isVaultPasswordValidationError, shouldAnnounceVaultCloseBlocked, vaultD
 import raiunLogo from '../src-tauri/icons/raiun.svg';
 
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
-type Status = { connected: boolean; windows_recovery_retry_supported?: boolean; offline?: boolean; offline_namespace?: boolean; refreshing?: boolean; agent_version?: string | null; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; saved_upload_check_supported?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; folder_settings_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_create_supported?: boolean; vault_copy_supported?: boolean; vault_move_supported?: boolean; vault_copy_verify_supported?: boolean; vault_access_mode?: 'native_read_only'; vault_in_app_browse_supported?: boolean; vault_offline_supported?: boolean; vault_offline_write_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
+type Status = { connected: boolean; windows_recovery_retry_supported?: boolean; windows_recovery_cloud_check_supported?: boolean; offline?: boolean; offline_namespace?: boolean; refreshing?: boolean; agent_version?: string | null; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; saved_upload_check_supported?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; folder_settings_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_create_supported?: boolean; vault_copy_supported?: boolean; vault_move_supported?: boolean; vault_copy_verify_supported?: boolean; vault_access_mode?: 'native_read_only'; vault_in_app_browse_supported?: boolean; vault_offline_supported?: boolean; vault_offline_write_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status; avatar_data_url?: string | null };
 type RemovedAccount = { id: string; label: string; local_data_preserved: true };
 type DesktopUpdateStatus = { state: 'idle' | 'current' | 'available' | 'unavailable' | 'downloaded' | 'dismissed' | 'error'; version: string | null; tag: string | null; release_url: string | null; notes: string | null; error: string | null; automatic_checks: boolean; channel: 'stable' | 'beta'; dismissed_tag: string | null; last_check_unix: number | null; key_configured: boolean; downloaded: boolean };
@@ -555,6 +555,25 @@ async function retryWindowsSavedEdit(recordId: string, generation: number) {
       } finally { state.nativeDialogBusy = false; }
     },
     current
+  );
+  render();
+  await pending;
+  render();
+}
+
+
+async function checkWindowsSavedEditCloudCopy(recordId: string, generation: number) {
+  if (!isWindowsAgentStatus(state.status) || state.nativeDialogBusy || state.accountSwitching) return;
+  const { context } = windowsRecoveryBinding();
+  if (!context) return;
+  const current = () => {
+    const binding = isWindowsAgentStatus(state.status) ? windowsRecoveryBinding().context : null;
+    return !!binding && !state.accountSwitching && state.status?.windows_recovery_cloud_check_supported === true &&
+      windowsRecoveryContextKey(binding) === windowsRecoveryContextKey(context) &&
+      isCurrentAccount(context.accountEpoch, context.profileId);
+  };
+  const pending = windowsRecoveryController.checkCloudCopy(
+    context, recordId, generation, state.status?.windows_recovery_cloud_check_supported === true, request, current
   );
   render();
   await pending;
@@ -2714,12 +2733,19 @@ function windowsRecoverySettingsCard() {
         : !eligibility.available && eligibility.reason === 'invalid_generation'
           ? 'Refresh the account status before checking saved edits.'
           : !eligibility.available ? 'Select the current Windows account before checking saved edits.' : '';
+  const busy = recovery.loading || recovery.retrying || recovery.checking;
+  const retrySupported = state.status?.windows_recovery_retry_supported === true;
+  const checkSupported = state.status?.windows_recovery_cloud_check_supported === true;
   const rows = recovery.page?.items.length
-    ? `<div class="recovery-list">${recovery.page.items.map(item => `<article class="recovery-card"><div class="recovery-card-title"><div><b>${esc(item.path.split('/').filter(Boolean).at(-1) || item.path)}</b><small>${esc(item.path)}</small></div><span class="recovery-badge warning">Needs review</span></div><div class="recovery-meta"><span>${esc(item.space_id)}</span><span>${esc(formatBytes(item.bytes))}</span></div><small>Saved locally · this list does not check cloud completion</small>${state.status?.windows_recovery_retry_supported === true ? `<div class="button-group"><button class="button subtle" data-action="retry-windows-recovery" data-record-id="${esc(item.record_id)}" data-generation="${item.generation}" ${!context || recovery.loading || recovery.retrying ? 'disabled' : ''}>${recovery.retrying ? 'Reviewing retry…' : 'Retry'}</button></div>` : ''}</article>`).join('')}</div>`
+    ? `<div class="recovery-list">${recovery.page.items.map(item => {
+      const checkResult = checkSupported && recovery.cloudCheckResult?.record_id === item.record_id &&
+        recovery.cloudCheckResult.generation === item.generation ? recovery.cloudCheckResult : null;
+      return `<article class="recovery-card"><div class="recovery-card-title"><div><b>${esc(item.path.split('/').filter(Boolean).at(-1) || item.path)}</b><small>${esc(item.path)}</small></div><span class="recovery-badge warning">Needs review</span></div><div class="recovery-meta"><span>${esc(item.space_id)}</span><span>${esc(formatBytes(item.bytes))}</span></div><small>Saved locally · this list does not check cloud completion</small>${retrySupported || checkSupported ? `<div class="button-group">${retrySupported ? `<button class="button subtle" data-action="retry-windows-recovery" data-record-id="${esc(item.record_id)}" data-generation="${item.generation}" ${!context || busy ? 'disabled' : ''}>${recovery.retrying ? 'Reviewing retry…' : 'Retry'}</button>` : ''}${checkSupported ? `<button class="button subtle" data-action="check-windows-recovery-cloud" data-record-id="${esc(item.record_id)}" data-generation="${item.generation}" ${!context || busy ? 'disabled' : ''}>${recovery.checking && recovery.checkingRecordId === item.record_id ? 'Checking cloud copy…' : 'Check cloud copy'}</button>` : ''}</div>` : ''}${checkResult ? `<p class="recovery-hint" role="status">${esc(windowsRecoveryCloudCheckMessage(checkResult))}</p>` : ''}</article>`;
+    }).join('')}</div>`
     : recovery.page
       ? '<div class="recovery-empty" role="status" aria-live="polite">No saved edits need review in this scan.</div>'
       : '';
-  return `<section class="settings-card windows-recovery-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Saved file edits</h2><p>Local copies of edits to files on this Windows computer. Viewing this list does not change the files.</p></div></div><div class="settings-row"><div><b>Saved edits</b><small>${context ? 'Cloud completion is not confirmed by this list.' : 'Availability depends on the current account and Windows folder.'}</small></div><button class="button primary" data-action="load-windows-recovery" ${!context || recovery.loading || recovery.retrying ? 'disabled' : ''}>${recovery.loading ? 'Checking…' : recovery.page ? 'Refresh list' : 'Check saved edits'}</button></div>${reason ? `<p class="recovery-hint" role="status">${esc(reason)}</p>` : ''}${recovery.retryResult ? `<p class="recovery-hint" role="status">${esc(windowsRecoveryRetryMessage(recovery.retryResult))}</p>` : ''}${recovery.error ? `<div class="recovery-warning" role="alert">${esc(recovery.error)}</div>` : ''}${recovery.loading ? '<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking local saved edits…</div>' : ''}${rows}${recovery.page?.next_after ? `<div class="recovery-warning" role="status">${recovery.page.items.length} saved edits are shown. More edits are saved locally; this list is incomplete.</div>` : ''}</section>`;
+  return `<section class="settings-card windows-recovery-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Saved file edits</h2><p>Local copies of edits to files on this Windows computer. Viewing this list does not change the files.</p></div></div><div class="settings-row"><div><b>Saved edits</b><small>${context ? 'Cloud completion is not confirmed by this list.' : 'Availability depends on the current account and Windows folder.'}</small></div><button class="button primary" data-action="load-windows-recovery" ${!context || busy ? 'disabled' : ''}>${recovery.loading ? 'Checking…' : recovery.page ? 'Refresh list' : 'Check saved edits'}</button></div>${reason ? `<p class="recovery-hint" role="status">${esc(reason)}</p>` : ''}${recovery.retryResult ? `<p class="recovery-hint" role="status">${esc(windowsRecoveryRetryMessage(recovery.retryResult))}</p>` : ''}${recovery.error ? `<div class="recovery-warning" role="alert">${esc(recovery.error)}</div>` : ''}${recovery.loading ? '<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking local saved edits…</div>' : ''}${rows}${recovery.page?.next_after ? `<div class="recovery-warning" role="status">${recovery.page.items.length} saved edits are shown. More edits are saved locally; this list is incomplete.</div>` : ''}</section>`;
 }
 
 function encryptedEditRecoveryCard() {
@@ -3753,6 +3779,11 @@ async function handleAction(action: string, element?: HTMLElement) {
     case 'retry-windows-recovery':
       if (element?.dataset.recordId && element.dataset.generation) {
         await retryWindowsSavedEdit(element.dataset.recordId, Number(element.dataset.generation));
+      }
+      break;
+    case 'check-windows-recovery-cloud':
+      if (element?.dataset.recordId && element.dataset.generation) {
+        await checkWindowsSavedEditCloudCopy(element.dataset.recordId, Number(element.dataset.generation));
       }
       break;
     case 'load-encrypted-edit-recoveries': await loadEncryptedEditRecoveries(true); break;

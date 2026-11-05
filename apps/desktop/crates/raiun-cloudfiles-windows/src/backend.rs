@@ -467,6 +467,18 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         Err(BackendError::Unavailable)
     }
 
+    /// Authenticate one selected retained ordinary body and compare the current
+    /// cloud copy without uploading, changing attempt history, or acknowledging
+    /// a native placeholder. A match is informational only; custody is unchanged.
+    fn check_recovered_edit_readback(
+        &self,
+        _record_id: &str,
+        _generation: u64,
+        _remote: &dyn crate::RecoveryRemote,
+    ) -> Result<crate::SavedEditCloudCheck, crate::JournalError> {
+        Err(crate::JournalError::InvalidState)
+    }
+
     /// Explicitly dispatch one previously selected recovered edit. This does
     /// not connect or start a provider; implementations resolve the record
     /// internally from this prepared exact account/root scope, persist an

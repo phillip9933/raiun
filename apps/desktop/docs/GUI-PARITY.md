@@ -1,6 +1,50 @@
 # Linux / Windows GUI parity
 
-## Current implementation — 4 November 2026
+## Windows transfer and recovery update — 5 November 2026
+
+Windows GUI and headless mounts now share the SDK's consolidated ordinary-create
+preparation. Fresh Space, root, ordered parent and target-absence facts are reused
+within one operation; original parent conditions, late root revision fencing,
+protected streams and full conditional SHA-256 readback remain. Windows directory
+population authenticates its protected catalogue once per bounded listing and
+indexes existing identities, while preserving tombstones and cancellation.
+These are source changes, not measured Windows speed claims.
+
+Windows saved edits now offer **Check cloud copy**, including uncertain new
+uploads with an authenticated namespace/snapshot join. The headless command is
+`raiun drive edits check --id HEX --generation N`. A match describes current
+cloud bytes only: the saved copy remains retained and Windows sync status is
+unchanged. It sends no upload or deletion, creates no retry, and never clears
+custody. Missing is reported only after a qualified target lookup; ambiguous
+root/parent failures remain unavailable.
+
+Ordinary-file recovery no longer has a separate default 1-GiB file cap. An
+omitted file allowance follows the configured aggregate recovery quota (8 GiB
+by default, within existing supported configuration bounds). Explicit owner
+file limits remain unchanged; ciphertext overhead, retained records, disk
+availability and aggregate quotas can still refuse a capture. Encrypted vault
+limits are separate and are not lifted by an ordinary-file policy change.
+
+Windows clients authenticate their connected control-pipe owner and live server
+TokenUser before exchanging messages. Updated listeners set their actual user
+as owner. An older elevated Agent with an Administrators-owned pipe must be
+restarted normally before a new client can connect.
+
+Normal Personal and writable-Space folder creation is already enabled. The
+remaining false directory-routing flag belongs to the old fixture route and is
+not a production feature limit. Account, folder/media and vault capabilities
+are also enabled in production. Headless mode retains its explicit mount-only
+scope on both operating systems. Native callback chunk sizes are staging
+windows, not total-file limits.
+
+Windows OAuth refresh still reconstructs generation-bound native scopes, unlike
+the Unix ordinary-body refresh path. Cached stable-directory rename/delete and
+replacement-style editors need their missing native custody paths; they cannot
+be enabled by deleting a capability check. Recovery quotas, conditional writes,
+root/account binding and exact native completion remain required. This update
+is not an assertion of unrestricted feature or runtime performance parity.
+
+## Earlier implementation — 4 November 2026
 
 GUI and CLI share the canonical `worktrees/desktop-followup-ui` source and one
 engine. The owner resumed the remaining Windows work after the earlier `d8113b7`

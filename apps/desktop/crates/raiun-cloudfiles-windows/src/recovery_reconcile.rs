@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     EditJournal, EditJournalScope, ExplicitRecoveryApproval, JournalError, LocalEditRecord,
-    RecoveryAttemptOutcome, RecoveryAttemptState,
+    RecoveryAttemptOutcome, RecoveryAttemptState, RemoteEditBaseline,
 };
 use raiun_core::backend::{CloudBackend, CloudError, ErrorKind, WriteCondition};
 use raiun_opencloud::{OpenCloudClient, RangeReadContext};
@@ -65,6 +65,26 @@ impl RecoveryRemoteBody {
 /// target, optionally conditioned on `expected_etag`.
 pub trait RecoveryRemote: Send + Sync {
     fn server_origin(&self) -> Option<&str>;
+
+    /// Informational comparison of a protected new-file intent. Parent and
+    /// optional known original file ID must be enforced before/after full GET.
+    /// No result adopts an observed ID or grants upload/native authority.
+    #[allow(clippy::too_many_arguments)]
+    fn check_created_copy(
+        &self,
+        _scope: &EditJournalScope,
+        _relative_path: &str,
+        _parent: &RemoteEditBaseline,
+        _expected_resource_id: Option<&str>,
+        _content_len: u64,
+        _sha256: [u8; 32],
+        _job: &crate::StreamedRecoveryJob,
+    ) -> Result<crate::SavedEditCloudCheck, CloudError> {
+        Err(CloudError::new(
+            ErrorKind::Unsupported,
+            "created copy comparison is unavailable",
+        ))
+    }
 
     /// Optional bounded v2 transport for the same trusted route. Legacy/test
     /// implementations cannot acquire streaming mutation authority by default.
@@ -213,6 +233,74 @@ impl OpenCloudRecoveryRemote {
 }
 
 impl RecoveryRemote for OpenCloudRecoveryRemote {
+    fn check_created_copy(
+        &self,
+        scope: &EditJournalScope,
+        relative_path: &str,
+        parent: &RemoteEditBaseline,
+        expected_resource_id: Option<&str>,
+        content_len: u64,
+        sha256: [u8; 32],
+        job: &crate::StreamedRecoveryJob,
+    ) -> Result<crate::SavedEditCloudCheck, CloudError> {
+        self.check_scope(scope)?;
+        job.check()
+            .map_err(|_| CloudError::new(ErrorKind::Offline, "created copy check stopped"))?;
+        let context = RangeReadContext {
+            deadline: self
+                .dispatch_deadline
+                .map_or(job.deadline(), |deadline| deadline.min(job.deadline())),
+            token_generation: self.token_generation,
+        };
+        let target = if self.remote_root_path == "/" {
+            format!("/{relative_path}")
+        } else {
+            format!(
+                "{}/{relative_path}",
+                self.remote_root_path.trim_end_matches('/')
+            )
+        };
+        let parent_path = target
+            .rsplit_once('/')
+            .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+            .ok_or_else(|| {
+                CloudError::new(ErrorKind::InvalidResponse, "created copy path is invalid")
+            })?;
+        let cancellation = job.clone();
+        let result = self
+            .client
+            .recovery_check_created_copy_with_parent_cancellable_with_context(
+                &scope.space_id,
+                &self.remote_root_path,
+                &scope.root_resource_id,
+                relative_path,
+                &raiun_opencloud::RecoveryCreateParent {
+                    path: parent_path,
+                    resource_id: &parent.resource_id,
+                    etag: &parent.etag,
+                },
+                expected_resource_id,
+                content_len,
+                sha256,
+                context,
+                Arc::new(move || cancellation.is_stopped()),
+            );
+        self.check_scope(scope)?;
+        job.check()
+            .map_err(|_| CloudError::new(ErrorKind::Offline, "created copy check stopped"))?;
+        Ok(match result {
+            Ok(proof) if proof.bytes == content_len && proof.sha256 == sha256 => {
+                crate::SavedEditCloudCheck::Matched { bytes: content_len }
+            }
+            Ok(_) => crate::SavedEditCloudCheck::Different,
+            Err(error) if error.kind == ErrorKind::NotFound => crate::SavedEditCloudCheck::Missing,
+            Err(error) if error.kind == ErrorKind::Conflict => {
+                crate::SavedEditCloudCheck::Different
+            }
+            Err(error) => return Err(error),
+        })
+    }
+
     fn begin_recovery_job(
         &self,
         policy: crate::StreamedRecoveryPolicy,

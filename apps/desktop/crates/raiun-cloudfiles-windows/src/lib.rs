@@ -205,7 +205,9 @@ pub use opencloud::{
 };
 #[cfg(windows)]
 pub use recovery_provider::StagedStreamedEdit;
-pub use recovery_provider::{CompletedLocalEdit, DurableEditRecoveryProvider, InitialEditReceipt};
+pub use recovery_provider::{
+    CompletedLocalEdit, DurableEditRecoveryProvider, InitialEditReceipt, SavedEditCloudCheck,
+};
 pub use recovery_reconcile::{
     MAX_RECOVERY_UPLOAD_ATTEMPTS, MAX_RECOVERY_UPLOAD_BYTES, OpenCloudRecoveryRemote,
     ReconciliationIssue, ReconciliationOutcome, RecoveryRemote, RecoveryRemoteBody,

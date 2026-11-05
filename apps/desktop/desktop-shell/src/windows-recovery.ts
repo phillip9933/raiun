@@ -8,6 +8,7 @@ export type WindowsRecoveryRootStatus = {
 export type WindowsRecoveryAgentStatus = {
   connected?: boolean;
   windows_recovery_retry_supported?: unknown;
+  windows_recovery_cloud_check_supported?: unknown;
   profile_id?: string | null;
   auth_generation?: unknown;
   root_configuration?: WindowsRecoveryRootStatus | null;
@@ -265,4 +266,50 @@ export function windowsRecoveryRetryMessage(result: WindowsRecoveryRetryResult):
     return 'Retry refused because the saved edit or cloud baseline needs review. The original saved edit is retained.';
   }
   return 'Cloud save is not confirmed. The original saved edit is retained; review it before trying again.';
+}
+
+export type WindowsRecoveryCloudCheckResult = {
+  profile_id: string;
+  auth_generation: number;
+  recovery_scope_token: string;
+  record_id: string;
+  generation: number;
+  result: 'matched' | 'missing' | 'different' | 'unavailable';
+  bytes: number | null;
+  read_only: true;
+  cloud_mutated: false;
+  local_completion: 'unchanged';
+  original_snapshot_retained: true;
+};
+
+export function validateWindowsRecoveryCloudCheckResult(
+  value: unknown,
+  expectation: WindowsRecoveryPageExpectation & { recordId: string; generation: number; bytes: number }
+): WindowsRecoveryCloudCheckResult {
+  const keys = ['profile_id', 'auth_generation', 'recovery_scope_token', 'record_id', 'generation',
+    'result', 'bytes', 'read_only', 'cloud_mutated', 'local_completion', 'original_snapshot_retained'].sort();
+  if (!validWindowsProfileId(expectation.profileId) || !safePositiveInteger(expectation.authGeneration) ||
+      !validRecoveryScopeToken(expectation.recoveryScopeToken) ||
+      !/^[0-9a-fA-F]{1,128}$/.test(expectation.recordId) || !safePositiveInteger(expectation.generation) ||
+      !safeNonnegativeInteger(expectation.bytes) || expectation.bytes > 2 ** 40 ||
+      !isRecord(value) || !hasExactKeys(value, keys) || value.profile_id !== expectation.profileId ||
+      value.auth_generation !== expectation.authGeneration || value.recovery_scope_token !== expectation.recoveryScopeToken ||
+      value.record_id !== expectation.recordId || value.generation !== expectation.generation ||
+      !['matched', 'missing', 'different', 'unavailable'].includes(value.result as string) ||
+      value.read_only !== true || value.cloud_mutated !== false || value.local_completion !== 'unchanged' ||
+      value.original_snapshot_retained !== true ||
+      (value.result === 'matched' ? value.bytes !== expectation.bytes : value.bytes !== null)) {
+    throw new Error('The cloud-copy check could not be confirmed. Refresh saved edits and try again.');
+  }
+  return { ...value } as WindowsRecoveryCloudCheckResult;
+}
+
+export function windowsRecoveryCloudCheckMessage(result: WindowsRecoveryCloudCheckResult): string {
+  const retained = 'Your saved copy is kept and Windows sync status is unchanged.';
+  switch (result.result) {
+    case 'matched': return `The cloud file matches your saved copy. ${retained}`;
+    case 'missing': return `The cloud file was not found. ${retained}`;
+    case 'different': return `The cloud file differs from your saved copy. ${retained}`;
+    case 'unavailable': return `The cloud copy could not be checked. ${retained}`;
+  }
 }

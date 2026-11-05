@@ -334,6 +334,28 @@ pub trait ProviderIdentityCatalog: Send + Sync {
         scope: &ProviderIdentityCatalogScope,
         binding: &ProviderIdentityBinding,
     ) -> Result<(), BackendError>;
+    /// Persist a bounded complete-listing batch before publishing its native
+    /// identities. Failure may retain a safe prefix, but permits no publication.
+    /// Implementations may authenticate their catalog once for the entire batch;
+    /// every binding retains the same stable-target and tombstone checks.
+    /// `ensure_current` performs bounded cancellation/atomic checks only; no
+    /// provider reentry or acquisition of another publication/state lock.
+    fn upsert_many(
+        &self,
+        scope: &ProviderIdentityCatalogScope,
+        bindings: &[ProviderIdentityBinding],
+        ensure_current: &dyn Fn() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        ensure_current()?;
+        if bindings.len() > MAX_DIRECTORY_CHILDREN {
+            return Err(BackendError::Unavailable);
+        }
+        for binding in bindings {
+            ensure_current()?;
+            self.upsert(scope, binding)?;
+        }
+        ensure_current()
+    }
     fn remove(
         &self,
         scope: &ProviderIdentityCatalogScope,
@@ -2558,12 +2580,118 @@ impl OpenCloudPlaceholderBackend {
             children
         };
         let catalog_scope = self.catalog_scope_snapshot()?;
+        // Persist the complete ordinary listing in one catalog admission. A
+        // vault child never enters this plaintext catalog, and no placeholder
+        // state is exposed if any protected binding fails validation/storage.
+        let durable_bindings = entries
+            .iter()
+            .filter_map(|(_, entry)| {
+                #[cfg(windows)]
+                if vault_children.contains_key(&(entry.path.clone(), entry.id.clone())) {
+                    return None;
+                }
+                catalog_scope.as_ref().map(|scope| {
+                    if entry.directory {
+                        let identity = binding_identity(
+                            scope,
+                            "directory",
+                            &[
+                                &directory.space_id,
+                                &directory.root_resource_id,
+                                &entry.path,
+                                &entry.id,
+                            ],
+                        );
+                        ProviderIdentityBinding::Directory {
+                            identity: *identity.as_bytes(),
+                            space_id: directory.space_id.clone(),
+                            root_resource_id: directory.root_resource_id.clone(),
+                            path: entry.path.clone(),
+                            remote_id: entry.id.clone(),
+                        }
+                    } else {
+                        let identity = binding_identity(
+                            scope,
+                            "file",
+                            &[
+                                &directory.space_id,
+                                &directory.root_resource_id,
+                                &entry.path,
+                                &entry.id,
+                            ],
+                        );
+                        ProviderIdentityBinding::File {
+                            identity: *identity.as_bytes(),
+                            space_id: directory.space_id.clone(),
+                            root_resource_id: directory.root_resource_id.clone(),
+                            path: entry.path.clone(),
+                            remote_id: entry.id.clone(),
+                            etag: entry.etag.clone(),
+                            size: entry.size,
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
             .with_token_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
+                if let Some(scope) = catalog_scope.as_ref() {
+                    let catalog = self
+                        .identity_catalog
+                        .as_ref()
+                        .ok_or(BackendError::Unavailable)?;
+                    for binding in &durable_bindings {
+                        if validate_catalog_binding(scope, binding)? != binding.identity() {
+                            return Err(BackendError::Unavailable);
+                        }
+                    }
+                    check_cancel(cancellation)?;
+                    catalog.upsert_many(scope, &durable_bindings, &|| {
+                        check_cancel(cancellation)?;
+                        if self.revoked.load(Ordering::Acquire) {
+                            return Err(BackendError::Unavailable);
+                        }
+                        Ok(())
+                    })?;
+                    check_cancel(cancellation)?;
+                }
+                // Without a durable catalog, index this exact directory once
+                // rather than scanning all existing identities for every child.
+                let existing_directories = if catalog_scope.is_none() {
+                    state
+                        .directories
+                        .iter()
+                        .filter(|(_, item)| {
+                            item.space_id == directory.space_id
+                                && item.root_resource_id == directory.root_resource_id
+                        })
+                        .map(|(identity, item)| {
+                            ((item.path.clone(), item.remote_id.clone()), *identity)
+                        })
+                        .collect::<HashMap<_, _>>()
+                } else {
+                    HashMap::new()
+                };
+                let existing_files = if catalog_scope.is_none() {
+                    state
+                        .files
+                        .iter()
+                        .filter(|(_, item)| {
+                            item.space_id == directory.space_id
+                                && item.root_resource_id == directory.root_resource_id
+                        })
+                        .map(|(identity, item)| {
+                            ((item.path.clone(), item.remote_id.clone()), *identity)
+                        })
+                        .collect::<HashMap<_, _>>()
+                } else {
+                    HashMap::new()
+                };
+                let mut durable_bindings = durable_bindings.into_iter();
                 let mut children = Vec::with_capacity(entries.len());
                 for (name, entry) in entries {
                     check_cancel(cancellation)?;
@@ -2582,77 +2710,19 @@ impl OpenCloudPlaceholderBackend {
                         });
                         continue; // never persist a vault route in the ordinary catalogue
                     }
-                    let durable_binding = catalog_scope.as_ref().map(|scope| {
-                        if entry.directory {
-                            let identity = binding_identity(
-                                scope,
-                                "directory",
-                                &[
-                                    &directory.space_id,
-                                    &directory.root_resource_id,
-                                    &entry.path,
-                                    &entry.id,
-                                ],
-                            );
-                            ProviderIdentityBinding::Directory {
-                                identity: *identity.as_bytes(),
-                                space_id: directory.space_id.clone(),
-                                root_resource_id: directory.root_resource_id.clone(),
-                                path: entry.path.clone(),
-                                remote_id: entry.id.clone(),
-                            }
-                        } else {
-                            let identity = binding_identity(
-                                scope,
-                                "file",
-                                &[
-                                    &directory.space_id,
-                                    &directory.root_resource_id,
-                                    &entry.path,
-                                    &entry.id,
-                                ],
-                            );
-                            ProviderIdentityBinding::File {
-                                identity: *identity.as_bytes(),
-                                space_id: directory.space_id.clone(),
-                                root_resource_id: directory.root_resource_id.clone(),
-                                path: entry.path.clone(),
-                                remote_id: entry.id.clone(),
-                                etag: entry.etag.clone(),
-                                size: entry.size,
-                            }
-                        }
-                    });
-                    let opaque = if let (Some(scope), Some(binding)) =
-                        (catalog_scope.as_ref(), durable_binding.as_ref())
-                    {
-                        let identity = binding.identity();
-                        self.upsert_identity_binding(scope, binding)?;
-                        identity
+                    let opaque = if catalog_scope.is_some() {
+                        durable_bindings
+                            .next()
+                            .ok_or(BackendError::Unavailable)?
+                            .identity()
                     } else {
+                        let key = (entry.path.clone(), entry.id.clone());
                         let existing = if entry.directory {
-                            state
-                                .directories
-                                .iter()
-                                .find(|(_, item)| {
-                                    item.space_id == directory.space_id
-                                        && item.root_resource_id == directory.root_resource_id
-                                        && item.path == entry.path
-                                        && item.remote_id == entry.id
-                                })
-                                .map(|(identity, _)| *identity)
+                            existing_directories.get(&key)
                         } else {
-                            state
-                                .files
-                                .iter()
-                                .find(|(_, item)| {
-                                    item.space_id == directory.space_id
-                                        && item.root_resource_id == directory.root_resource_id
-                                        && item.path == entry.path
-                                        && item.remote_id == entry.id
-                                })
-                                .map(|(identity, _)| *identity)
-                        };
+                            existing_files.get(&key)
+                        }
+                        .copied();
                         if let Some(existing) = existing {
                             existing
                         } else {

@@ -15,26 +15,32 @@ use windows_sys::Win32::{
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            GetSecurityInfo, SE_KERNEL_OBJECT,
         },
-        GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        GetTokenInformation, IsValidSid, OWNER_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
+        TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
         CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
-        PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
+        PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
     },
     System::{
         IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
         Pipes::{
-            ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-            PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
+            ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
+            PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
         },
-        Threading::{CreateEventW, GetCurrentProcess, OpenProcessToken, WaitForSingleObject},
+        Threading::{
+            CreateEventW, GetCurrentProcess, OpenProcess, OpenProcessToken,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        },
     },
 };
 
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const PIPE_INSTANCE_COUNT: u32 = 1;
 const MAX_WAIT: Duration = Duration::from_secs(300);
+const MAX_IO_WAIT: Duration = Duration::from_secs(24 * 60 * 60 + 30);
 const SDDL_REVISION_1: u32 = 1;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_BROKEN_PIPE: u32 = 109;
@@ -49,7 +55,20 @@ pub struct NamedPipeListener {
 /// A current-user named pipe implementing byte-stream `Read` and `Write`.
 pub struct PipeStream {
     handle: OwnedHandle,
+    // Client streams retain the authenticated process object, never just a PID.
+    _server_process: Option<OwnedHandle>,
     io_timeout: Duration,
+}
+
+impl PipeStream {
+    /// Set the bound for subsequent read/write operations on this connection.
+    /// Values are clamped to one millisecond through 24 hours plus 30 seconds.
+    /// Connection establishment retains its separate five-minute maximum.
+    /// Callers can leave request writes at their ordinary bound and extend only
+    /// the later response read for a separately bounded long-running operation.
+    pub fn set_io_timeout(&mut self, timeout: Duration) {
+        self.io_timeout = bounded_io_timeout(timeout);
+    }
 }
 
 impl NamedPipeListener {
@@ -59,7 +78,9 @@ impl NamedPipeListener {
         let pipe_name = current_user_pipe_path()?;
         let wide_name = wide(&pipe_name);
         let sid = current_user_sid()?;
-        let sddl = wide(&format!("D:P(A;;GA;;;{sid})"));
+        // Pin the owner to TokenUser too: an elevated token's default owner can
+        // otherwise be Administrators, which cannot authenticate this endpoint.
+        let sddl = wide(&format!("O:{sid}D:P(A;;GA;;;{sid})"));
         let mut descriptor = null_mut();
         let converted = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -131,6 +152,7 @@ impl NamedPipeListener {
         }
         Ok(PipeStream {
             handle: pipe,
+            _server_process: None,
             io_timeout: self.io_timeout,
         })
     }
@@ -169,13 +191,23 @@ pub fn connect_current_user(timeout: Duration) -> io::Result<PipeStream> {
                 0,
                 null(),
                 OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                 null_mut(),
             )
         };
         if raw != INVALID_HANDLE_VALUE {
+            let handle = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+            // No protocol bytes may leave this client until the connected
+            // object's owner and its live server's TokenUser are authenticated.
+            let server_process = authenticate_server(&handle).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Cannot authenticate Raiun's control pipe; restart Raiun's agent and retry",
+                )
+            })?;
             return Ok(PipeStream {
-                handle: unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) },
+                handle,
+                _server_process: Some(server_process),
                 io_timeout: timeout,
             });
         }
@@ -186,6 +218,75 @@ pub fn connect_current_user(timeout: Duration) -> io::Result<PipeStream> {
         }
         return Err(io::Error::from_raw_os_error(error as i32));
     }
+}
+
+fn authenticate_server(pipe: &OwnedHandle) -> io::Result<OwnedHandle> {
+    let expected_sid = current_user_sid()?;
+    // This check binds authentication to this exact connected pipe object. It
+    // also closes the PID-reuse gap if the original server died before OpenProcess:
+    // an unrelated user's pipe cannot acquire this user's owner SID without
+    // privileges that already defeat the current-user security boundary.
+    if pipe_owner_sid(pipe)? != expected_sid {
+        return Err(io::Error::other("Unexpected control pipe owner"));
+    }
+    let pipe_handle = pipe.as_raw_handle() as HANDLE;
+    let mut process_id = 0;
+    if unsafe { GetNamedPipeServerProcessId(pipe_handle, &mut process_id) } == 0 || process_id == 0
+    {
+        return Err(io::Error::other("Missing local control pipe server"));
+    }
+    let process = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            process_id,
+        )
+    };
+    if process.is_null() {
+        return Err(last_error());
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(process as RawHandle) };
+    let process_handle = process.as_raw_handle() as HANDLE;
+    if process_user_sid(process_handle)? != expected_sid {
+        return Err(io::Error::other("Unexpected control pipe server identity"));
+    }
+    let mut confirmed_id = 0;
+    if unsafe { GetNamedPipeServerProcessId(pipe_handle, &mut confirmed_id) } == 0
+        || confirmed_id != process_id
+        || unsafe { WaitForSingleObject(process_handle, 0) } != WAIT_TIMEOUT
+    {
+        return Err(io::Error::other("Control pipe server is unavailable"));
+    }
+    // The fixed local pipe path never permits a caller-selected remote host.
+    // Missing/inaccessible server-process metadata is rejected, not downgraded
+    // to trusting a name, owner alone, or a PID from protocol input.
+    Ok(process)
+}
+
+fn pipe_owner_sid(pipe: &OwnedHandle) -> io::Result<String> {
+    let mut owner = null_mut();
+    let mut descriptor = null_mut();
+    let result = unsafe {
+        GetSecurityInfo(
+            pipe.as_raw_handle() as HANDLE,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    let sid = if result == 0 && !descriptor.is_null() {
+        sid_string(owner)
+    } else {
+        Err(io::Error::other("Cannot query control pipe owner"))
+    };
+    if !descriptor.is_null() {
+        unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+    }
+    sid
 }
 
 impl Read for PipeStream {
@@ -297,7 +398,7 @@ fn wait_operation(
     event: HANDLE,
     timeout: Duration,
 ) -> io::Result<()> {
-    match unsafe { WaitForSingleObject(event, timeout_millis(timeout)) } {
+    match unsafe { WaitForSingleObject(event, bounded_io_timeout(timeout).as_millis() as u32) } {
         WAIT_OBJECT_0 => Ok(()),
         WAIT_TIMEOUT => {
             unsafe {
@@ -341,8 +442,12 @@ fn current_user_pipe_path() -> io::Result<String> {
 }
 
 fn current_user_sid() -> io::Result<String> {
+    process_user_sid(unsafe { GetCurrentProcess() })
+}
+
+fn process_user_sid(process: HANDLE) -> io::Result<String> {
     let mut token = null_mut();
-    let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
     if opened == 0 || token.is_null() {
         return Err(last_error());
     }
@@ -378,8 +483,15 @@ fn current_user_sid() -> io::Result<String> {
         return Err(last_error());
     }
     let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+    sid_string(user.User.Sid)
+}
+
+fn sid_string(sid: PSID) -> io::Result<String> {
+    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+        return Err(io::Error::other("Windows returned an invalid user SID"));
+    }
     let mut sid_string = null_mut();
-    let converted = unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid_string) };
+    let converted = unsafe { ConvertSidToStringSidW(sid, &mut sid_string) };
     if converted == 0 || sid_string.is_null() {
         return Err(last_error());
     }
@@ -406,6 +518,10 @@ fn wide(value: &str) -> Vec<u16> {
 
 fn bounded_timeout(timeout: Duration) -> Duration {
     timeout.clamp(Duration::from_millis(1), MAX_WAIT)
+}
+
+fn bounded_io_timeout(timeout: Duration) -> Duration {
+    timeout.clamp(Duration::from_millis(1), MAX_IO_WAIT)
 }
 
 fn timeout_millis(timeout: Duration) -> u32 {

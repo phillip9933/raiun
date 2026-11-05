@@ -39,6 +39,11 @@ pub(crate) fn agent_action_waits_for_completion(action: &str) -> bool {
 }
 
 pub(crate) fn agent_response_timeout(action: &str) -> Duration {
+    if action == "windows_recovery_check_cloud" {
+        // The configured read-only check is capped at 24 hours; allow its
+        // bounded metadata work and result to finish without an early IPC error.
+        return Duration::from_secs(24 * 60 * 60 + 30);
+    }
     if action == "auth_begin"
         || matches!(
             action,

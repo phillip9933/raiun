@@ -32,6 +32,10 @@ mod namespace_storage;
 #[path = "recovery_provider_streamed.rs"]
 mod streamed;
 
+#[path = "saved_edit_check.rs"]
+mod saved_edit_check;
+pub use saved_edit_check::SavedEditCloudCheck;
+
 const CATALOG_DIRECTORY: &str = "cloud-files-edit-scopes-v1";
 const CATALOG_SUFFIX: &str = ".scope";
 const CATALOG_AAD_PREFIX: &[u8] = b"raiun/windows-edit-scope-catalog/v1\0";
@@ -353,54 +357,121 @@ impl crate::opencloud::ProviderIdentityCatalog for DurableProviderIdentityCatalo
         scope: &crate::opencloud::ProviderIdentityCatalogScope,
         binding: &crate::opencloud::ProviderIdentityBinding,
     ) -> Result<(), BackendError> {
+        self.upsert_many(scope, std::slice::from_ref(binding), &|| Ok(()))
+    }
+
+    fn upsert_many(
+        &self,
+        scope: &crate::opencloud::ProviderIdentityCatalogScope,
+        bindings: &[crate::opencloud::ProviderIdentityBinding],
+        ensure_current: &dyn Fn() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        ensure_current()?;
         self.validate_owner_scope(scope)?;
         validate_identity_scope(scope).map_err(|_| BackendError::Unavailable)?;
-        validate_identity_binding(scope, binding).map_err(|_| BackendError::Unavailable)?;
-        let identity = *binding.identity().as_bytes();
-
+        if bindings.len() > crate::MAX_DIRECTORY_CHILDREN {
+            return Err(BackendError::Unavailable);
+        }
+        let mut identities = std::collections::HashSet::with_capacity(bindings.len());
+        for binding in bindings {
+            ensure_current()?;
+            validate_identity_binding(scope, binding).map_err(|_| BackendError::Unavailable)?;
+            if !identities.insert(*binding.identity().as_bytes()) {
+                return Err(BackendError::Unavailable);
+            }
+        }
+        let scope_key = identity_scope_key(scope).map_err(|_| BackendError::Unavailable)?;
         for _ in 0..MAX_IDENTITY_WRITE_RETRIES {
             let _guard = IDENTITY_CATALOG_LOCK
                 .lock()
                 .map_err(|_| BackendError::Unavailable)?;
+            // Authenticate the complete bounded catalog once, including all
+            // history/tombstones, before deriving any updates for this listing.
             let entries = self.load_all().map_err(|_| BackendError::Unavailable)?;
-            let existing_bytes = identity_catalog_bytes(&entries)?;
-            let scope_key = identity_scope_key(scope).map_err(|_| BackendError::Unavailable)?;
-            let existing = entries
+            ensure_current()?;
+            let mut existing_bytes = identity_catalog_bytes(&entries)?;
+            let mut record_count = entries
                 .iter()
-                .find(|entry| entry.scope_key == scope_key && entry.identity == identity);
-            let generation = if let Some(existing) = existing {
-                if existing.scope != *scope {
-                    return Err(BackendError::Unavailable);
-                }
-                let Some(current) = existing.binding.as_ref() else {
-                    // Removed identities are tombstoned and may never be
-                    // rebound to a different remote object.
-                    return Err(BackendError::Unavailable);
+                .try_fold(entries.len() as u64, |count, entry| {
+                    count.checked_add(entry.generation)
+                })
+                .ok_or(BackendError::Unavailable)?;
+            let current = entries
+                .iter()
+                .filter(|entry| entry.scope_key == scope_key)
+                .map(|entry| (entry.identity, entry))
+                .collect::<std::collections::HashMap<_, _>>();
+            let mut binding_count = current.len();
+            let mut records = Vec::new();
+            for binding in bindings {
+                ensure_current()?;
+                let identity = *binding.identity().as_bytes();
+                let generation = if let Some(existing) = current.get(&identity) {
+                    if existing.scope != *scope {
+                        return Err(BackendError::Unavailable);
+                    }
+                    let Some(previous) = existing.binding.as_ref() else {
+                        // Removed identities remain permanently tombstoned.
+                        return Err(BackendError::Unavailable);
+                    };
+                    if !same_identity_target(previous, binding) {
+                        return Err(BackendError::Unavailable);
+                    }
+                    if previous == binding {
+                        continue;
+                    }
+                    existing
+                        .generation
+                        .checked_add(1)
+                        .ok_or(BackendError::Unavailable)?
+                } else {
+                    binding_count = binding_count
+                        .checked_add(1)
+                        .ok_or(BackendError::Unavailable)?;
+                    record_count = record_count
+                        .checked_add(1)
+                        .ok_or(BackendError::Unavailable)?;
+                    1
                 };
-                if !same_identity_target(current, binding) {
+                record_count = record_count
+                    .checked_add(1)
+                    .ok_or(BackendError::Unavailable)?;
+                if binding_count > MAX_IDENTITY_BINDINGS_PER_SCOPE
+                    || record_count > MAX_IDENTITY_CATALOG_RECORDS as u64
+                    || generation > MAX_IDENTITY_RECORD_VERSIONS as u64
+                {
                     return Err(BackendError::Unavailable);
                 }
-                if current == binding {
-                    return Ok(());
+                records.push(ProtectedIdentityRecord {
+                    schema_version: 1,
+                    scope: scope.clone(),
+                    identity,
+                    generation,
+                    binding: Some(binding.clone()),
+                });
+            }
+            // Individual immutable appends preserve a safe prefix on failure;
+            // callers must not expose native identities until all have succeeded.
+            // A concurrent process winning an append requires fresh full auth,
+            // never a name-based rebind or an unverified generation increment.
+            let mut raced = false;
+            for record in records {
+                ensure_current()?;
+                match self.append_record(&record, &scope_key, existing_bytes) {
+                    Ok(bytes) => {
+                        existing_bytes = existing_bytes
+                            .checked_add(bytes)
+                            .ok_or(BackendError::Unavailable)?;
+                    }
+                    Err(IdentityAppendError::AlreadyExists) => {
+                        raced = true;
+                        break;
+                    }
+                    Err(IdentityAppendError::Failed) => return Err(BackendError::Unavailable),
                 }
-                existing
-                    .generation
-                    .checked_add(1)
-                    .ok_or(BackendError::Unavailable)?
-            } else {
-                1
-            };
-            let record = ProtectedIdentityRecord {
-                schema_version: 1,
-                scope: scope.clone(),
-                identity,
-                generation,
-                binding: Some(binding.clone()),
-            };
-            match self.append_record(&record, &scope_key, existing_bytes) {
-                Ok(()) => return Ok(()),
-                Err(IdentityAppendError::AlreadyExists) => continue,
-                Err(IdentityAppendError::Failed) => return Err(BackendError::Unavailable),
+            }
+            if !raced {
+                return ensure_current();
             }
         }
         Err(BackendError::Unavailable)
@@ -443,7 +514,7 @@ impl crate::opencloud::ProviderIdentityCatalog for DurableProviderIdentityCatalo
                 binding: None,
             };
             match self.append_record(&record, &scope_key, existing_bytes) {
-                Ok(()) => return Ok(()),
+                Ok(_) => return Ok(()),
                 Err(IdentityAppendError::AlreadyExists) => continue,
                 Err(IdentityAppendError::Failed) => return Err(BackendError::Unavailable),
             }
@@ -687,7 +758,7 @@ impl DurableProviderIdentityCatalog {
         record: &ProtectedIdentityRecord,
         scope_key: &str,
         existing_bytes: u64,
-    ) -> Result<(), IdentityAppendError> {
+    ) -> Result<u64, IdentityAppendError> {
         let body = serde_json::to_vec(record).map_err(|_| IdentityAppendError::Failed)?;
         if body.len() > MAX_IDENTITY_RECORD_BYTES {
             return Err(IdentityAppendError::Failed);
@@ -734,7 +805,7 @@ impl DurableProviderIdentityCatalog {
         file.sync_all().map_err(|_| IdentityAppendError::Failed)?;
         drop(file);
         sync_directory(&identity_directory).map_err(|_| IdentityAppendError::Failed)?;
-        Ok(())
+        Ok(sealed_len)
     }
 }
 
@@ -1954,6 +2025,15 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         )
         .map_err(|_| BackendError::Unavailable)?;
         Ok(pending)
+    }
+
+    fn check_recovered_edit_readback(
+        &self,
+        record_id: &str,
+        generation: u64,
+        remote: &dyn RecoveryRemote,
+    ) -> Result<SavedEditCloudCheck, crate::JournalError> {
+        saved_edit_check::check(self, record_id, generation, remote)
     }
 
     fn dispatch_recovered_edit(

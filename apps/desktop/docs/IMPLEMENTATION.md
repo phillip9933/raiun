@@ -4469,3 +4469,39 @@ scopes. Directory observations retain each freshly validated root before
 descendant metadata can fail offline. Fallback uses that observed root, rather
 than substituting an older saved root; contradictory roots refuse the whole
 observation. This preserves root binding without adding a second root request.
+
+
+### Windows transfer and saved-copy parity — 5 November 2026
+
+Canonical-root protected-reader creates now compose their repeated preparation
+observations inside the SDK. The original root and captured parent revision
+conditions, one durable native owner claim, one PUT, original context/cancel
+checks and full conditional SHA-256 readback remain. Native owner custody stays
+serialized; increasing a worker count cannot replace its ownership protocol.
+
+Windows enumeration batches ordinary identity catalogue admissions after one
+complete authenticated load. The batch counts both identity directories and
+history files, rechecks cancellation before each immutable append and retains
+per-record durability. A failed batch can leave an authenticated append prefix,
+but cannot publish native identities for the failed listing. Transient identity
+reuse uses one indexed view rather than a full scan for every child.
+
+Saved-file cloud checks select an exact protected record and immutable body.
+New creates additionally require the original authenticated namespace join and
+parent identity; a protected remote report pins the original resource when one
+exists. Without it, matching bytes never adopt a resource ID. No cloud mutation,
+history write, dispatch lock, retry, acknowledgement or native-clean capability
+is produced. Original root/parent checks surround full conditional readback;
+opaque NotFound errors remain unavailable. Agent, GUI and headless CLI retain
+profile/root/generation scope through the result. Extended response deadlines
+apply only to this bounded read-only operation; connecting and sending remain
+short, and other action timeouts are unchanged.
+
+The ordinary recovery default file allowance follows the aggregate quota;
+explicit limits and existing smaller-quota configurations retain their meaning.
+Malformed/null settings remain rejected. Aggregate protected-state accounting
+still includes retained evidence and ciphertext overhead. Encrypted and
+cross-vault streaming/custody limits are separate implementation boundaries.
+Windows peer authentication now verifies the connected pipe's actual owner and
+live server TokenUser with a retained process handle before protocol exchange.
+Names, state domains, DACLs and first-instance admission remain unchanged.
