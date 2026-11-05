@@ -4640,3 +4640,13 @@ loss, invalid context or a full backlog still holds the dispatcher and preserves
 recovery; intake never substitutes a rescan or adopts unobserved filesystem data.
 Collection still depends on timely owner ticks; this removes whole-batch polling
 starvation without promising loss-free intake during every synchronous owner call.
+
+Fresh file and folder Prepare workers wait briefly when the existing protected
+quota file is sharing-locked or its nonblocking quota lease is contended. Only
+those exact typed failures can wait; the original read-only health query and
+job, authorization and SDK checks run again before proceeding. Both health
+queries share one allowance bounded by the original job and the existing
+30-second request budget, created only on first contention. The original Prepare
+task stays in flight, preserving the all-Prepare barrier and independent file
+workers. No SDK request, capture, publication, upload or old-record action is
+retried. Other failures and unresolved recovery results still stop preparation.

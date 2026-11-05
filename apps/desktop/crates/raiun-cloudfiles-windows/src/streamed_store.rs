@@ -486,9 +486,15 @@ impl SnapshotStore {
             if !names.iter().any(|name| name == V2_QUOTA_LOCK) {
                 return Err(StoreError::IncompleteEvidence);
             }
+            if let Some(trace) = trace {
+                trace.enter(crate::creation_preparation::Stage::RecoveryQuotaOpen);
+            }
             let mut lock = root.open_quota_lock()?;
             if lock.len()? != 0 {
                 return Err(StoreError::CorruptEvidence);
+            }
+            if let Some(trace) = trace {
+                trace.enter(crate::creation_preparation::Stage::RecoveryQuotaLock);
             }
             lock.lock_exclusive()?;
             lock.verify()?;

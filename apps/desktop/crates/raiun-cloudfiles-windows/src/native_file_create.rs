@@ -1,7 +1,9 @@
 //! Explicit same-owner ordinary Personal file create; never recovered replay.
 use super::*;
 use crate::close_capture_admission::IndependentCreateAdmission;
-use crate::creation_preparation::{Failure, Stage as PreparationStage, Trace};
+use crate::creation_preparation::{
+    Failure, Stage as PreparationStage, Trace, wait_for_recovery_health,
+};
 use crate::file_create_phase::{Phase, ReplyDisposition, ReplyKey, TaskFlight};
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceFileContent, NamespaceIntent,
@@ -590,6 +592,7 @@ impl FileCreateTask {
             TaskKind::Prepare(prep) => {
                 let trace = Arc::new(Trace::new());
                 let result = (|| {
+                    let mut health_wait = None;
                     trace.enter(PreparationStage::Job);
                     prep.job.check()?;
                     trace.enter(PreparationStage::Current);
@@ -611,11 +614,18 @@ impl FileCreateTask {
                     let space = admission
                         .fresh_create_space(&self.backend)?
                         .with_preparation_trace(Arc::clone(&trace));
-                    trace.enter(PreparationStage::RecoveryBefore);
-                    if prep
-                        .recovery
-                        .has_unresolved_for_fresh_create_in_space(&space)?
-                    {
+                    if wait_for_recovery_health(&prep.job, &trace, &mut health_wait, || {
+                        trace.enter(PreparationStage::Job);
+                        prep.job.check()?;
+                        trace.enter(PreparationStage::Current);
+                        if !(prep.current)(self.key.authorization) {
+                            return Err(BackendError::Unavailable);
+                        }
+                        admission.check(&self.backend)?;
+                        trace.enter(PreparationStage::RecoveryBefore);
+                        prep.recovery
+                            .has_unresolved_for_fresh_create_in_space(&space)
+                    })? {
                         return Err(BackendError::Unavailable);
                     }
                     trace.enter(PreparationStage::Current);
@@ -627,11 +637,18 @@ impl FileCreateTask {
                         .ok_or(BackendError::Unavailable)?;
                     trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
-                    trace.enter(PreparationStage::RecoveryAfter);
-                    if prep
-                        .recovery
-                        .has_unresolved_for_fresh_create_in_space(&space)?
-                    {
+                    if wait_for_recovery_health(&prep.job, &trace, &mut health_wait, || {
+                        trace.enter(PreparationStage::Job);
+                        prep.job.check()?;
+                        trace.enter(PreparationStage::Current);
+                        if !(prep.current)(self.key.authorization) {
+                            return Err(BackendError::Unavailable);
+                        }
+                        admission.check(&self.backend)?;
+                        trace.enter(PreparationStage::RecoveryAfter);
+                        prep.recovery
+                            .has_unresolved_for_fresh_create_in_space(&space)
+                    })? {
                         return Err(BackendError::Unavailable);
                     }
                     trace.enter(PreparationStage::Current);

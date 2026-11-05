@@ -1,7 +1,9 @@
 //! Exact native directory admission and no-dehydration publication. Local
 //! components are hints until joined to current authenticated opaque routing.
 use super::*;
-use crate::creation_preparation::{Failure, Stage as PreparationStage, Trace};
+use crate::creation_preparation::{
+    Failure, Stage as PreparationStage, Trace, wait_for_recovery_health,
+};
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceIntent, NamespaceObjectKind,
     NamespaceOperation, NamespaceParent, StorageClassification,
@@ -728,6 +730,7 @@ impl DirectoryCreateTask {
             } => {
                 let trace = Arc::new(Trace::new());
                 let result = (|| {
+                    let mut health_wait = None;
                     trace.enter(PreparationStage::Job);
                     job.check()?;
                     let refs: Vec<_> = components.iter().map(String::as_str).collect();
@@ -736,8 +739,8 @@ impl DirectoryCreateTask {
                         &refs,
                         self.key.root,
                         self.key.authorization,
-                        job,
-                        current,
+                        job.clone(),
+                        current.clone(),
                         &trace,
                     )?;
                     trace.enter(PreparationStage::Current);
@@ -745,8 +748,17 @@ impl DirectoryCreateTask {
                     let space = session
                         .fresh_create_space()?
                         .with_preparation_trace(Arc::clone(&trace));
-                    trace.enter(PreparationStage::RecoveryBefore);
-                    if recovery.has_unresolved_for_fresh_create_in_space(&space)? {
+                    if wait_for_recovery_health(&job, &trace, &mut health_wait, || {
+                        trace.enter(PreparationStage::Job);
+                        job.check()?;
+                        trace.enter(PreparationStage::Current);
+                        if !current(self.key.authorization) {
+                            return Err(BackendError::Unavailable);
+                        }
+                        session.check()?;
+                        trace.enter(PreparationStage::RecoveryBefore);
+                        recovery.has_unresolved_for_fresh_create_in_space(&space)
+                    })? {
                         return Err(BackendError::Unavailable);
                     }
                     trace.enter(PreparationStage::Current);
@@ -757,8 +769,17 @@ impl DirectoryCreateTask {
                         .ok_or(BackendError::Unavailable)?;
                     trace.enter(PreparationStage::Current);
                     session.check()?;
-                    trace.enter(PreparationStage::RecoveryAfter);
-                    if recovery.has_unresolved_for_fresh_create_in_space(&space)? {
+                    if wait_for_recovery_health(&job, &trace, &mut health_wait, || {
+                        trace.enter(PreparationStage::Job);
+                        job.check()?;
+                        trace.enter(PreparationStage::Current);
+                        if !current(self.key.authorization) {
+                            return Err(BackendError::Unavailable);
+                        }
+                        session.check()?;
+                        trace.enter(PreparationStage::RecoveryAfter);
+                        recovery.has_unresolved_for_fresh_create_in_space(&space)
+                    })? {
                         return Err(BackendError::Unavailable);
                     }
                     trace.enter(PreparationStage::Current);

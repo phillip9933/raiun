@@ -150,6 +150,8 @@ stages! {
     TargetQualification => "target Space qualification failed",
     RecoveryScope => "recovery account and root binding check failed",
     RecoveryContext => "original protected recovery context check failed",
+    RecoveryQuotaOpen => "protected recovery quota file is unavailable",
+    RecoveryQuotaLock => "protected recovery quota lease is unavailable",
     RecoveryBefore => "protected recovery preparation check failed",
     RecoveryAfter => "protected recovery recheck failed",
     RecoveryStore => "protected intent-store preparation failed",
@@ -169,6 +171,64 @@ pub(crate) struct Failure {
     stage: Stage,
     category: Category,
 }
+impl Failure {
+    #[cfg(windows)]
+    fn is_recovery_quota_busy(self) -> bool {
+        self.category == Category::Busy
+            && matches!(
+                self.stage,
+                Stage::RecoveryQuotaOpen | Stage::RecoveryQuotaLock
+            )
+    }
+}
+
+/// Wait only for exact pre-capture quota contention, then rerun the original
+/// health query with all of its checks. The caller shares one allowance across
+/// both health queries in this Prepare invocation. This schedules work only;
+/// no retained evidence, failed check or pending result becomes authority.
+#[cfg(windows)]
+pub(crate) fn wait_for_recovery_health<T>(
+    job: &crate::StreamedRecoveryJob,
+    trace: &Trace,
+    wait_budget: &mut Option<crate::CancellationToken>,
+    mut operation: impl FnMut() -> Result<T, BackendError>,
+) -> Result<T, BackendError> {
+    let original_error = match operation() {
+        Ok(value) => return Ok(value),
+        Err(error) if trace.failure().is_recovery_quota_busy() => error,
+        Err(error) => return Err(error),
+    };
+    let original_failure = trace.failure();
+    let quota_error = || {
+        trace.enter(original_failure.stage);
+        trace.category(original_failure.category);
+        original_error
+    };
+    let budget = wait_budget.get_or_insert_with(|| job.cancellation().bounded_request());
+    let stopped = || job.is_stopped() || budget.is_cancelled() || budget.is_expired();
+    loop {
+        if stopped() {
+            return Err(quota_error());
+        }
+        let Some(remaining) = budget.remaining() else {
+            return Err(quota_error());
+        };
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+        if stopped() {
+            return Err(quota_error());
+        }
+        match operation() {
+            Ok(value) => {
+                if stopped() {
+                    return Err(quota_error());
+                }
+                return Ok(value);
+            }
+            Err(error) if !trace.failure().is_recovery_quota_busy() => return Err(error),
+            Err(_) => (),
+        }
+    }
+}
 
 pub(crate) struct Trace {
     detail: AtomicU32,
@@ -183,7 +243,8 @@ impl Trace {
         self.detail.store((stage as u32) << 16, Ordering::Release);
     }
     /// Preserve a more specific SDK/store category when an outer layer maps
-    /// its error to BackendError::Unavailable. Trace data never affects checks.
+    /// its error to BackendError::Unavailable. Classification may defer fresh
+    /// preparation; it never waives a health, custody or currentness check.
     pub(crate) fn category(&self, category: Category) {
         let mut current = self.detail.load(Ordering::Acquire);
         loop {
