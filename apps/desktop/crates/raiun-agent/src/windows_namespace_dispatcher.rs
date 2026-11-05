@@ -341,10 +341,15 @@ mod connected {
         DirectoryAction, NotificationBatch, ObserverPoll, RescanReason,
         directory_rename_hints::{RenameHintBatch, RenameHintReason, pair_move_hints},
     };
-    use std::{sync::Arc, time::Duration};
+    use std::{collections::VecDeque, sync::Arc, time::Duration};
+
+    const MAX_WAITING_BATCHES: usize = 16;
+    const MAX_QUEUED_HINTS: usize = MAX_WAITING_BATCHES * MAX_WORK;
 
     pub(crate) const HOLD: &str =
         "File namespace sync needs attention. Existing recovery files have been kept.";
+    const BACKLOG_LIMIT: &str =
+        "File namespace sync paused: notification backlog limit. Recovery files have been kept.";
     const BATCH_LIMIT: &str =
         "File namespace sync paused: notification batch limit. Recovery files have been kept.";
     const RENAME_LIMIT: &str =
@@ -433,6 +438,8 @@ mod connected {
         attached: bool,
         instance: Option<u64>,
         batch: Option<NotificationBatch>,
+        waiting_batches: VecDeque<NotificationBatch>,
+        queued_hints: usize,
         cursor: Cursor,
         hold_reason: Option<&'static str>,
         pending_files: Vec<(Vec<String>, u64)>,
@@ -497,6 +504,8 @@ mod connected {
                 attached: false,
                 instance: None,
                 batch: None,
+                waiting_batches: VecDeque::new(),
+                queued_hints: 0,
                 cursor: Cursor::default(),
                 hold_reason: None,
                 pending_files: Vec::new(),
@@ -552,6 +561,8 @@ mod connected {
             self.hold_reason.get_or_insert(HOLD);
             self.cursor.hold();
             self.batch = None;
+            self.waiting_batches.clear();
+            self.queued_hints = 0;
             self.pending_files.clear();
             if let Some(file) = &mut self.rename {
                 file.hold();
@@ -611,6 +622,66 @@ mod connected {
             }
             result
         }
+        /// Service transport even while an earlier batch waits on SDK/native
+        /// work. Keep complete batches in order on this original owner only.
+        fn pump_observer(
+            &mut self,
+            connection: &mut ConfiguredRootConnection,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            root: ConfiguredRootIdentity,
+        ) -> Result<(), &'static str> {
+            // Exactly one attach OR poll. The native wrapper rearms a valid
+            // completion immediately; held/stopped instances are never replaced.
+            let value = if self.attached {
+                connection.poll_namespace_observer(Duration::ZERO)
+            } else {
+                connection.attach_namespace_observer()
+            }
+            .map_err(|_| OBSERVER_UNAVAILABLE)?;
+            if value.root_identity() != root
+                || value.provider_scope() != backend.scope()
+                || value.instance() == 0
+                || self.instance.is_some_and(|id| id != value.instance())
+                || !self.current(backend, root)
+            {
+                return Err(CONTEXT_CHANGED);
+            }
+            self.attached = true;
+            self.instance = Some(value.instance());
+            match value.poll() {
+                ObserverPoll::Idle | ObserverPoll::Pending => Ok(()),
+                ObserverPoll::Stopped => Err(OBSERVER_STOPPED),
+                ObserverPoll::Batch(NotificationBatch::RescanRequired(reason)) => {
+                    Err(observer_hold(*reason))
+                }
+                ObserverPoll::Batch(batch @ NotificationBatch::Hints(hints)) => {
+                    // Inspect the complete batch before queueing, including a
+                    // malformed/ambiguous suffix. Never fuse batches or infer a
+                    // missing rename endpoint from a later completion.
+                    let pairs = match pair_move_hints(batch) {
+                        RenameHintBatch::Pairs(pairs) => pairs,
+                        RenameHintBatch::RescanRequired(reason) => {
+                            return Err(pairing_hold(reason));
+                        }
+                    };
+                    if pairs.len() > MAX_PAIRS {
+                        return Err(RENAME_LIMIT);
+                    }
+                    let queued_hints = self
+                        .queued_hints
+                        .checked_add(hints.len())
+                        .ok_or(BACKLOG_LIMIT)?;
+                    if self.waiting_batches.len() >= MAX_WAITING_BATCHES
+                        || queued_hints > MAX_QUEUED_HINTS
+                    {
+                        return Err(BACKLOG_LIMIT);
+                    }
+                    self.waiting_batches.push_back(batch.clone());
+                    self.queued_hints = queued_hints;
+                    Ok(())
+                }
+            }
+        }
         fn tick_inner(
             &mut self,
             connection: &mut ConfiguredRootConnection,
@@ -622,6 +693,7 @@ mod connected {
             if !self.current(backend, root) {
                 return Err(HOLD);
             }
+            self.pump_observer(connection, backend, root)?;
             if connection.namespace_file_operation_pending() {
                 return Ok(());
             }
@@ -691,124 +763,106 @@ mod connected {
                 self.batch = None;
             }
             if self.batch.is_none() {
-                // Exactly ONE attach OR poll; both methods preserve connection-
-                // owned kernel storage. Never reattach a held/stopped instance.
-                let value = if self.attached {
-                    connection.poll_namespace_observer(Duration::ZERO)
-                } else {
-                    connection.attach_namespace_observer()
+                let Some(batch) = self.waiting_batches.pop_front() else {
+                    return Ok(());
+                };
+                let NotificationBatch::Hints(hints) = &batch else {
+                    return Err(PLAN_STATE);
+                };
+                self.queued_hints = self
+                    .queued_hints
+                    .checked_sub(hints.len())
+                    .ok_or(PLAN_STATE)?;
+                // Retain original whole-batch validation at consumption. Queue
+                // membership remains only observation metadata, never authority.
+                let pairs = match pair_move_hints(&batch) {
+                    RenameHintBatch::Pairs(pairs) => pairs,
+                    RenameHintBatch::RescanRequired(reason) => return Err(pairing_hold(reason)),
+                };
+                if pairs.len() > MAX_PAIRS {
+                    return Err(RENAME_LIMIT);
                 }
-                .map_err(|_| OBSERVER_UNAVAILABLE)?;
-                if value.root_identity() != root
-                    || value.provider_scope() != backend.scope()
-                    || value.instance() == 0
-                    || self.instance.is_some_and(|id| id != value.instance())
-                    || !self.current(backend, root)
-                {
-                    return Err(CONTEXT_CHANGED);
-                }
-                self.attached = true;
-                self.instance = Some(value.instance());
-                match value.poll() {
-                    ObserverPoll::Idle | ObserverPoll::Pending => return Ok(()),
-                    ObserverPoll::Stopped => return Err(OBSERVER_STOPPED),
-                    ObserverPoll::Batch(batch) => {
-                        let pairs = match pair_move_hints(batch) {
-                            RenameHintBatch::Pairs(pairs) => pairs,
-                            RenameHintBatch::RescanRequired(reason) => {
-                                return Err(pairing_hold(reason));
-                            }
-                        };
-                        if pairs.len() > MAX_PAIRS {
-                            return Err(RENAME_LIMIT);
-                        }
-                        let NotificationBatch::Hints(hints) = batch else {
-                            return Err(PLAN_STATE);
-                        };
-                        let inputs = hints
+                let inputs = hints
+                    .iter()
+                    .map(|hint| Hint {
+                        action: match hint.action() {
+                            DirectoryAction::Added => Action::Added,
+                            DirectoryAction::Modified => Action::Modified,
+                            DirectoryAction::Removed => Action::Removed,
+                            DirectoryAction::RenamedOldName => Action::Old,
+                            DirectoryAction::RenamedNewName => Action::New,
+                        },
+                        components: hint.components(),
+                    })
+                    .collect::<Vec<_>>();
+                let mut accounted = inputs
+                    .iter()
+                    .map(|hint| {
+                        let refs = hint
+                            .components
                             .iter()
-                            .map(|hint| Hint {
-                                action: match hint.action() {
-                                    DirectoryAction::Added => Action::Added,
-                                    DirectoryAction::Modified => Action::Modified,
-                                    DirectoryAction::Removed => Action::Removed,
-                                    DirectoryAction::RenamedOldName => Action::Old,
-                                    DirectoryAction::RenamedNewName => Action::New,
-                                },
-                                components: hint.components(),
-                            })
+                            .map(String::as_str)
                             .collect::<Vec<_>>();
-                        let mut accounted = inputs
+                        connection
+                            .completed_file_replacement(&refs)
+                            .map_err(|_| OWNER_HOLD)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                // A published replacement may arrive as temp->target.
+                // Suppress both pair endpoints only when the actual new
+                // target still matches that ORIGINAL completed receipt.
+                let mut retired_sources = Vec::new();
+                for i in 0..inputs.len().saturating_sub(1) {
+                    if inputs[i].action == Action::Old
+                        && inputs[i + 1].action == Action::New
+                        && accounted[i + 1]
+                        && inputs[i].components.len() == inputs[i + 1].components.len()
+                        && inputs[i].components[..inputs[i].components.len() - 1]
+                            == inputs[i + 1].components[..inputs[i + 1].components.len() - 1]
+                    {
+                        let old = inputs[i]
+                            .components
                             .iter()
-                            .map(|hint| {
-                                let refs = hint
-                                    .components
-                                    .iter()
-                                    .map(String::as_str)
-                                    .collect::<Vec<_>>();
-                                connection
-                                    .completed_file_replacement(&refs)
-                                    .map_err(|_| OWNER_HOLD)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        // A published replacement may arrive as temp->target.
-                        // Suppress both pair endpoints only when the actual new
-                        // target still matches that ORIGINAL completed receipt.
-                        let mut retired_sources = Vec::new();
-                        for i in 0..inputs.len().saturating_sub(1) {
-                            if inputs[i].action == Action::Old
-                                && inputs[i + 1].action == Action::New
-                                && accounted[i + 1]
-                                && inputs[i].components.len() == inputs[i + 1].components.len()
-                                && inputs[i].components[..inputs[i].components.len() - 1]
-                                    == inputs[i + 1].components
-                                        [..inputs[i + 1].components.len() - 1]
-                            {
-                                let old = inputs[i]
-                                    .components
-                                    .iter()
-                                    .map(String::as_str)
-                                    .collect::<Vec<_>>();
-                                let new = inputs[i + 1]
-                                    .components
-                                    .iter()
-                                    .map(String::as_str)
-                                    .collect::<Vec<_>>();
-                                if !connection
-                                    .completed_replacement_source_absent(&old, &new)
-                                    .map_err(|_| OWNER_HOLD)?
-                                {
-                                    return Err(OWNER_HOLD);
-                                }
-                                accounted[i] = true;
-                                retired_sources.push(inputs[i].components);
-                            }
+                            .map(String::as_str)
+                            .collect::<Vec<_>>();
+                        let new = inputs[i + 1]
+                            .components
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>();
+                        if !connection
+                            .completed_replacement_source_absent(&old, &new)
+                            .map_err(|_| OWNER_HOLD)?
+                        {
+                            return Err(OWNER_HOLD);
                         }
-                        for (i, hint) in inputs.iter().enumerate() {
-                            if retired_sources.iter().any(|old| *old == hint.components) {
-                                accounted[i] = true;
-                            }
-                        }
-                        let work = route_accounted(
-                            &inputs,
-                            self.mkdir.is_some()
-                                || self
-                                    .create
-                                    .as_ref()
-                                    .is_some_and(create::Producer::allows_directory),
-                            self.create.is_some(),
-                            &accounted,
-                        )
-                        .map_err(plan_hold)?;
-                        if work.is_empty() {
-                            return Ok(());
-                        }
-                        self.cursor.admit(work).map_err(plan_hold)?;
-                        // Only untrusted notification data is cloned, not any
-                        // admission, publication receipt, store or native lease.
-                        self.batch = Some(batch.clone());
+                        accounted[i] = true;
+                        retired_sources.push(inputs[i].components);
                     }
                 }
+                for (i, hint) in inputs.iter().enumerate() {
+                    if retired_sources.iter().any(|old| *old == hint.components) {
+                        accounted[i] = true;
+                    }
+                }
+                let work = route_accounted(
+                    &inputs,
+                    self.mkdir.is_some()
+                        || self
+                            .create
+                            .as_ref()
+                            .is_some_and(create::Producer::allows_directory),
+                    self.create.is_some(),
+                    &accounted,
+                )
+                .map_err(plan_hold)?;
+                if work.is_empty() {
+                    return Ok(());
+                }
+                self.cursor.admit(work).map_err(plan_hold)?;
+                // Only untrusted notification data is cloned, not any
+                // admission, publication receipt, store or native lease.
+                self.batch = Some(batch.clone());
             }
             if !self.current(backend, root) {
                 return Err(HOLD);

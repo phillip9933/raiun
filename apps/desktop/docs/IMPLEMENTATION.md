@@ -4629,3 +4629,13 @@ Graph permission hints recognize complete supported role names, including
 role names or identifiers do not establish writability; `viewer` is read-only.
 Missing Graph permission metadata remains only a discovery hint. Original DAV
 root and parent permission checks still decide whether creation can proceed.
+
+The Windows namespace dispatcher services its original owner-thread observer
+before waiting on active file waves, native operations or paused execution.
+Up to 16 complete batches and 16,384 hints wait in a bounded FIFO; intake does not
+perform cloud work or grant native ownership. Existing full-batch planning, rename
+validation and file-wave completion order govern consumption. Actual observer
+loss, invalid context or a full backlog still holds the dispatcher and preserves
+recovery; intake never substitutes a rescan or adopts unobserved filesystem data.
+Collection still depends on timely owner ticks; this removes whole-batch polling
+starvation without promising loss-free intake during every synchronous owner call.
