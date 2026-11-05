@@ -62,6 +62,8 @@ pub(crate) struct NamespaceHistorySummary {
     pub(crate) file_records: usize,
     pub(crate) file_unresolved: usize,
     pub(crate) file_acknowledged_join_gaps: usize,
+    pub(crate) file_pending_classifications:
+        Vec<namespace_file_store::PendingFileCreateClassification>,
     pub(crate) delete_evidence: bool,
     pub(crate) delete_records: usize,
     pub(crate) delete_unresolved: usize,
@@ -122,6 +124,29 @@ pub(super) fn history_summary_existing(
     policy: StorePolicy,
     provider: &crate::ProviderScope,
     physical_root: crate::ConfiguredRootIdentity,
+) -> Result<NamespaceHistorySummary, StoreError> {
+    history_summary_existing_inner(root, protector, policy, provider, physical_root, false)
+}
+
+/// Explicit diagnostics only; regular health/admission scans retain their
+/// existing cost and do not inspect additional original snapshot histories.
+pub(super) fn history_summary_diagnostic_existing(
+    root: Option<Arc<dyn Directory>>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+) -> Result<NamespaceHistorySummary, StoreError> {
+    history_summary_existing_inner(root, protector, policy, provider, physical_root, true)
+}
+
+fn history_summary_existing_inner(
+    root: Option<Arc<dyn Directory>>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+    include_details: bool,
 ) -> Result<NamespaceHistorySummary, StoreError> {
     let mut budget = scan_budget(policy)?;
     if physical_root.file_index == 0
@@ -253,8 +278,8 @@ pub(super) fn history_summary_existing(
                     .ok_or(StoreError::ScanLimit)?,
             )
             .ok_or(StoreError::ScanLimit)?;
-        let (records, unresolved, acknowledged_join_gaps) =
-            namespace_file_store::history_counts_with_acknowledged_gaps_existing(
+        let (records, unresolved, acknowledged_join_gaps, classifications) = if include_details {
+            namespace_file_store::history_counts_detailed_existing(
                 Arc::clone(&root),
                 Arc::clone(&protector),
                 policy,
@@ -262,10 +287,24 @@ pub(super) fn history_summary_existing(
                 physical_root,
                 &mut budget,
                 remaining,
-            )?;
+            )?
+        } else {
+            let (records, unresolved, gaps) =
+                namespace_file_store::history_counts_with_acknowledged_gaps_existing(
+                    Arc::clone(&root),
+                    Arc::clone(&protector),
+                    policy,
+                    provider,
+                    physical_root,
+                    &mut budget,
+                    remaining,
+                )?;
+            (records, unresolved, gaps, Vec::new())
+        };
         result.file_records += records;
         result.file_unresolved += unresolved;
         result.file_acknowledged_join_gaps += acknowledged_join_gaps;
+        result.file_pending_classifications = classifications;
     }
     if result.delete_evidence {
         let remaining = MAX_RECORDS

@@ -1534,6 +1534,7 @@ impl ProviderManager {
                                     "file_records": summary.file_records,
                                     "file_unresolved": summary.file_unresolved,
                                     "file_acknowledged_join_gaps": summary.file_acknowledged_join_gaps,
+                                    "file_pending_classifications": summary.file_pending_classifications,
                                     "delete_records": summary.delete_records,
                                     "delete_unresolved": summary.delete_unresolved,
                                 }));

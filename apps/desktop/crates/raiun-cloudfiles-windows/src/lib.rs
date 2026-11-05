@@ -309,9 +309,12 @@ pub struct VaultCleanupDiagnostics {
     pub inventory_complete: Option<bool>,
 }
 
+#[cfg(windows)]
+pub use streamed_store::namespace_file_store::PendingFileCreateClassification;
+
 /// Authenticated namespace metadata counts; no bodies or recovery authority.
 #[cfg(windows)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NamespaceRecoverySummary {
     pub rename_records: usize,
     pub rename_unresolved: usize,
@@ -322,6 +325,8 @@ pub struct NamespaceRecoverySummary {
     /// Historical original native ACK0/0, with the join event still incomplete.
     /// This is not current-content verification or cleanup/recovery authority.
     pub file_acknowledged_join_gaps: usize,
+    /// Static authenticated phase histogram, populated by explicit diagnostics.
+    pub file_pending_classifications: Vec<PendingFileCreateClassification>,
     pub delete_records: usize,
     pub delete_unresolved: usize,
 }

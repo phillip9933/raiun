@@ -50,6 +50,28 @@ pub(super) fn namespace_history_summary(
     provider: &crate::ProviderScope,
     physical_root: crate::ConfiguredRootIdentity,
 ) -> Result<crate::streamed_store::namespace_rename_store::NamespaceHistorySummary, BackendError> {
+    namespace_history_query(namespace, streamed, catalog, provider, physical_root, false)
+}
+
+/// Pending phase details are read only for an explicit support request.
+pub(super) fn namespace_history_diagnostics(
+    namespace: Option<&NamespaceRenameStoreContext>,
+    streamed: Option<&StreamedRecoveryContext>,
+    catalog: &ScopeCatalog,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+) -> Result<crate::streamed_store::namespace_rename_store::NamespaceHistorySummary, BackendError> {
+    namespace_history_query(namespace, streamed, catalog, provider, physical_root, true)
+}
+
+fn namespace_history_query(
+    namespace: Option<&NamespaceRenameStoreContext>,
+    streamed: Option<&StreamedRecoveryContext>,
+    catalog: &ScopeCatalog,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+    diagnostics: bool,
+) -> Result<crate::streamed_store::namespace_rename_store::NamespaceHistorySummary, BackendError> {
     if !super::valid_scope_binding(provider, physical_root) {
         return Err(BackendError::Unavailable);
     }
@@ -97,7 +119,12 @@ pub(super) fn namespace_history_summary(
         };
         (state, policy)
     };
-    let summary = crate::streamed_store::SnapshotStore::namespace_history_summary_existing(
+    let inspect = if diagnostics {
+        crate::streamed_store::SnapshotStore::namespace_history_diagnostic_existing
+    } else {
+        crate::streamed_store::SnapshotStore::namespace_history_summary_existing
+    };
+    let summary = inspect(
         state,
         Arc::clone(&catalog.protector),
         policy,

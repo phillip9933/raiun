@@ -294,6 +294,26 @@ impl SnapshotStore {
         )
     }
 
+    /// Explicit support inspection only; adds bounded static pending phases.
+    /// Ordinary guards keep using the lighter summary without these reads.
+    #[cfg(windows)]
+    pub(crate) fn namespace_history_diagnostic_existing(
+        admitted_state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+        provider: &crate::ProviderScope,
+        root: crate::ConfiguredRootIdentity,
+    ) -> Result<namespace_rename_store::NamespaceHistorySummary, StoreError> {
+        policy.validate()?;
+        namespace_rename_store::history_summary_diagnostic_existing(
+            windows::existing_root(admitted_state, V2_STORE_ROOT)?,
+            protector,
+            policy,
+            provider,
+            root,
+        )
+    }
+
     /// Point-in-time content health for one authenticated provider/root. The
     /// existing v2 quota lease spans global catalog validation, v2 metadata
     /// discovery and the caller's bounded legacy scan. Namespace record bodies

@@ -298,6 +298,18 @@ impl SnapshotStore {
                 attempts: 0,
             }))
     }
+    /// Authenticate only an already referenced create snapshot's event state.
+    /// The caller supplies its validated manifest and existing directory; no
+    /// body handle, storage setup or recovery/native authority is acquired.
+    pub(super) fn create_original_state_metadata(
+        &self,
+        manifest: &SnapshotManifest,
+        directory: &dyn Directory,
+        budget: &mut Budget,
+    ) -> Result<StreamedAttemptState, StoreError> {
+        let key = StreamedRecordKey::from_manifest(manifest)?;
+        Ok(self.read_history(directory, &key, budget)?.state)
+    }
     /// Authenticate one continued file-create edit under the caller's existing
     /// scan budget. This is a metadata/state check, not a native or upload permit.
     #[cfg(windows)]

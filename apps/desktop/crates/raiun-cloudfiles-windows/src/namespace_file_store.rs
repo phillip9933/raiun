@@ -12,6 +12,108 @@ const DOMAIN: &[u8] = b"raiun/namespace-file-join/v1\0";
 const MAX_RECORDS: usize = 2000;
 const MAX_SCOPES: usize = 256;
 
+/// Authenticated support metadata grouped without record IDs, paths or report
+/// text. These historical categories grant no native or recovery authority.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct PendingFileCreateClassification {
+    pub phase: &'static str,
+    pub attention: &'static str,
+    pub sequence: u64,
+    pub local_completed: bool,
+    pub continued: bool,
+    pub snapshot_state: &'static str,
+    pub attempt_id: Option<u64>,
+    pub attempts: Option<u8>,
+    pub eligible: bool,
+    pub exclusion: &'static str,
+    pub count: usize,
+}
+
+fn pending_classification(
+    loaded: &Loaded,
+    state: StreamedAttemptState,
+    eligible: bool,
+) -> PendingFileCreateClassification {
+    let progress = loaded.record.progress;
+    let phase = match progress.remote {
+        NamespacePhase::Pending => "pending",
+        NamespacePhase::Submitted => "submitted",
+        NamespacePhase::Verified => "verified",
+    };
+    let attention = match progress.attention {
+        None => "none",
+        Some(NamespaceAttention::Conflict) => "conflict",
+        Some(NamespaceAttention::Deferred) => "deferred",
+        Some(NamespaceAttention::Uncertain) => "uncertain",
+    };
+    let (snapshot_state, attempt_id, attempts) = match state {
+        StreamedAttemptState::NotAttempted => ("not_attempted", None, None),
+        StreamedAttemptState::Uncertain { attempt_id } => ("uncertain", Some(attempt_id), None),
+        StreamedAttemptState::VerifiedApplied {
+            attempt_id,
+            attempts,
+        } => ("verified_applied", Some(attempt_id), Some(attempts)),
+        StreamedAttemptState::Conflict {
+            attempt_id,
+            attempts,
+        } => ("conflict", Some(attempt_id), Some(attempts)),
+        StreamedAttemptState::Ambiguous {
+            attempt_id,
+            attempts,
+        } => ("ambiguous", Some(attempt_id), Some(attempts)),
+        StreamedAttemptState::Deferred {
+            attempt_id,
+            attempts,
+        } => ("deferred", Some(attempt_id), Some(attempts)),
+        StreamedAttemptState::LocallyAcknowledged {
+            attempt_id: 0,
+            attempts: 0,
+        } => ("acknowledged_zero_attempt", Some(0), Some(0)),
+        StreamedAttemptState::LocallyAcknowledged {
+            attempt_id,
+            attempts,
+        } => (
+            "acknowledged_nonzero_attempt",
+            Some(attempt_id),
+            Some(attempts),
+        ),
+        StreamedAttemptState::Superseded {
+            attempt_id,
+            attempts,
+        } => ("superseded", Some(attempt_id), Some(attempts)),
+    };
+    // This describes the existing classifier's first exclusion; it never
+    // substitutes for that classifier's authenticated eligibility decision.
+    let exclusion = if progress.remote != NamespacePhase::Verified {
+        "remote_not_verified"
+    } else if progress.attention.is_some() {
+        "attention_present"
+    } else if progress.continued {
+        "continued"
+    } else if progress.local_completed {
+        "local_completed"
+    } else if progress.recorded_complete {
+        "recorded_complete"
+    } else if eligible {
+        "eligible"
+    } else {
+        "snapshot_not_zero_attempt_ack"
+    };
+    PendingFileCreateClassification {
+        phase,
+        attention,
+        sequence: progress.sequence,
+        local_completed: progress.local_completed,
+        continued: progress.continued,
+        snapshot_state,
+        attempt_id,
+        attempts,
+        eligible,
+        exclusion,
+        count: 0,
+    }
+}
+
 /// Checked path syntax/correspondence ONLY. It proves no native ancestry,
 /// current generation, ordinary classification or authorization.
 pub struct CapturedCreatePath {
@@ -1424,11 +1526,45 @@ pub(super) fn history_counts_with_acknowledged_gaps_existing(
     budget: &mut Budget,
     remaining: usize,
 ) -> Result<(usize, usize, usize), StoreError> {
+    history_counts_existing_inner(
+        root, protector, policy, provider, physical, budget, remaining, false,
+    )
+    .map(|(records, unresolved, gaps, _)| (records, unresolved, gaps))
+}
+
+/// Explicit support inspection only. Original snapshot history is authenticated
+/// even when the ACK-gap classifier excludes the namespace phase immediately.
+pub(super) fn history_counts_detailed_existing(
+    root: Arc<dyn Directory>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+) -> Result<(usize, usize, usize, Vec<PendingFileCreateClassification>), StoreError> {
+    history_counts_existing_inner(
+        root, protector, policy, provider, physical, budget, remaining, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_counts_existing_inner(
+    root: Arc<dyn Directory>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+    include_details: bool,
+) -> Result<(usize, usize, usize, Vec<PendingFileCreateClassification>), StoreError> {
     let files = root.child(ROOT, false)?;
     let scopes = catalogs(&*files, &*protector, budget)?;
     let mut records = 0usize;
     let mut unresolved = 0usize;
     let mut acknowledged_join_gaps = 0usize;
+    let mut classifications = std::collections::BTreeMap::new();
     for (key, scope) in scopes {
         let directory = files.child(&key, false)?;
         let names = directory.entries(budget.remaining_entries())?;
@@ -1478,15 +1614,37 @@ pub(super) fn history_counts_with_acknowledged_gaps_existing(
                 let loaded =
                     decoder.load_names_checked(&*directory, &id, &scope, &names, budget, false)?;
                 unresolved += usize::from(!loaded.record.progress.recorded_complete);
-                acknowledged_join_gaps +=
-                    usize::from(decoder.acknowledged_original(&loaded, budget)?);
+                let eligible = decoder.acknowledged_original(&loaded, budget)?;
+                acknowledged_join_gaps += usize::from(eligible);
+                if include_details && !loaded.record.progress.recorded_complete {
+                    let (manifest, original_directory) = decoder.reference_manifest_metadata(
+                        &loaded.record.joined,
+                        &loaded.record.key.scope,
+                        budget,
+                    )?;
+                    let state = decoder.base.create_original_state_metadata(
+                        &manifest,
+                        &*original_directory,
+                        budget,
+                    )?;
+                    let classification = pending_classification(&loaded, state, eligible);
+                    let count = classifications.entry(classification).or_insert(0usize);
+                    *count = count.checked_add(1).ok_or(StoreError::ScanLimit)?;
+                }
             }
         }
         directory.verify()?;
     }
     files.verify()?;
     root.verify()?;
-    Ok((records, unresolved, acknowledged_join_gaps))
+    let classifications = classifications
+        .into_iter()
+        .map(|(mut row, count)| {
+            row.count = count;
+            row
+        })
+        .collect();
+    Ok((records, unresolved, acknowledged_join_gaps, classifications))
 }
 
 pub(super) fn accounted_usage(

@@ -72,6 +72,12 @@ deletion. This uses the original prepared account/root context and the existing
 bounded metadata reader; it reads no file bodies and grants no recovery action.
 Unsupported, corrupt, incomplete or unconfigured history is explicitly unavailable,
 not an empty result. Namespace counts do not describe legacy content recovery.
+The explicit support query also groups pending file-create records by fixed
+namespace phase, attention and authenticated original snapshot-state categories.
+It includes no paths, record identifiers or server text, opens no body handles,
+and uses the same bounded metadata budget and quota lease. These extra reads
+run only for requested diagnostics, never ordinary status or admission scans;
+they grant no retry, completion, cleanup or other recovery authority.
 
 An acknowledged original snapshot remains selectable while its file-create join
 is incomplete. Snapshot and join discovery share one bounded metadata allowance

@@ -1978,7 +1978,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
 
     #[cfg(windows)]
     fn namespace_recovery_summary(&self) -> Result<crate::NamespaceRecoverySummary, BackendError> {
-        let summary = namespace_storage::namespace_history_summary(
+        let summary = namespace_storage::namespace_history_diagnostics(
             self.namespace_rename.as_ref(),
             self.streamed.as_ref(),
             &self.catalog,
@@ -1999,6 +1999,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             file_records: summary.file_records,
             file_unresolved: summary.file_unresolved,
             file_acknowledged_join_gaps: summary.file_acknowledged_join_gaps,
+            file_pending_classifications: summary.file_pending_classifications,
             delete_records: summary.delete_records,
             delete_unresolved: summary.delete_unresolved,
         })
