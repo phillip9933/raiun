@@ -1,5 +1,7 @@
 //! One explicit create attempt; remote facts never authorize native completion.
+use super::namespace::preparation_stage;
 use super::*;
+use crate::creation_preparation::{Stage as PreparationStage, Trace as PreparationTrace};
 use crate::namespace_intent::{
     CapturedAuthorization, NamespaceDestinationReport, NamespaceIntent, NamespaceOperation,
 };
@@ -43,9 +45,17 @@ impl Admission {
         &self,
         backend: &Arc<OpenCloudPlaceholderBackend>,
     ) -> Result<(), BackendError> {
+        self.qualify_target_with_trace(backend, None)
+    }
+    fn qualify_target_with_trace(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        trace: Option<&PreparationTrace>,
+    ) -> Result<(), BackendError> {
+        preparation_stage(trace, PreparationStage::Current);
         self.check(backend)?;
         let metadata = self.job.cancellation().bounded_request();
-        namespace::qualify_create_target(
+        namespace::qualify_create_target_with_trace(
             backend,
             &self.parent.scope,
             &self.parent_components,
@@ -53,8 +63,10 @@ impl Admission {
                 deadline: metadata.deadline(),
                 token_generation: self.auth.token_generation,
             },
+            trace,
         )
         .map_err(|error| backend.reject_cached_cloud_error(error))?;
+        preparation_stage(trace, PreparationStage::Current);
         self.check(backend)
     }
     pub(crate) fn capture_job(&self) -> crate::StreamedRecoveryJob {
@@ -428,10 +440,41 @@ impl OpenCloudPlaceholderBackend {
         job: &crate::StreamedRecoveryJob,
         current: Current,
     ) -> Result<Admission, BackendError> {
+        self.admit_file_create_with_trace(components, root, auth, job, current, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn admit_file_create_traced(
+        self: &Arc<Self>,
+        components: &[&str],
+        root: crate::ConfiguredRootIdentity,
+        auth: CapturedAuthorization,
+        job: &crate::StreamedRecoveryJob,
+        current: Current,
+        trace: &PreparationTrace,
+    ) -> Result<Admission, BackendError> {
+        self.admit_file_create_with_trace(components, root, auth, job, current, Some(trace))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn admit_file_create_with_trace(
+        self: &Arc<Self>,
+        components: &[&str],
+        root: crate::ConfiguredRootIdentity,
+        auth: CapturedAuthorization,
+        job: &crate::StreamedRecoveryJob,
+        current: Current,
+        trace: Option<&PreparationTrace>,
+    ) -> Result<Admission, BackendError> {
+        preparation_stage(trace, PreparationStage::Job);
         job.check()?;
-        if !current(auth) || crate::personal_create_relative(components, "probe").is_none() {
+        preparation_stage(trace, PreparationStage::Current);
+        if !current(auth) {
             return Err(BackendError::Unavailable);
         }
+        preparation_stage(trace, PreparationStage::ParentRoute);
+        if crate::personal_create_relative(components, "probe").is_none() {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::Catalog);
         let catalog = self
             .identity_catalog
             .clone()
@@ -453,21 +496,32 @@ impl OpenCloudPlaceholderBackend {
         // Bound this complete metadata phase while keeping the ORIGINAL job
         // deadline/epoch for admission/body. No backend lease escapes discovery.
         let metadata = job.cancellation().bounded_request();
+        preparation_stage(trace, PreparationStage::ParentRoute);
         let parent = {
             let _lease = self
                 .lease_gate
                 .read()
                 .map_err(|_| BackendError::Unavailable)?;
-            self.capture_namespace_parent_under_lease(components, root, auth, &metadata)?
+            match trace {
+                Some(trace) => self.capture_namespace_parent_under_lease_traced(
+                    components, root, auth, &metadata, trace,
+                ),
+                None => {
+                    self.capture_namespace_parent_under_lease(components, root, auth, &metadata)
+                }
+            }?
         };
         let prefix = if components.first().copied() == Some("Personal") {
             1
         } else {
             2
         };
-        if catalog_scope.local_root() != root
-            || parent.path != format!("/{}", components[prefix..].join("/"))
-        {
+        preparation_stage(trace, PreparationStage::Catalog);
+        if catalog_scope.local_root() != root {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::ParentRoute);
+        if parent.path != format!("/{}", components[prefix..].join("/")) {
             return Err(BackendError::Unavailable);
         }
         let result = Admission {
@@ -481,7 +535,7 @@ impl OpenCloudPlaceholderBackend {
             attempted: false,
             backend: Arc::downgrade(self),
         };
-        result.qualify_target(self)?;
+        result.qualify_target_with_trace(self, trace)?;
         Ok(result)
     }
 }

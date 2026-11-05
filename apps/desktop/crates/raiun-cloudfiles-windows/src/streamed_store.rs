@@ -440,128 +440,184 @@ impl SnapshotStore {
         physical_root: crate::ConfiguredRootIdentity,
         candidate_scope: &EditJournalScope,
         namespace_configured: bool,
+        trace: Option<&crate::creation_preparation::Trace>,
         scan_legacy: impl FnOnce(&mut DiscoveryBudget) -> Result<bool, StoreError>,
     ) -> Result<bool, StoreError> {
-        policy.validate()?;
-        validate_scope(candidate_scope)?;
-        if physical_root.file_index == 0
-            || candidate_scope.profile_id != provider.profile_id()
-            || candidate_scope.account_subject != provider.account_id()
-            || candidate_scope.server_origin != provider.server_origin()
-            || candidate_scope.root_volume_serial != physical_root.volume_serial
-            || candidate_scope.root_file_index != physical_root.file_index
-            || raiun_opencloud::validate_captured_server_origin(provider.server_origin()).is_err()
-        {
-            return Err(StoreError::Invalid);
-        }
-        policy.max_entries = policy.max_entries.min(20_000);
-        policy.max_metadata_bytes_per_scan =
-            policy.max_metadata_bytes_per_scan.min(64 * 1024 * 1024);
-        let mut budget = DiscoveryBudget::new(policy);
-        let Some(root) = windows::existing_root(Arc::clone(&admitted_state), V2_STORE_ROOT)? else {
-            let pending = scan_legacy(&mut budget)?;
-            admitted_state.verify_path().map_err(io_error)?;
-            if windows::existing_root(Arc::clone(&admitted_state), V2_STORE_ROOT)?.is_some() {
+        (|| {
+            policy.validate()?;
+            validate_scope(candidate_scope)?;
+            if physical_root.file_index == 0
+                || candidate_scope.profile_id != provider.profile_id()
+                || candidate_scope.account_subject != provider.account_id()
+                || candidate_scope.server_origin != provider.server_origin()
+                || candidate_scope.root_volume_serial != physical_root.volume_serial
+                || candidate_scope.root_file_index != physical_root.file_index
+                || raiun_opencloud::validate_captured_server_origin(provider.server_origin())
+                    .is_err()
+            {
+                return Err(StoreError::Invalid);
+            }
+            policy.max_entries = policy.max_entries.min(20_000);
+            policy.max_metadata_bytes_per_scan =
+                policy.max_metadata_bytes_per_scan.min(64 * 1024 * 1024);
+            let mut budget = DiscoveryBudget::new(policy);
+            let Some(root) = windows::existing_root(Arc::clone(&admitted_state), V2_STORE_ROOT)?
+            else {
+                if let Some(trace) = trace {
+                    trace.enter(crate::creation_preparation::Stage::LegacyScan);
+                }
+                let pending = scan_legacy(&mut budget)?;
+                if let Some(trace) = trace {
+                    trace.enter(crate::creation_preparation::Stage::RecoveryFinal);
+                }
+                admitted_state.verify_path().map_err(io_error)?;
+                if windows::existing_root(Arc::clone(&admitted_state), V2_STORE_ROOT)?.is_some() {
+                    return Err(StoreError::IncompleteEvidence);
+                }
+                if pending && let Some(trace) = trace {
+                    trace.enter(crate::creation_preparation::Stage::LegacyPending);
+                    trace.category(crate::creation_preparation::Category::Pending);
+                }
+                return Ok(pending);
+            };
+            root.verify()?;
+            let names = root.entries(budget.remaining_entries())?;
+            budget.entries(names.len())?;
+            if !names.iter().any(|name| name == V2_QUOTA_LOCK) {
                 return Err(StoreError::IncompleteEvidence);
             }
-            return Ok(pending);
-        };
-        root.verify()?;
-        let names = root.entries(budget.remaining_entries())?;
-        budget.entries(names.len())?;
-        if !names.iter().any(|name| name == V2_QUOTA_LOCK) {
-            return Err(StoreError::IncompleteEvidence);
-        }
-        let mut lock = root.open_quota_lock()?;
-        if lock.len()? != 0 {
-            return Err(StoreError::CorruptEvidence);
-        }
-        lock.lock_exclusive()?;
-        lock.verify()?;
-        root.verify()?;
-        admitted_state.verify_path().map_err(io_error)?;
+            let mut lock = root.open_quota_lock()?;
+            if lock.len()? != 0 {
+                return Err(StoreError::CorruptEvidence);
+            }
+            lock.lock_exclusive()?;
+            lock.verify()?;
+            root.verify()?;
+            admitted_state.verify_path().map_err(io_error)?;
 
-        let (summary, exemptions) =
-            namespace_rename_store::history_summary_for_fresh_create_space_existing_locked(
-                Arc::clone(&root),
-                Arc::clone(&protector),
-                policy,
-                provider,
-                physical_root,
-                candidate_scope,
-                &mut budget,
-            )?;
-        // Keep every unknown/unconfigured-format and summary-bound refusal.
-        // The old ACK gap remains the only existing namespace-only exception.
-        let _ = namespace_rename_store::history_unresolved_for_fresh_create(
-            &summary,
-            namespace_configured,
-        )
-        .map_err(|_| StoreError::IncompleteEvidence)?;
-        let excluded_files = summary
-            .file_acknowledged_join_gaps
-            .checked_add(exemptions.len())
-            .ok_or(StoreError::ScanLimit)?;
-        let remaining_files = summary
-            .file_unresolved
-            .checked_sub(excluded_files)
-            .ok_or(StoreError::CorruptEvidence)?;
-        let mut pending = summary.unresolved != 0
-            || summary.directory_unresolved != 0
-            || summary.delete_unresolved != 0
-            || remaining_files != 0;
-        let mut matched = vec![false; exemptions.len()];
+            if let Some(trace) = trace {
+                trace.enter(crate::creation_preparation::Stage::NamespaceScan);
+            }
+            let (summary, exemptions) =
+                namespace_rename_store::history_summary_for_fresh_create_space_existing_locked(
+                    Arc::clone(&root),
+                    Arc::clone(&protector),
+                    policy,
+                    provider,
+                    physical_root,
+                    candidate_scope,
+                    &mut budget,
+                )?;
+            // Keep every unknown/unconfigured-format and summary-bound refusal.
+            // The old ACK gap remains the only existing namespace-only exception.
+            if let Some(trace) = trace {
+                trace.enter(crate::creation_preparation::Stage::NamespaceValidation);
+            }
+            let _ = namespace_rename_store::history_unresolved_for_fresh_create(
+                &summary,
+                namespace_configured,
+            )
+            .map_err(|_| StoreError::IncompleteEvidence)?;
+            let excluded_files = summary
+                .file_acknowledged_join_gaps
+                .checked_add(exemptions.len())
+                .ok_or(StoreError::ScanLimit)?;
+            let remaining_files = summary
+                .file_unresolved
+                .checked_sub(excluded_files)
+                .ok_or(StoreError::CorruptEvidence)?;
+            let namespace_pending = summary.unresolved != 0
+                || summary.directory_unresolved != 0
+                || summary.delete_unresolved != 0
+                || remaining_files != 0;
+            let mut matched = vec![false; exemptions.len()];
 
-        // The same retained root/quota lease covers the content view. Preserve
-        // its existing body length/pin checks and legacy read policy; no body
-        // bytes are decoded by this v2 metadata traversal.
-        let names = root.entries(budget.remaining_entries())?;
-        budget.entries(names.len())?;
-        let catalogs = validate_root_catalog_scope_union(&*root, &*protector, &names, &mut budget)?;
-        let mut record_count = 0usize;
-        let mut seen = std::collections::HashSet::new();
-        for scope in catalogs.snapshots.into_iter().filter(|scope| {
-            scope.profile_id == provider.profile_id()
-                && scope.server_origin == provider.server_origin()
-                && scope.account_subject == provider.account_id()
-                && scope.root_volume_serial == physical_root.volume_serial
-                && scope.root_file_index == physical_root.file_index
-        }) {
-            let store = SnapshotStore::from_directory(
-                Arc::clone(&root),
-                scope,
-                Arc::clone(&protector),
-                policy,
-            )?;
-            for record in store.discover_records_bounded(&mut budget)? {
-                record_count = record_count.checked_add(1).ok_or(StoreError::ScanLimit)?;
-                if record_count > 2_000
-                    || !seen.insert((record.key.record_id().to_owned(), record.key.generation()))
-                {
-                    return Err(StoreError::ScanLimit);
-                }
-                if let Some(index) = exemptions.iter().position(|key| key == &record.key) {
-                    if matched[index] || record.state != StreamedAttemptState::NotAttempted {
-                        return Err(StoreError::CorruptEvidence);
+            // The same retained root/quota lease covers the content view. Preserve
+            // its existing body length/pin checks and legacy read policy; no body
+            // bytes are decoded by this v2 metadata traversal.
+            if let Some(trace) = trace {
+                trace.enter(crate::creation_preparation::Stage::SnapshotScan);
+            }
+            let mut snapshot_pending = false;
+            let names = root.entries(budget.remaining_entries())?;
+            budget.entries(names.len())?;
+            let catalogs =
+                validate_root_catalog_scope_union(&*root, &*protector, &names, &mut budget)?;
+            let mut record_count = 0usize;
+            let mut seen = std::collections::HashSet::new();
+            for scope in catalogs.snapshots.into_iter().filter(|scope| {
+                scope.profile_id == provider.profile_id()
+                    && scope.server_origin == provider.server_origin()
+                    && scope.account_subject == provider.account_id()
+                    && scope.root_volume_serial == physical_root.volume_serial
+                    && scope.root_file_index == physical_root.file_index
+            }) {
+                let store = SnapshotStore::from_directory(
+                    Arc::clone(&root),
+                    scope,
+                    Arc::clone(&protector),
+                    policy,
+                )?;
+                for record in store.discover_records_bounded(&mut budget)? {
+                    record_count = record_count.checked_add(1).ok_or(StoreError::ScanLimit)?;
+                    if record_count > 2_000
+                        || !seen
+                            .insert((record.key.record_id().to_owned(), record.key.generation()))
+                    {
+                        return Err(StoreError::ScanLimit);
                     }
-                    matched[index] = true;
-                } else if !matches!(
-                    record.state,
-                    StreamedAttemptState::LocallyAcknowledged { .. }
-                        | StreamedAttemptState::Superseded { .. }
-                ) {
-                    pending = true;
+                    if let Some(index) = exemptions.iter().position(|key| key == &record.key) {
+                        if matched[index] || record.state != StreamedAttemptState::NotAttempted {
+                            return Err(StoreError::CorruptEvidence);
+                        }
+                        matched[index] = true;
+                    } else if !matches!(
+                        record.state,
+                        StreamedAttemptState::LocallyAcknowledged { .. }
+                            | StreamedAttemptState::Superseded { .. }
+                    ) {
+                        snapshot_pending = true;
+                    }
                 }
             }
-        }
-        if matched.iter().any(|matched| !matched) {
-            return Err(StoreError::IncompleteEvidence);
-        }
-        let legacy_pending = scan_legacy(&mut budget)?;
-        root.verify()?;
-        lock.verify()?;
-        admitted_state.verify_path().map_err(io_error)?;
-        Ok(pending || legacy_pending)
+            if let Some(trace) = trace {
+                trace.enter(crate::creation_preparation::Stage::ExemptionMatch);
+            }
+            if matched.iter().any(|matched| !matched) {
+                return Err(StoreError::IncompleteEvidence);
+            }
+            if let Some(trace) = trace {
+                trace.enter(crate::creation_preparation::Stage::LegacyScan);
+            }
+            let legacy_pending = scan_legacy(&mut budget)?;
+            if let Some(trace) = trace {
+                trace.enter(crate::creation_preparation::Stage::RecoveryFinal);
+            }
+            root.verify()?;
+            lock.verify()?;
+            admitted_state.verify_path().map_err(io_error)?;
+            if let Some(trace) = trace {
+                let pending_stage = if namespace_pending {
+                    Some(crate::creation_preparation::Stage::NamespacePending)
+                } else if snapshot_pending {
+                    Some(crate::creation_preparation::Stage::SnapshotPending)
+                } else if legacy_pending {
+                    Some(crate::creation_preparation::Stage::LegacyPending)
+                } else {
+                    None
+                };
+                if let Some(stage) = pending_stage {
+                    trace.enter(stage);
+                    trace.category(crate::creation_preparation::Category::Pending);
+                }
+            }
+            Ok(namespace_pending || snapshot_pending || legacy_pending)
+        })()
+        .inspect_err(|error| {
+            if let Some(trace) = trace {
+                trace.store(*error);
+            }
+        })
     }
 
     fn from_directory(

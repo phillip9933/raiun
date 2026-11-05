@@ -4615,3 +4615,11 @@ cross-vault streaming/custody limits are separate implementation boundaries.
 Windows peer authentication now verifies the connected pipe's actual owner and
 live server TokenUser with a retained process handle before protocol exchange.
 Names, state domains, DACLs and first-instance admission remain unchanged.
+
+Windows ordinary file and folder preparation failures retain an invocation-local
+fixed stage and category through SDK metadata, protected recovery scans and intent
+store setup. The displayed reason uses only static labels; it contains no paths,
+account or resource identifiers, server messages or protected record contents.
+Tracing adds no requests, retries, recovery writes or admission authority. Root,
+parent-version, account, custody and pending-history checks remain authoritative;
+an error does not authorize replay of a retained operation.

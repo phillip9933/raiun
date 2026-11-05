@@ -1,6 +1,7 @@
 //! Explicit same-owner ordinary Personal file create; never recovered replay.
 use super::*;
 use crate::close_capture_admission::IndependentCreateAdmission;
+use crate::creation_preparation::{Failure, Stage as PreparationStage, Trace};
 use crate::file_create_phase::{Phase, ReplyDisposition, ReplyKey, TaskFlight};
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceFileContent, NamespaceIntent,
@@ -542,7 +543,7 @@ struct Prepared {
     rename: Arc<FileRenameStore>,
 }
 enum ReplyKind {
-    Prepared(Result<Box<Prepared>, BackendError>),
+    Prepared(Result<Box<Prepared>, Failure>),
     Sent(Box<(Admission, Result<VerifiedCreateReadback, BackendError>)>),
     Refreshed(Box<(Admission, Result<RefreshedCreateReadback, BackendError>)>),
 }
@@ -556,9 +557,7 @@ impl FileCreateReply {
     /// Fixed failure boundary only; never exposes paths, credentials or server text.
     pub fn failure_context(&self) -> &'static str {
         match &self.kind {
-            ReplyKind::Prepared(Err(_)) => {
-                "File creation paused: account-bound parent or recovery preparation failed. Recovery files have been kept."
-            }
+            ReplyKind::Prepared(Err(failure)) => failure.message("File"),
             ReplyKind::Prepared(Ok(_)) => {
                 "File creation paused: local source admission or protected capture failed. Recovery files have been kept."
             }
@@ -589,43 +588,60 @@ impl FileCreateTask {
     pub fn execute(mut self) -> FileCreateReply {
         let kind = match self.kind.take().expect("private single-use create task") {
             TaskKind::Prepare(prep) => {
+                let trace = Arc::new(Trace::new());
                 let result = (|| {
+                    trace.enter(PreparationStage::Job);
                     prep.job.check()?;
+                    trace.enter(PreparationStage::Current);
                     if !(prep.current)(self.key.authorization) {
                         return Err(BackendError::Unavailable);
                     }
                     let parent_components: Vec<_> =
                         prep.parent_components.iter().map(String::as_str).collect();
-                    let admission = self.backend.admit_file_create(
+                    let admission = self.backend.admit_file_create_traced(
                         &parent_components,
                         self.key.root,
                         self.key.authorization,
                         &prep.job,
                         prep.current.clone(),
+                        &trace,
                     )?;
+                    trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
-                    let space = admission.fresh_create_space(&self.backend)?;
+                    let space = admission
+                        .fresh_create_space(&self.backend)?
+                        .with_preparation_trace(Arc::clone(&trace));
+                    trace.enter(PreparationStage::RecoveryBefore);
                     if prep
                         .recovery
                         .has_unresolved_for_fresh_create_in_space(&space)?
                     {
                         return Err(BackendError::Unavailable);
                     }
+                    trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
+                    trace.enter(PreparationStage::RecoveryStore);
                     let rename = prep
                         .recovery
                         .file_rename_store(&admission.parent.scope, self.key.authorization)?
                         .ok_or(BackendError::Unavailable)?;
+                    trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
+                    trace.enter(PreparationStage::RecoveryAfter);
                     if prep
                         .recovery
                         .has_unresolved_for_fresh_create_in_space(&space)?
                     {
                         return Err(BackendError::Unavailable);
                     }
+                    trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
                     Ok(Box::new(Prepared { admission, rename }))
-                })();
+                })()
+                .map_err(|error| {
+                    trace.backend(error);
+                    trace.failure()
+                });
                 ReplyKind::Prepared(result)
             }
             TaskKind::Send(pair) => {

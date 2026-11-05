@@ -1,6 +1,7 @@
 //! Exact native directory admission and no-dehydration publication. Local
 //! components are hints until joined to current authenticated opaque routing.
 use super::*;
+use crate::creation_preparation::{Failure, Stage as PreparationStage, Trace};
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceIntent, NamespaceObjectKind,
     NamespaceOperation, NamespaceParent, StorageClassification,
@@ -654,9 +655,7 @@ impl DirectoryCreateReply {
     /// A fixed diagnostic boundary, not authorization to retry a retained intent.
     pub fn failure_context(&self) -> &'static str {
         match &self.kind {
-            DirectoryReplyKind::Prepared(Err(_)) => {
-                "Folder creation paused: account-bound parent or recovery preparation failed. Recovery files have been kept."
-            }
+            DirectoryReplyKind::Prepared(Err(failure)) => failure.message("Folder"),
             DirectoryReplyKind::Prepared(Ok(_)) => {
                 "Folder creation paused: native directory admission or protected intent publication failed. Recovery files have been kept."
             }
@@ -701,7 +700,7 @@ enum DirectoryTaskKind {
     ),
 }
 enum DirectoryReplyKind {
-    Prepared(Result<(OwnedDirectorySession, Arc<DirectoryIntentStore>), BackendError>),
+    Prepared(Result<(OwnedDirectorySession, Arc<DirectoryIntentStore>), Failure>),
     Preflight(
         OwnedDirectorySession,
         Result<(), raiun_core::backend::CloudError>,
@@ -727,33 +726,49 @@ impl DirectoryCreateTask {
                 current,
                 recovery,
             } => {
+                let trace = Arc::new(Trace::new());
                 let result = (|| {
+                    trace.enter(PreparationStage::Job);
                     job.check()?;
                     let refs: Vec<_> = components.iter().map(String::as_str).collect();
-                    let session = OwnedDirectorySession::prepare(
+                    let session = OwnedDirectorySession::prepare_traced(
                         backend,
                         &refs,
                         self.key.root,
                         self.key.authorization,
                         job,
                         current,
+                        &trace,
                     )?;
+                    trace.enter(PreparationStage::Current);
                     session.check()?;
-                    let space = session.fresh_create_space()?;
+                    let space = session
+                        .fresh_create_space()?
+                        .with_preparation_trace(Arc::clone(&trace));
+                    trace.enter(PreparationStage::RecoveryBefore);
                     if recovery.has_unresolved_for_fresh_create_in_space(&space)? {
                         return Err(BackendError::Unavailable);
                     }
+                    trace.enter(PreparationStage::Current);
                     session.check()?;
+                    trace.enter(PreparationStage::RecoveryStore);
                     let store = recovery
                         .directory_intent_store(&session.captured.scope, self.key.authorization)?
                         .ok_or(BackendError::Unavailable)?;
+                    trace.enter(PreparationStage::Current);
                     session.check()?;
+                    trace.enter(PreparationStage::RecoveryAfter);
                     if recovery.has_unresolved_for_fresh_create_in_space(&space)? {
                         return Err(BackendError::Unavailable);
                     }
+                    trace.enter(PreparationStage::Current);
                     session.check()?;
                     Ok((session, store))
-                })();
+                })()
+                .map_err(|error| {
+                    trace.backend(error);
+                    trace.failure()
+                });
                 (Phase::Prepare, DirectoryReplyKind::Prepared(result))
             }
             DirectoryTaskKind::Preflight(session, intent) => {

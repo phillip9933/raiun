@@ -1981,22 +1981,40 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         &self,
         space: &crate::FreshCreateSpace,
     ) -> Result<bool, BackendError> {
+        let trace = space.preparation_trace();
+        if let Some(trace) = trace {
+            trace.enter(crate::creation_preparation::Stage::RecoveryScope);
+        }
         let candidate = space.scope();
         if !valid_scope_binding(&self.scope, self.root_identity)
             || !scope_matches_provider(candidate, &self.scope, self.root_identity)
             || validate_catalog_scope(candidate).is_err()
         {
+            if let Some(trace) = trace {
+                trace.backend(BackendError::Unavailable);
+            }
             return Err(BackendError::Unavailable);
         }
         // An unconfigured namespace consumer cannot reinterpret retained
         // history or gain writer admission from this health query.
+        if let Some(trace) = trace {
+            trace.enter(crate::creation_preparation::Stage::RecoveryContext);
+        }
         let context = self
             .namespace_rename
             .as_ref()
-            .ok_or(BackendError::Unavailable)?;
+            .ok_or(BackendError::Unavailable)
+            .inspect_err(|error| {
+                if let Some(trace) = trace {
+                    trace.backend(*error);
+                }
+            })?;
         if context.admission.state_identity() != context.state.identity()
             || context.state.path() != self.catalog.state_directory
         {
+            if let Some(trace) = trace {
+                trace.backend(BackendError::Unavailable);
+            }
             return Err(BackendError::Unavailable);
         }
         crate::streamed_store::SnapshotStore::fresh_create_space_pending_existing(
@@ -2007,6 +2025,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             self.root_identity,
             candidate,
             true,
+            trace,
             |budget| {
                 self.catalog
                     .content_presence_authenticated_bounded(&self.scope, self.root_identity, budget)

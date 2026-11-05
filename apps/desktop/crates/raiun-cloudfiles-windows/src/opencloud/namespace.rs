@@ -2,6 +2,7 @@
 //! not represented as an atomic created-ID or arbitrary-parent-CAS receipt.
 use super::*;
 use crate::RemoteEditBaseline;
+use crate::creation_preparation::{Stage as PreparationStage, Trace as PreparationTrace};
 use crate::namespace_intent::{
     CapturedAuthorization, NamespaceDestinationReport, NamespaceIntent, NamespaceOperation,
 };
@@ -16,6 +17,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(super) fn preparation_stage(trace: Option<&PreparationTrace>, stage: PreparationStage) {
+    if let Some(trace) = trace {
+        trace.enter(stage);
+    }
+}
+
 /// Shared create metadata qualification, outside publication/catalog locks.
 /// Personal identifies the account; the captured target Space is independent.
 pub(super) fn qualify_create_target(
@@ -24,6 +31,17 @@ pub(super) fn qualify_create_target(
     components: &[String],
     context: RangeReadContext,
 ) -> Result<RemoteEntry, CloudError> {
+    qualify_create_target_with_trace(backend, scope, components, context, None)
+}
+
+pub(super) fn qualify_create_target_with_trace(
+    backend: &OpenCloudPlaceholderBackend,
+    scope: &crate::EditJournalScope,
+    components: &[String],
+    context: RangeReadContext,
+    trace: Option<&PreparationTrace>,
+) -> Result<RemoteEntry, CloudError> {
+    preparation_stage(trace, PreparationStage::TargetQualification);
     backend
         .ensure_active()
         .map_err(|_| refusal(ErrorKind::Unauthorized))?;
@@ -33,6 +51,7 @@ pub(super) fn qualify_create_target(
     {
         return Err(refusal(ErrorKind::Conflict));
     }
+    preparation_stage(trace, PreparationStage::Catalog);
     let catalog = backend
         .catalog_scope_snapshot()
         .map_err(|_| refusal(ErrorKind::Conflict))?
@@ -45,36 +64,72 @@ pub(super) fn qualify_create_target(
     {
         return Err(refusal(ErrorKind::Conflict));
     }
-    let spaces = backend
-        .validate_namespace_scope(
+    preparation_stage(trace, PreparationStage::AccountRoot);
+    let spaces = match trace {
+        Some(trace) => backend.validate_namespace_scope_traced(
             backend.scope.account_id(),
             catalog.personal_space_id(),
             catalog.personal_root_resource_id(),
             context.deadline,
-        )
-        .map_err(|_| refusal(ErrorKind::Conflict))?;
+            trace,
+        ),
+        None => backend.validate_namespace_scope(
+            backend.scope.account_id(),
+            catalog.personal_space_id(),
+            catalog.personal_root_resource_id(),
+            context.deadline,
+        ),
+    }
+    .map_err(|_| refusal(ErrorKind::Conflict))?;
+    preparation_stage(trace, PreparationStage::TargetQualification);
     let mut targets = spaces.iter().filter(|space| space.id == scope.space_id);
     let target = targets.next().ok_or_else(|| refusal(ErrorKind::Conflict))?;
-    if targets.next().is_some()
-        || !target.writable
-        || target.encrypted
-        || match components.first().map(String::as_str) {
-            Some("Personal") => !target.personal || target.id != catalog.personal_space_id,
-            Some("Spaces") => target.personal || target.id == catalog.personal_space_id,
-            _ => true,
-        }
-    {
+    if targets.next().is_some() {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    preparation_stage(trace, PreparationStage::RootWritable);
+    if !target.writable {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    preparation_stage(trace, PreparationStage::RootEncryption);
+    if target.encrypted {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    preparation_stage(trace, PreparationStage::TargetQualification);
+    if match components.first().map(String::as_str) {
+        Some("Personal") => !target.personal || target.id != catalog.personal_space_id,
+        Some("Spaces") => target.personal || target.id == catalog.personal_space_id,
+        _ => true,
+    } {
         return Err(refusal(ErrorKind::Conflict));
     }
     let root = backend
         .client
-        .stat_discovered_space_root_with_context(target, context)?;
-    if !root.directory
-        || root.encrypted
-        || !root.writable
-        || root.id != scope.root_resource_id
-        || !valid_remote_path(&scope.space_id, &scope.root_resource_id, &root.path, true)
-    {
+        .stat_discovered_space_root_with_context(target, context)
+        .map_err(|error| {
+            if let Some(trace) = trace {
+                trace.cloud(error.kind);
+            }
+            error
+        })?;
+    preparation_stage(trace, PreparationStage::RootKind);
+    if !root.directory {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    preparation_stage(trace, PreparationStage::RootEncryption);
+    if root.encrypted {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    preparation_stage(trace, PreparationStage::RootWritable);
+    if !root.writable {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    preparation_stage(trace, PreparationStage::RootIdentity);
+    if root.id != scope.root_resource_id {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    preparation_stage(trace, PreparationStage::TargetQualification);
+    if !valid_remote_path(&scope.space_id, &scope.root_resource_id, &root.path, true) {
         return Err(refusal(ErrorKind::Conflict));
     }
     backend
@@ -677,6 +732,41 @@ impl OpenCloudPlaceholderBackend {
         authorization: CapturedAuthorization,
         cancellation: &CancellationToken,
     ) -> Result<CapturedDirectoryParent, BackendError> {
+        self.capture_namespace_parent_under_lease_with_trace(
+            components,
+            root,
+            authorization,
+            cancellation,
+            None,
+        )
+    }
+    #[cfg(any(windows, test))]
+    pub(super) fn capture_namespace_parent_under_lease_traced(
+        &self,
+        components: &[&str],
+        root: crate::ConfiguredRootIdentity,
+        authorization: CapturedAuthorization,
+        cancellation: &CancellationToken,
+        trace: &PreparationTrace,
+    ) -> Result<CapturedDirectoryParent, BackendError> {
+        self.capture_namespace_parent_under_lease_with_trace(
+            components,
+            root,
+            authorization,
+            cancellation,
+            Some(trace),
+        )
+    }
+    #[cfg(any(windows, test))]
+    fn capture_namespace_parent_under_lease_with_trace(
+        &self,
+        components: &[&str],
+        root: crate::ConfiguredRootIdentity,
+        authorization: CapturedAuthorization,
+        cancellation: &CancellationToken,
+        trace: Option<&PreparationTrace>,
+    ) -> Result<CapturedDirectoryParent, BackendError> {
+        preparation_stage(trace, PreparationStage::Current);
         // The cached vault delete callback has its own exact encrypted route.
         // An ordinary namespace parent must never be promoted from a cached
         // catalogue into a live Personal/Spaces mutation authority.
@@ -684,19 +774,24 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         self.ensure_active()?;
-        if components.is_empty()
-            || components.len() > 256
-            || authorization.agent_generation == 0
+        preparation_stage(trace, PreparationStage::ParentRoute);
+        if components.is_empty() || components.len() > 256 {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::Current);
+        if authorization.agent_generation == 0
             || authorization.token_generation != self.token_generation
         {
             return Err(BackendError::Unavailable);
         }
+        preparation_stage(trace, PreparationStage::Catalog);
         let catalog = self
             .catalog_scope_snapshot()?
             .ok_or(BackendError::Unavailable)?;
         if catalog.local_root() != root {
             return Err(BackendError::Unavailable);
         }
+        preparation_stage(trace, PreparationStage::ParentRoute);
         let mut identity = {
             let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
             let mut roots = state.namespace_directories.iter().filter_map(|(id, kind)|
@@ -709,9 +804,11 @@ impl OpenCloudPlaceholderBackend {
         };
         let mut route = Vec::with_capacity(components.len());
         for component in components {
+            preparation_stage(trace, PreparationStage::Job);
             if cancellation.is_cancelled() || cancellation.is_expired() {
                 return Err(BackendError::Unavailable);
             }
+            preparation_stage(trace, PreparationStage::ParentRoute);
             let children = self.enumerate_scoped(identity.as_bytes(), cancellation)?;
             let child = children
                 .into_iter()
@@ -726,6 +823,7 @@ impl OpenCloudPlaceholderBackend {
             );
             route.push(child);
         }
+        preparation_stage(trace, PreparationStage::ParentLookup);
         let parent = self
             .state
             .lock()
@@ -734,31 +832,78 @@ impl OpenCloudPlaceholderBackend {
             .get(&identity)
             .cloned()
             .ok_or(BackendError::Unavailable)?;
+        preparation_stage(trace, PreparationStage::ParentOrdinary);
         self.ensure_ordinary_location(&parent.space_id, &parent.path)?;
         let context = RangeReadContext {
             deadline: cancellation.deadline(),
             token_generation: self.token_generation,
         };
+        preparation_stage(trace, PreparationStage::ParentRootStat);
         let root_entry = self
             .client
             .stat_with_context(&parent.space_id, "/", context)
-            .map_err(|_| BackendError::Unavailable)?;
+            .map_err(|error| {
+                if let Some(trace) = trace {
+                    trace.cloud(error.kind);
+                }
+                BackendError::Unavailable
+            })?;
+        preparation_stage(trace, PreparationStage::ParentStat);
         let entry = self
             .client
             .stat_with_context(&parent.space_id, &parent.path, context)
-            .map_err(|_| BackendError::Unavailable)?;
-        if root_entry.id != parent.root_resource_id
-            || root_entry.encrypted
-            || !root_entry.writable
-            || !root_entry.directory
-            || entry.id != parent.remote_id
-            || entry.encrypted
-            || !entry.directory
-            || !entry.writable
-            || !strong(&entry.etag)
-        {
+            .map_err(|error| {
+                if let Some(trace) = trace {
+                    trace.cloud(error.kind);
+                }
+                BackendError::Unavailable
+            })?;
+        // Preserve the original validation order and every condition. Only
+        // the fixed diagnostic stage changes; no metadata value is recorded.
+        preparation_stage(trace, PreparationStage::RootIdentity);
+        if root_entry.id != parent.root_resource_id {
             return Err(BackendError::Unavailable);
         }
+        preparation_stage(trace, PreparationStage::RootEncryption);
+        if root_entry.encrypted {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::RootWritable);
+        if !root_entry.writable {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::RootKind);
+        if !root_entry.directory {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::ParentIdentity);
+        if entry.id != parent.remote_id {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::ParentEncryption);
+        if entry.encrypted {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::ParentKind);
+        if !entry.directory {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::ParentWritable);
+        if !entry.writable {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(
+            trace,
+            if parent.path == "/" {
+                PreparationStage::RootParentEtag
+            } else {
+                PreparationStage::ParentEtag
+            },
+        );
+        if !strong(&entry.etag) {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::Current);
         self.ensure_active()?;
         Ok(CapturedDirectoryParent {
             path: parent.path,
@@ -813,6 +958,7 @@ impl OwnedDirectorySession {
         self.check()?;
         Ok(space)
     }
+    #[allow(dead_code)] // Retain the original untraced SDK entrypoint.
     pub(crate) fn prepare(
         backend: Arc<OpenCloudPlaceholderBackend>,
         components: &[&str],
@@ -821,10 +967,41 @@ impl OwnedDirectorySession {
         job: crate::StreamedRecoveryJob,
         current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
     ) -> Result<Self, BackendError> {
+        Self::prepare_with_trace(backend, components, root, auth, job, current, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_traced(
+        backend: Arc<OpenCloudPlaceholderBackend>,
+        components: &[&str],
+        root: crate::ConfiguredRootIdentity,
+        auth: CapturedAuthorization,
+        job: crate::StreamedRecoveryJob,
+        current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
+        trace: &PreparationTrace,
+    ) -> Result<Self, BackendError> {
+        Self::prepare_with_trace(backend, components, root, auth, job, current, Some(trace))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_with_trace(
+        backend: Arc<OpenCloudPlaceholderBackend>,
+        components: &[&str],
+        root: crate::ConfiguredRootIdentity,
+        auth: CapturedAuthorization,
+        job: crate::StreamedRecoveryJob,
+        current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
+        trace: Option<&PreparationTrace>,
+    ) -> Result<Self, BackendError> {
+        preparation_stage(trace, PreparationStage::Job);
         job.check()?;
-        if crate::personal_create_relative(components, "probe").is_none() || !(current)(auth) {
+        preparation_stage(trace, PreparationStage::ParentRoute);
+        if crate::personal_create_relative(components, "probe").is_none() {
             return Err(BackendError::Unavailable);
         }
+        preparation_stage(trace, PreparationStage::Current);
+        if !(current)(auth) {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::Catalog);
         let catalog = backend
             .identity_catalog
             .clone()
@@ -838,18 +1015,37 @@ impl OwnedDirectorySession {
         // Original deadline; no new cancellation epoch. No outer read lease spans
         // metadata: discovery itself takes only short state locks and checks the
         // original token/context; all observations are revalidated by the owner.
-        backend.validate_namespace_scope(
-            backend.scope.account_id(),
-            catalog_scope.personal_space_id(),
-            catalog_scope.personal_root_resource_id(),
-            job.deadline(),
-        )?;
-        let captured = backend.capture_namespace_parent_under_lease(
-            components,
-            root,
-            auth,
-            job.cancellation(),
-        )?;
+        preparation_stage(trace, PreparationStage::AccountRoot);
+        match trace {
+            Some(trace) => backend.validate_namespace_scope_traced(
+                backend.scope.account_id(),
+                catalog_scope.personal_space_id(),
+                catalog_scope.personal_root_resource_id(),
+                job.deadline(),
+                trace,
+            ),
+            None => backend.validate_namespace_scope(
+                backend.scope.account_id(),
+                catalog_scope.personal_space_id(),
+                catalog_scope.personal_root_resource_id(),
+                job.deadline(),
+            ),
+        }?;
+        let captured = match trace {
+            Some(trace) => backend.capture_namespace_parent_under_lease_traced(
+                components,
+                root,
+                auth,
+                job.cancellation(),
+                trace,
+            ),
+            None => backend.capture_namespace_parent_under_lease(
+                components,
+                root,
+                auth,
+                job.cancellation(),
+            ),
+        }?;
         let result = Self {
             captured,
             backend,
@@ -859,9 +1055,11 @@ impl OwnedDirectorySession {
             job,
             current,
         };
+        preparation_stage(trace, PreparationStage::Current);
         result.check()?;
+        preparation_stage(trace, PreparationStage::TargetQualification);
         let metadata = result.job.cancellation().bounded_request();
-        qualify_create_target(
+        qualify_create_target_with_trace(
             &result.backend,
             &result.captured.scope,
             &components
@@ -872,8 +1070,10 @@ impl OwnedDirectorySession {
                 deadline: metadata.deadline(),
                 token_generation: auth.token_generation,
             },
+            trace,
         )
         .map_err(|_| BackendError::Unavailable)?;
+        preparation_stage(trace, PreparationStage::Current);
         result.check()?;
         Ok(result)
     }

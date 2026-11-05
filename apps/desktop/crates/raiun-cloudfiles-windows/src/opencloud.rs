@@ -820,6 +820,34 @@ impl OpenCloudPlaceholderBackend {
         Ok(spaces)
     }
 
+    #[cfg(any(windows, test))]
+    fn discover_spaces_traced(
+        &self,
+        deadline: std::time::Instant,
+        trace: &crate::creation_preparation::Trace,
+    ) -> Result<Vec<raiun_core::backend::CloudSpace>, BackendError> {
+        let spaces = self
+            .client
+            .spaces_with_context_limited(
+                RangeReadContext {
+                    deadline,
+                    token_generation: self.token_generation,
+                },
+                MAX_PROVIDER_SPACES,
+            )
+            .map_err(|error| {
+                trace.cloud(error.kind);
+                self.reject_cached_cloud_error(error)
+            })?;
+        if spaces.iter().any(|space| {
+            space.id.is_empty() || space.id.len() > 512 || space.id.chars().any(char::is_control)
+        }) {
+            return Err(BackendError::Unavailable);
+        }
+        verified_personal(&spaces)?;
+        Ok(spaces)
+    }
+
     fn load_catalog_for_root(
         &self,
         personal_space_id: &str,
@@ -3141,6 +3169,57 @@ impl OpenCloudPlaceholderBackend {
             )
             .map_err(|error| self.reject_cached_cloud_error(error))?;
         if !root.directory || root.encrypted || root.id != expected_personal_root_id {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(spaces)
+    }
+
+    #[cfg(any(windows, test))]
+    fn validate_namespace_scope_traced(
+        &self,
+        account_id: &str,
+        expected_personal_space_id: &str,
+        expected_personal_root_id: &str,
+        deadline: std::time::Instant,
+        trace: &crate::creation_preparation::Trace,
+    ) -> Result<Vec<raiun_core::backend::CloudSpace>, BackendError> {
+        use crate::creation_preparation::Stage;
+        trace.enter(Stage::AccountRoot);
+        let spaces = self.discover_spaces_traced(deadline, trace)?;
+        let personal = verified_personal(&spaces)?;
+        if personal.id != expected_personal_space_id
+            || derive_account_id(&self.client.configured_server_url(), &personal.id) != account_id
+            || account_id != self.scope.account_id
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let personal = spaces
+            .iter()
+            .find(|space| space.id == expected_personal_space_id)
+            .ok_or(BackendError::Unavailable)?;
+        let root = self
+            .client
+            .stat_discovered_space_root_with_context(
+                personal,
+                RangeReadContext {
+                    deadline,
+                    token_generation: self.token_generation,
+                },
+            )
+            .map_err(|error| {
+                trace.cloud(error.kind);
+                self.reject_cached_cloud_error(error)
+            })?;
+        trace.enter(Stage::RootKind);
+        if !root.directory {
+            return Err(BackendError::Unavailable);
+        }
+        trace.enter(Stage::RootEncryption);
+        if root.encrypted {
+            return Err(BackendError::Unavailable);
+        }
+        trace.enter(Stage::RootIdentity);
+        if root.id != expected_personal_root_id {
             return Err(BackendError::Unavailable);
         }
         Ok(spaces)

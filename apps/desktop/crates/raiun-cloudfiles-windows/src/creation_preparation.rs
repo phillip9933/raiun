@@ -1,0 +1,247 @@
+//! Invocation-local, fixed preparation failure labels. No values from records,
+//! requests, server messages or paths enter this trace. It grants no authority.
+use crate::BackendError;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub(crate) enum Category {
+    None,
+    NotFound,
+    Cancelled,
+    InvalidRange,
+    Unavailable,
+    Unauthorized,
+    Forbidden,
+    Conflict,
+    Offline,
+    InvalidResponse,
+    Unsupported,
+    Io,
+    Busy,
+    Invalid,
+    Quota,
+    ScanLimit,
+    IncompleteEvidence,
+    CorruptEvidence,
+    PublicationUncertain,
+    Snapshot,
+    Pending,
+}
+impl Category {
+    fn from_code(code: u16) -> Self {
+        const ALL: &[Category] = &[
+            Category::None,
+            Category::NotFound,
+            Category::Cancelled,
+            Category::InvalidRange,
+            Category::Unavailable,
+            Category::Unauthorized,
+            Category::Forbidden,
+            Category::Conflict,
+            Category::Offline,
+            Category::InvalidResponse,
+            Category::Unsupported,
+            Category::Io,
+            Category::Busy,
+            Category::Invalid,
+            Category::Quota,
+            Category::ScanLimit,
+            Category::IncompleteEvidence,
+            Category::CorruptEvidence,
+            Category::PublicationUncertain,
+            Category::Snapshot,
+            Category::Pending,
+        ];
+        ALL.get(usize::from(code))
+            .copied()
+            .unwrap_or(Self::Unavailable)
+    }
+}
+macro_rules! fixed_message {
+    ($prefix:expr, $stage:literal, $category:literal) => {
+        if $prefix == "File" {
+            concat!(
+                "File creation paused: ",
+                $stage,
+                " (",
+                $category,
+                "). Recovery files have been kept."
+            )
+        } else {
+            concat!(
+                "Folder creation paused: ",
+                $stage,
+                " (",
+                $category,
+                "). Recovery files have been kept."
+            )
+        }
+    };
+}
+macro_rules! category_message {
+    ($prefix:expr, $stage:literal, $category:expr) => {
+        match $category {
+            Category::None => fixed_message!($prefix, $stage, "unspecified"),
+            Category::NotFound => fixed_message!($prefix, $stage, "not found"),
+            Category::Cancelled => fixed_message!($prefix, $stage, "cancelled"),
+            Category::InvalidRange => fixed_message!($prefix, $stage, "invalid range"),
+            Category::Unavailable => fixed_message!($prefix, $stage, "unavailable"),
+            Category::Unauthorized => fixed_message!($prefix, $stage, "authorization refused"),
+            Category::Forbidden => fixed_message!($prefix, $stage, "permission refused"),
+            Category::Conflict => fixed_message!($prefix, $stage, "conflict"),
+            Category::Offline => fixed_message!($prefix, $stage, "offline"),
+            Category::InvalidResponse => fixed_message!($prefix, $stage, "invalid metadata"),
+            Category::Unsupported => fixed_message!($prefix, $stage, "unsupported"),
+            Category::Io => fixed_message!($prefix, $stage, "I/O failure"),
+            Category::Busy => fixed_message!($prefix, $stage, "busy"),
+            Category::Invalid => fixed_message!($prefix, $stage, "invalid evidence"),
+            Category::Quota => fixed_message!($prefix, $stage, "quota"),
+            Category::ScanLimit => fixed_message!($prefix, $stage, "scan limit"),
+            Category::IncompleteEvidence => fixed_message!($prefix, $stage, "incomplete evidence"),
+            Category::CorruptEvidence => fixed_message!($prefix, $stage, "corrupt evidence"),
+            Category::PublicationUncertain => {
+                fixed_message!($prefix, $stage, "publication uncertain")
+            }
+            Category::Snapshot => fixed_message!($prefix, $stage, "snapshot verification"),
+            Category::Pending => fixed_message!($prefix, $stage, "pending recovery"),
+        }
+    };
+}
+macro_rules! stages {
+    ($($name:ident => $message:literal),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[repr(u16)]
+        pub(crate) enum Stage { $($name),+ }
+        impl Stage {
+            fn from_code(code: u16) -> Self {
+                const ALL: &[Stage] = &[$(Stage::$name),+];
+                ALL.get(usize::from(code)).copied().unwrap_or(Self::Unknown)
+            }
+        }
+        impl Failure {
+            pub(crate) fn message(&self, prefix: &'static str) -> &'static str {
+                match self.stage { $(Stage::$name => category_message!(prefix, $message, self.category)),+ }
+            }
+        }
+    };
+}
+stages! {
+    Unknown => "preparation did not complete",
+    Job => "original operation check failed",
+    Current => "original account or operation context check failed",
+    Catalog => "account-bound catalogue check failed",
+    AccountRoot => "verified account root check failed",
+    ParentRoute => "managed parent route lookup failed",
+    ParentLookup => "managed parent lookup failed",
+    ParentOrdinary => "ordinary parent classification failed",
+    ParentRootStat => "selected root metadata lookup failed",
+    ParentStat => "parent metadata lookup failed",
+    RootIdentity => "selected root identity check failed",
+    RootKind => "selected root directory check failed",
+    RootEncryption => "selected root ordinary-storage check failed",
+    RootWritable => "selected root write-permission check failed",
+    ParentIdentity => "parent identity check failed",
+    ParentKind => "parent directory check failed",
+    ParentEncryption => "parent ordinary-storage check failed",
+    ParentWritable => "parent write-permission check failed",
+    RootParentEtag => "Space-root parent version-tag check failed",
+    ParentEtag => "parent version-tag check failed",
+    TargetQualification => "target Space qualification failed",
+    RecoveryScope => "recovery account and root binding check failed",
+    RecoveryContext => "original protected recovery context check failed",
+    RecoveryBefore => "protected recovery preparation check failed",
+    RecoveryAfter => "protected recovery recheck failed",
+    RecoveryStore => "protected intent-store preparation failed",
+    RecoveryFinal => "protected root final verification failed",
+    NamespaceScan => "namespace recovery verification failed",
+    NamespaceValidation => "namespace custody validation failed",
+    SnapshotScan => "saved snapshot verification failed",
+    ExemptionMatch => "exact original snapshot correspondence check failed",
+    LegacyScan => "legacy recovery verification failed",
+    NamespacePending => "namespace recovery remains pending",
+    SnapshotPending => "other saved-file recovery remains pending",
+    LegacyPending => "legacy recovery remains pending",
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Failure {
+    stage: Stage,
+    category: Category,
+}
+
+pub(crate) struct Trace {
+    detail: AtomicU32,
+}
+impl Trace {
+    pub(crate) fn new() -> Self {
+        Self {
+            detail: AtomicU32::new(0),
+        }
+    }
+    pub(crate) fn enter(&self, stage: Stage) {
+        self.detail.store((stage as u32) << 16, Ordering::Release);
+    }
+    /// Preserve a more specific SDK/store category when an outer layer maps
+    /// its error to BackendError::Unavailable. Trace data never affects checks.
+    pub(crate) fn category(&self, category: Category) {
+        let mut current = self.detail.load(Ordering::Acquire);
+        loop {
+            if current & 0xffff != 0 {
+                return;
+            }
+            match self.detail.compare_exchange_weak(
+                current,
+                current | category as u32,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+    pub(crate) fn backend(&self, error: BackendError) {
+        self.category(match error {
+            BackendError::NotFound => Category::NotFound,
+            BackendError::Cancelled => Category::Cancelled,
+            BackendError::InvalidRange => Category::InvalidRange,
+            BackendError::Unavailable => Category::Unavailable,
+        });
+    }
+    pub(crate) fn cloud(&self, kind: raiun_core::backend::ErrorKind) {
+        use raiun_core::backend::ErrorKind;
+        self.category(match kind {
+            ErrorKind::Unauthorized => Category::Unauthorized,
+            ErrorKind::Forbidden => Category::Forbidden,
+            ErrorKind::NotFound => Category::NotFound,
+            ErrorKind::Conflict => Category::Conflict,
+            ErrorKind::Offline => Category::Offline,
+            ErrorKind::InvalidResponse => Category::InvalidResponse,
+            ErrorKind::Unsupported => Category::Unsupported,
+            ErrorKind::Io => Category::Io,
+        });
+    }
+    #[cfg(any(windows, test))]
+    pub(crate) fn store(&self, error: crate::streamed_store::StoreError) {
+        use crate::streamed_store::StoreError;
+        self.category(match error {
+            StoreError::Io => Category::Io,
+            StoreError::Busy => Category::Busy,
+            StoreError::Invalid => Category::Invalid,
+            StoreError::Quota => Category::Quota,
+            StoreError::ScanLimit => Category::ScanLimit,
+            StoreError::IncompleteEvidence => Category::IncompleteEvidence,
+            StoreError::CorruptEvidence => Category::CorruptEvidence,
+            StoreError::PublicationUncertain => Category::PublicationUncertain,
+            StoreError::Snapshot(_) => Category::Snapshot,
+        });
+    }
+    pub(crate) fn failure(&self) -> Failure {
+        let value = self.detail.load(Ordering::Acquire);
+        Failure {
+            stage: Stage::from_code((value >> 16) as u16),
+            category: Category::from_code(value as u16),
+        }
+    }
+}
