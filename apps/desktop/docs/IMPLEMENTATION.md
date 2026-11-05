@@ -4444,3 +4444,28 @@ native claim and point-lookup adapters need separate integration. No new
 benchmark, workload or test is required or claimed for this implementation
 iteration; measured performance remains the
 previous owner run until normal use supplies new evidence.
+
+### Upload authentication and cache-root continuity — 5 November 2026
+
+Ordinary upload and full conditional readback bodies distinguish routine bearer
+rotation from account/security invalidation. Unix Agent refresh first drains
+short metadata operations through the exact client's one-use admission guard.
+The guard captures both credential and security generations before waiting;
+either changing unexpectedly rejects its late result. Immediate token setters
+still invalidate both generations. The Agent also rechecks runtime account
+ownership after refresh HTTP completes.
+
+Preparation retains its admission permit through request construction, then
+releases it before the body. Routine rotation can therefore finish while an
+ordinary body is active without cancelling that body. Explicit inherited
+range/opaque contexts retain their original credential generation and absolute
+deadline. Postflight acquires fresh bounded metadata admission only while the
+original security ownership remains valid. Conditional requests, exact
+account/root/resource checks, full SHA-256 readback and durable one-use claims
+remain; an interrupted or uncertain mutation is never automatically resent.
+
+Offline cache contexts use the same validated canonical origin as account
+scopes. Directory observations retain each freshly validated root before
+descendant metadata can fail offline. Fallback uses that observed root, rather
+than substituting an older saved root; contradictory roots refuse the whole
+observation. This preserves root binding without adding a second root request.

@@ -196,7 +196,22 @@ pub trait CloudBackend: Send + Sync {
         path: &str,
         expected_parent_id: Option<&str>,
     ) -> Result<OrdinaryDirectorySnapshot, CloudError> {
+        self.directory_snapshot_with_root_observer(space, path, expected_parent_id, &|_, _| Ok(()))
+    }
+
+    /// Retain fresh root facts even if a later ancestor/list request fails.
+    /// Call the observer after validating the root and before reading children;
+    /// a caller must never substitute a different saved root after that point.
+    /// Reobserving implementations must report every newly observed root.
+    fn directory_snapshot_with_root_observer(
+        &self,
+        space: &str,
+        path: &str,
+        expected_parent_id: Option<&str>,
+        observer: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+    ) -> Result<OrdinaryDirectorySnapshot, CloudError> {
         let (selected, root) = self.space_root_metadata(space)?;
+        observer(&selected, &root)?;
         let parent = if path == "/" {
             root.clone()
         } else {

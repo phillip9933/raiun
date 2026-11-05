@@ -1448,7 +1448,18 @@ impl Runtime {
         }
         if let Some(token) = token {
             if let Some(client) = state.client.as_ref() {
-                client.set_bearer_token(token).map_err(|e| e.to_string())?;
+                // Authentication may be invalidated while the refresh HTTP
+                // request owns this state lock. Never apply its late result
+                // after an account/security transition has started.
+                if self.operation_generation()? != refresh_generation {
+                    return Err("Token refresh was canceled by an account change".into());
+                }
+                let admission = refresh_admission
+                    .as_mut()
+                    .ok_or("Token refresh has no matching client admission")?;
+                client
+                    .set_refreshed_bearer_token(token, admission)
+                    .map_err(|e| e.to_string())?;
             }
         }
         // Token HTTP is bounded to twenty seconds. Reopen short-operation

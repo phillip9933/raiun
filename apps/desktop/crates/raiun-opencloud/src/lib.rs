@@ -244,6 +244,9 @@ struct BoundedOperationPermit {
 /// token refresh. It grants no authentication or remote mutation authority.
 pub struct BearerRefreshAdmission {
     admission: Arc<BoundedOperationAdmission>,
+    token_generation: u64,
+    security_generation: u64,
+    used: bool,
     _same_thread: PhantomData<Rc<()>>,
 }
 
@@ -303,7 +306,12 @@ impl BoundedOperationAdmission {
         })
     }
 
-    fn refresh(self: &Arc<Self>, deadline: Instant) -> Result<BearerRefreshAdmission, CloudError> {
+    fn refresh(
+        self: &Arc<Self>,
+        deadline: Instant,
+        token_generation: u64,
+        security_generation: u64,
+    ) -> Result<BearerRefreshAdmission, CloudError> {
         let owner = thread::current().id();
         let mut state = self
             .state
@@ -326,6 +334,9 @@ impl BoundedOperationAdmission {
         state.refreshing = true;
         let admission = BearerRefreshAdmission {
             admission: Arc::clone(self),
+            token_generation,
+            security_generation,
+            used: false,
             _same_thread: PhantomData,
         };
         while !state.active.is_empty() {
@@ -492,6 +503,9 @@ pub struct OpenCloudClient {
     token: Arc<Mutex<String>>,
     authentication: Authentication,
     token_generation: Arc<AtomicU64>,
+    // Routine bearer rotation changes token leases, not an already-admitted
+    // ordinary transfer's account/security ownership.
+    security_generation: Arc<AtomicU64>,
     bounded_operation_admission: Arc<BoundedOperationAdmission>,
     initiator_id: String,
     transfer_budget: TransferBudget,
@@ -789,6 +803,7 @@ impl OpenCloudClient {
             token: Arc::new(Mutex::new(bearer_token)),
             authentication,
             token_generation: Arc::new(AtomicU64::new(1)),
+            security_generation: Arc::new(AtomicU64::new(1)),
             bounded_operation_admission: Arc::new(BoundedOperationAdmission::default()),
             initiator_id: format!("raiun-{}", std::process::id()),
             transfer_budget,
@@ -818,8 +833,38 @@ impl OpenCloudClient {
         self
     }
 
-    /// Replace the in-memory bearer token after an external auth layer refreshes it.
+    /// Immediately replace authentication and invalidate existing leases and
+    /// transfers. Routine same-account refresh must use the admitted setter.
     pub fn set_bearer_token(&self, bearer_token: String) -> Result<(), CloudError> {
+        self.replace_bearer_token(bearer_token, None)
+    }
+
+    /// Apply one benign same-account refresh while its exact admission remains
+    /// closed. The caller must also retain its account/runtime ownership check.
+    /// An immediate invalidation during the drain or token HTTP rejects this
+    /// stale refresh, and the guard cannot authorize a second update.
+    pub fn set_refreshed_bearer_token(
+        &self,
+        bearer_token: String,
+        admission: &mut BearerRefreshAdmission,
+    ) -> Result<(), CloudError> {
+        if admission.used {
+            return Err(invalid("authentication refresh admission was already used"));
+        }
+        admission.used = true;
+        if !Arc::ptr_eq(&admission.admission, &self.bounded_operation_admission) {
+            return Err(invalid(
+                "authentication refresh admission belongs to another client",
+            ));
+        }
+        self.replace_bearer_token(bearer_token, Some(admission))
+    }
+
+    fn replace_bearer_token(
+        &self,
+        bearer_token: String,
+        admission: Option<&BearerRefreshAdmission>,
+    ) -> Result<(), CloudError> {
         if !matches!(self.authentication, Authentication::Bearer) {
             return Err(invalid(
                 "an app-token client cannot accept OAuth token updates",
@@ -833,10 +878,28 @@ impl OpenCloudClient {
             .lock()
             .map_err(|_| invalid("authentication state unavailable"))?;
         let current = self.token_generation.load(Ordering::Acquire);
+        let security = self.security_generation.load(Ordering::Acquire);
+        if admission.is_some_and(|admission| {
+            admission.token_generation != current || admission.security_generation != security
+        }) {
+            return Err(CloudError::new(
+                ErrorKind::Unauthorized,
+                "authentication changed during token refresh",
+            ));
+        }
         let next = current
             .checked_add(1)
             .ok_or_else(|| invalid("authentication generation exhausted"))?;
+        let next_security = if admission.is_some() {
+            security
+        } else {
+            security
+                .checked_add(1)
+                .ok_or_else(|| invalid("authentication security generation exhausted"))?
+        };
         *token = bearer_token;
+        self.security_generation
+            .store(next_security, Ordering::Release);
         self.token_generation.store(next, Ordering::Release);
         Ok(())
     }
@@ -846,14 +909,30 @@ impl OpenCloudClient {
     /// needed by those operations while waiting. Immediate security/account
     /// invalidation continues to use `set_bearer_token` without this admission.
     pub fn begin_bearer_refresh(&self) -> Result<BearerRefreshAdmission, CloudError> {
-        self.bounded_operation_admission
-            .refresh(Instant::now() + Duration::from_secs(30))
+        // Capture before waiting, under the same mutex used by both setters.
+        // Never let a concurrent invalidation become this refresh's new base.
+        let (token_generation, security_generation) = {
+            let _token = self
+                .token
+                .lock()
+                .map_err(|_| invalid("authentication state unavailable"))?;
+            (
+                self.token_generation(),
+                self.security_generation.load(Ordering::Acquire),
+            )
+        };
+        self.bounded_operation_admission.refresh(
+            Instant::now() + Duration::from_secs(30),
+            token_generation,
+            security_generation,
+        )
     }
 
     /// Compare retained authentication ownership without exposing credentials.
     pub fn shares_authentication_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.token, &other.token)
             && Arc::ptr_eq(&self.token_generation, &other.token_generation)
+            && Arc::ptr_eq(&self.security_generation, &other.security_generation)
             && Arc::ptr_eq(
                 &self.bounded_operation_admission,
                 &other.bounded_operation_admission,
@@ -1326,6 +1405,23 @@ impl OpenCloudClient {
         include_self: bool,
         context: Option<RangeReadContext>,
     ) -> Result<(RemoteEntry, RemoteEntry), CloudError> {
+        self.ordinary_ancestor_root_and_last_observed_with_context(
+            space,
+            logical_path,
+            include_self,
+            context,
+            None,
+        )
+    }
+
+    fn ordinary_ancestor_root_and_last_observed_with_context(
+        &self,
+        space: &CloudSpace,
+        logical_path: &str,
+        include_self: bool,
+        context: Option<RangeReadContext>,
+        root_observer: Option<&dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>>,
+    ) -> Result<(RemoteEntry, RemoteEntry), CloudError> {
         validate_logical_path(logical_path)?;
         let parts: Vec<_> = logical_path
             .split('/')
@@ -1399,6 +1495,16 @@ impl OpenCloudClient {
                     ErrorKind::Unsupported,
                     "remote path ancestor is not a directory",
                 ));
+            }
+            if path == "/"
+                && let Some(observer) = root_observer
+            {
+                if let Some(context) = context {
+                    self.ensure_context_current(context)?;
+                }
+                // Report the validated fresh root before a descendant request
+                // can fail Offline; callers must not fall back to an old root.
+                observer(space, &entry)?;
             }
             last_entry = Some(entry);
         }
@@ -2598,6 +2704,16 @@ impl OpenCloudClient {
         Ok(())
     }
 
+    fn ensure_security_current(&self, expected: u64) -> Result<(), CloudError> {
+        if self.security_generation.load(Ordering::Acquire) != expected {
+            return Err(CloudError::new(
+                ErrorKind::Unauthorized,
+                "authenticated provider security changed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Inspect the root of a Space returned by this client's immediately
     /// preceding `spaces_with_context` call. This metadata-only operation
     /// deliberately returns encryption markers instead of routing through
@@ -3201,6 +3317,7 @@ impl OpenCloudClient {
         expected_root: &str,
         operation: &OperationCancellation,
     ) -> Result<RemoteEntry, CloudError> {
+        let security_generation = self.security_generation.load(Ordering::Acquire);
         if expected.path != path
             || expected.id.is_empty()
             || expected.id.len() > MAX_DAV_ENTRY
@@ -3226,38 +3343,23 @@ impl OpenCloudClient {
         let cancellation = budget.cancellation();
         let total_timeout =
             transfer_timeout_with_budget(&budget, TransferDirection::Download, expected.size);
-        let context = ACTIVE_RANGE_CONTEXT
-            .with(Cell::get)
-            .unwrap_or(RangeReadContext {
-                deadline: Instant::now() + total_timeout,
-                token_generation: self.token_generation(),
-            });
-        let _guard = RangeContextGuard::enter(context);
-        let active = || {
+        let inherited_context = ACTIVE_RANGE_CONTEXT.with(Cell::get);
+        let body_context = inherited_context.unwrap_or(RangeReadContext {
+            deadline: Instant::now() + total_timeout,
+            token_generation: self.token_generation(),
+        });
+        let metadata_active = |context| {
             ensure_operation_active(Some(operation))?;
+            self.ensure_security_current(security_generation)?;
             self.ensure_context_current(context)?;
             ensure_not_cancelled(&|| cancellation.is_cancelled() || budget.is_paused())
         };
-        active()?;
-        let (mut selected, url) = self.transfer_url(space, path)?;
-        active()?;
-        if !selected.writable {
-            return Err(CloudError::new(
-                ErrorKind::Forbidden,
-                "OpenCloud Space is read only",
-            ));
-        }
-        selected.dav_url = self
-            .validate_identity_addressed_root(&selected, expected_root)?
-            .to_string();
-        // Use the ordinary download metadata route: one root/ancestor chain
-        // and one leaf stat per phase, without recovery's repeated discovery.
-        let observe = || {
-            active()?;
-            self.check_transfer_root(&selected, path, Some(expected_root))?;
-            active()?;
-            let entry = self.stat_at_dav(&url, path)?;
-            active()?;
+        let observe = |selected: &CloudSpace, url: &Url, context| {
+            metadata_active(context)?;
+            self.check_transfer_root(selected, path, Some(expected_root))?;
+            metadata_active(context)?;
+            let entry = self.stat_at_dav(url, path)?;
+            metadata_active(context)?;
             validate_range_identity(&entry, &expected.id, &expected.etag, expected.size)?;
             if entry.path != expected.path || entry.directory || entry.encrypted || !entry.writable
             {
@@ -3265,11 +3367,51 @@ impl OpenCloudClient {
             }
             Ok(entry)
         };
-        read_transfer_metadata(Some(operation), "Readback initial metadata", observe)?;
+        let (selected, url, request, token) = {
+            let preparation = self.operation_context()?;
+            let context = RangeReadContext {
+                deadline: preparation.context.deadline.min(body_context.deadline),
+                ..preparation.context
+            };
+            let _context = RangeContextGuard::enter(context);
+            metadata_active(context)?;
+            let (mut selected, url) = self.transfer_url(space, path)?;
+            metadata_active(context)?;
+            if !selected.writable {
+                return Err(CloudError::new(
+                    ErrorKind::Forbidden,
+                    "OpenCloud Space is read only",
+                ));
+            }
+            selected.dav_url = self
+                .validate_identity_addressed_root(&selected, expected_root)?
+                .to_string();
+            // Admission remains closed through exact metadata verification and
+            // request construction, but never across the content body.
+            read_transfer_metadata(Some(operation), "Readback initial metadata", || {
+                observe(&selected, &url, context)
+            })?;
+            metadata_active(context)?;
+            let (request, token) =
+                self.request_async_with_context(Method::GET, &url, Some(context))?;
+            metadata_active(context)?;
+            (selected, url, request, token)
+        };
+        let active = || {
+            ensure_operation_active(Some(operation))?;
+            self.ensure_security_current(security_generation)?;
+            body_context.remaining()?;
+            if let Some(context) = inherited_context {
+                // An explicit opaque/range lease retains its original strict
+                // credential generation. Only ordinary transfer bodies relax
+                // benign rotation, never those externally admitted leases.
+                self.ensure_context_current(context)?;
+            }
+            ensure_not_cancelled(&|| cancellation.is_cancelled() || budget.is_paused())
+        };
         active()?;
-        let (request, token) = self.request_async(Method::GET, &url)?;
         let timeout = transfer_timeout_for_context(
-            context,
+            body_context,
             &budget,
             TransferDirection::Download,
             expected.size,
@@ -3277,6 +3419,7 @@ impl OpenCloudClient {
         let body_budget = budget.clone();
         let body_cancellation = cancellation.clone();
         let body_operation = operation.clone();
+        let security = Arc::clone(&self.security_generation);
         let generation = Arc::clone(&self.token_generation);
         let result = async_body::run_body_operation_cancellable(
             &self.body_runtime,
@@ -3286,9 +3429,22 @@ impl OpenCloudClient {
                 operation.is_cancelled()
                     || cancellation.is_cancelled()
                     || budget.is_paused()
-                    || self.token_generation() != context.token_generation
+                    || self.security_generation.load(Ordering::Acquire) != security_generation
+                    || inherited_context
+                        .is_some_and(|context| self.token_generation() != context.token_generation)
             },
             move |progress| async move {
+                ensure_operation_active(Some(&body_operation))?;
+                if security.load(Ordering::Acquire) != security_generation
+                    || inherited_context.is_some_and(|context| {
+                        generation.load(Ordering::Acquire) != context.token_generation
+                    })
+                {
+                    return Err(CloudError::new(
+                        ErrorKind::Unauthorized,
+                        "authenticated provider security changed",
+                    ));
+                }
                 let response = request
                     .header(IF_MATCH, &expected.etag)
                     .header("Cache-Control", "no-cache")
@@ -3314,7 +3470,10 @@ impl OpenCloudClient {
                     || {
                         body_operation.is_cancelled()
                             || body_cancellation.is_cancelled()
-                            || generation.load(Ordering::Acquire) != context.token_generation
+                            || security.load(Ordering::Acquire) != security_generation
+                            || inherited_context.is_some_and(|context| {
+                                generation.load(Ordering::Acquire) != context.token_generation
+                            })
                     },
                     &progress,
                 )
@@ -3327,7 +3486,18 @@ impl OpenCloudClient {
         );
         active()?;
         result?;
-        let after = read_transfer_metadata(Some(operation), "Readback final metadata", observe)?;
+        // Reacquire current bearer metadata admission after benign rotation,
+        // preserving security identity and this readback's total deadline.
+        let postflight = self.operation_context()?;
+        let post_context = RangeReadContext {
+            deadline: postflight.context.deadline.min(body_context.deadline),
+            ..postflight.context
+        };
+        let _context = RangeContextGuard::enter(post_context);
+        let after = read_transfer_metadata(Some(operation), "Readback final metadata", || {
+            observe(&selected, &url, post_context)
+        })?;
+        metadata_active(post_context)?;
         active()?;
         Ok(after)
     }
@@ -3353,7 +3523,7 @@ impl OpenCloudClient {
         operation: Option<&OperationCancellation>,
     ) -> Result<RemoteEntry, CloudError> {
         ensure_operation_active(operation)?;
-        let (selected, url, root_condition, context) = {
+        let (selected, url, root_condition, preparation) = {
             let preparation = self.operation_context()?;
             let context = preparation.context;
             ensure_operation_active(operation)?;
@@ -3382,7 +3552,7 @@ impl OpenCloudClient {
                 .transpose()?;
             self.ensure_context_current(context)?;
             ensure_operation_active(operation)?;
-            (selected, url, root_condition, context)
+            (selected, url, root_condition, preparation)
         };
         self.upload_prepared(
             space,
@@ -3394,7 +3564,7 @@ impl OpenCloudClient {
             selected,
             url,
             root_condition,
-            context,
+            preparation,
             None,
         )
     }
@@ -3411,7 +3581,7 @@ impl OpenCloudClient {
         selected: CloudSpace,
         url: Url,
         root_condition: Option<String>,
-        preparation_context: RangeReadContext,
+        preparation: BoundedOperationContext,
         is_current: Option<&dyn Fn() -> bool>,
     ) -> Result<RemoteEntry, CloudError> {
         let current = || {
@@ -3421,8 +3591,11 @@ impl OpenCloudClient {
             }
             Ok(())
         };
-        // The short metadata guard has ended. Pin request construction to its
-        // generation/deadline without applying that deadline to the body.
+        let preparation_context = preparation.context;
+        let inherited_context = preparation._context.0;
+        let security_generation = self.security_generation.load(Ordering::Acquire);
+        // Keep admission closed until the request is constructed. Only the
+        // metadata phase uses this short deadline; the body keeps its budget.
         self.ensure_context_current(preparation_context)?;
         ensure_operation_active(operation)?;
         let file = File::open(source).map_err(io_error)?;
@@ -3446,11 +3619,18 @@ impl OpenCloudClient {
         let cancellation = budget.cancellation();
         let watchdog_cancellation = cancellation.clone();
         let body_operation = operation.cloned();
-        let total_timeout = transfer_timeout_with_budget(&budget, TransferDirection::Upload, size);
+        let total_timeout = match inherited_context {
+            Some(context) => {
+                transfer_timeout_for_context(context, &budget, TransferDirection::Upload, size)?
+            }
+            None => transfer_timeout_with_budget(&budget, TransferDirection::Upload, size),
+        };
         let response_token = token.clone();
-        let generation = self.token_generation.clone();
+        let security = Arc::clone(&self.security_generation);
+        let generation = Arc::clone(&self.token_generation);
         self.ensure_context_current(preparation_context)?;
         current()?;
+        drop(preparation);
         async_body::run_body_operation_cancellable(
             &self.body_runtime,
             self.body_idle_timeout,
@@ -3458,14 +3638,20 @@ impl OpenCloudClient {
             || {
                 watchdog_cancellation.is_cancelled()
                     || operation.is_some_and(OperationCancellation::is_cancelled)
-                    || self.token_generation() != preparation_context.token_generation
+                    || self.security_generation.load(Ordering::Acquire) != security_generation
+                    || inherited_context
+                        .is_some_and(|context| self.token_generation() != context.token_generation)
             },
             move |progress| async move {
                 if is_current.is_some_and(|check| !check()) {
                     return Err(conflict("create context changed"));
                 }
                 ensure_operation_active(body_operation.as_ref())?;
-                if generation.load(Ordering::Acquire) != preparation_context.token_generation {
+                if security.load(Ordering::Acquire) != security_generation
+                    || inherited_context.is_some_and(|context| {
+                        generation.load(Ordering::Acquire) != context.token_generation
+                    })
+                {
                     return Err(CloudError::new(
                         ErrorKind::Unauthorized,
                         "authenticated provider generation changed",
@@ -3480,8 +3666,10 @@ impl OpenCloudClient {
                             || body_operation
                                 .as_ref()
                                 .is_some_and(OperationCancellation::is_cancelled)
-                            || generation.load(Ordering::Acquire)
-                                != preparation_context.token_generation
+                            || security.load(Ordering::Acquire) != security_generation
+                            || inherited_context.is_some_and(|context| {
+                                generation.load(Ordering::Acquire) != context.token_generation
+                            })
                     },
                     progress,
                 );
@@ -3500,28 +3688,22 @@ impl OpenCloudClient {
             },
         )?;
         ensure_operation_active(operation)?;
-        if self.token_generation() != preparation_context.token_generation {
-            return Err(CloudError::new(
-                ErrorKind::Unauthorized,
-                "authenticated provider generation changed",
-            ));
+        self.ensure_security_current(security_generation)?;
+        if let Some(context) = inherited_context {
+            self.ensure_context_current(context)?;
         }
-        // Begin a separate bounded metadata phase after the body. Its deadline
-        // must not be the short preparation deadline, but its generation must
-        // still be the one that admitted and sent this upload.
+        // A benign same-account refresh may have rotated the credential during
+        // the body. Reobserve postflight with that current credential only if
+        // the original security ownership survived; never replay the PUT.
         let postflight = self.operation_context()?;
         let post_context = postflight.context;
-        if post_context.token_generation != preparation_context.token_generation {
-            return Err(CloudError::new(
-                ErrorKind::Unauthorized,
-                "authenticated provider generation changed",
-            ));
-        }
+        self.ensure_security_current(security_generation)?;
         // PUT is never repeated. Some servers publish a new file before its
         // revision metadata; wait briefly for a verifiable revision instead
         // of turning that observation into an uncertain completed upload.
         let entry = read_transfer_metadata(operation, "Upload final metadata", || {
             self.ensure_context_current(post_context)?;
+            self.ensure_security_current(security_generation)?;
             let result = if expected_root.is_some() {
                 self.check_transfer_root(&selected, path, expected_root)?;
                 self.stat_at_dav(&url, path)
@@ -3529,9 +3711,11 @@ impl OpenCloudClient {
                 self.stat(space, path)
             };
             self.ensure_context_current(post_context)?;
+            self.ensure_security_current(security_generation)?;
             result
         })?;
         self.ensure_context_current(post_context)?;
+        self.ensure_security_current(security_generation)?;
         ensure_operation_active(operation)?;
         if entry.size != size {
             return Err(invalid("uploaded file failed size verification"));
@@ -3767,18 +3951,8 @@ impl CloudBackend for OpenCloudClient {
             ));
         }
 
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let context = ACTIVE_RANGE_CONTEXT.with(Cell::get).map_or_else(
-            || RangeReadContext {
-                deadline,
-                token_generation: self.token_generation(),
-            },
-            |outer| RangeReadContext {
-                deadline: outer.deadline.min(deadline),
-                token_generation: outer.token_generation,
-            },
-        );
-        let _guard = RangeContextGuard::enter(context);
+        let operation = self.operation_context()?;
+        let context = operation.context;
         let check_current = || {
             if !is_current() {
                 return Err(CloudError::new(
@@ -3866,6 +4040,16 @@ impl CloudBackend for OpenCloudClient {
         path: &str,
         expected_parent_id: Option<&str>,
     ) -> Result<OrdinaryDirectorySnapshot, CloudError> {
+        self.directory_snapshot_with_root_observer(space, path, expected_parent_id, &|_, _| Ok(()))
+    }
+
+    fn directory_snapshot_with_root_observer(
+        &self,
+        space: &str,
+        path: &str,
+        expected_parent_id: Option<&str>,
+        observer: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+    ) -> Result<OrdinaryDirectorySnapshot, CloudError> {
         validate_logical_path(path)?;
         let operation = self.operation_context()?;
         let context = operation.context;
@@ -3878,12 +4062,17 @@ impl CloudBackend for OpenCloudClient {
                     let (selected, url) =
                         self.resolve_dav_with_context(space, path, Some(context))?;
                     self.ensure_context_current(context)?;
-                    let (root, parent) = self.ordinary_ancestor_root_and_last_with_context(
-                        &selected,
-                        path,
-                        true,
-                        Some(context),
-                    )?;
+                    if selected.id != space || selected.encrypted {
+                        return Err(conflict("ordinary directory identity changed"));
+                    }
+                    let (root, parent) = self
+                        .ordinary_ancestor_root_and_last_observed_with_context(
+                            &selected,
+                            path,
+                            true,
+                            Some(context),
+                            Some(observer),
+                        )?;
                     if selected.id != space
                         || selected.encrypted
                         || root.path != "/"
@@ -4105,7 +4294,7 @@ impl CloudBackend for OpenCloudClient {
             Ok(())
         };
         current()?;
-        let (selected, url, root_condition, context) = {
+        let (selected, url, root_condition, preparation) = {
             let preparation = self.operation_context()?;
             let context = preparation.context;
             // Only the fresh read observation may repeat. The durable local
@@ -4154,7 +4343,7 @@ impl CloudBackend for OpenCloudClient {
             }
             current()?;
             self.ensure_context_current(context)?;
-            (observation.space, url, root_condition, context)
+            (observation.space, url, root_condition, preparation)
         };
         current()?;
         self.upload_prepared(
@@ -4167,7 +4356,7 @@ impl CloudBackend for OpenCloudClient {
             selected,
             url,
             Some(root_condition),
-            context,
+            preparation,
             Some(is_current),
         )
         .map(Some)

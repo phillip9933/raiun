@@ -881,7 +881,7 @@ impl Engine {
                 Some(Arc::new(OfflineCache {
                     cache,
                     account_id,
-                    origin,
+                    origin: validated_scope.origin().to_owned(),
                 }))
             } else {
                 None
@@ -1835,9 +1835,36 @@ impl Engine {
             .offline_cache
             .as_ref()
             .expect("cached list requires a cache context");
-        let observed = self
-            .backend
-            .directory_snapshot(space, path, expected_parent_id);
+        // Preserve root evidence even if a later ancestor/list request fails.
+        // The observation API invokes this before that fallible work, without
+        // a second probe. Contradictory roots across retries forbid fallback.
+        let observed_scope = std::cell::RefCell::new(None);
+        let root_changed = std::cell::Cell::new(false);
+        let observed = self.backend.directory_snapshot_with_root_observer(
+            space,
+            path,
+            expected_parent_id,
+            &|selected, root| {
+                let scope = self.plaintext_scope_from_observation(space, selected, root)?;
+                let mut prior = observed_scope.borrow_mut();
+                if prior.as_ref().is_some_and(|previous| *previous != scope) {
+                    root_changed.set(true);
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "cloud Space root changed during directory observation",
+                    ));
+                }
+                *prior = Some(scope);
+                Ok(())
+            },
+        );
+        if root_changed.get() {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "cloud Space root changed during directory observation",
+            ));
+        }
+        let observed_scope = observed_scope.into_inner();
         let mut metadata = self
             .try_metadata_observation()?
             .filter(|guard| observed_epoch == Some(**guard));
@@ -1847,15 +1874,24 @@ impl Engine {
                 // The pending overlay may persist conflict markers. Fence
                 // sibling observations before entering that guarded fallback.
                 Self::advance_metadata_epoch(metadata.as_mut().expect("metadata guard exists"))?;
-                let scope = self
-                    .cached_scope(space, context)
-                    .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?;
+                let scope = match observed_scope {
+                    Some(scope) => scope,
+                    None => self
+                        .cached_scope(space, context)
+                        .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?,
+                };
                 return self.cached_listing(context, &scope, path, error, capture);
             }
             Err(error) => return Err(error),
         };
         let scope =
             self.plaintext_scope_from_observation(space, &snapshot.space, &snapshot.root)?;
+        if observed_scope.is_some_and(|observed| observed != scope) {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "cloud Space root changed during directory observation",
+            ));
+        }
         let parent = snapshot.parent;
         if parent.path.trim_end_matches('/') != path.trim_end_matches('/')
             || !parent.directory
