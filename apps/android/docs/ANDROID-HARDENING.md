@@ -38,6 +38,12 @@ Separate lifecycle fixes reject old ordinary-browser results after an account or
 
 See [current architecture](CURRENT-ARCHITECTURE.md#android-150-component-refactoring--51) for ownership and the reasons a separate vault module remains deferred. This section describes the Android 1.5.0 release source. Publication, exact release gates and physical-device acceptance are recorded separately; source organization alone establishes none of them.
 
+## Local preview and export ownership follow-up — #51
+
+The local follow-up after Android 1.5.0 separates ordinary export lifetime and encrypted preview action execution into `OrdinaryExportOwner` and `VaultPreviewActions`. Account admission remains with `BrowserAccountContext`; encrypted session/key/generation authority remains with `VaultSessionLifecycle`. See the [ownership description](CURRENT-ARCHITECTURE.md#local-component-refactoring-after-android-150--51) for export-gate, edit-buffer and external-handoff cleanup boundaries. No database migration, credential or encryption-format change is introduced.
+
+Further local extraction places backup commands and transfer-conflict decisions in `BrowserBackupCommands` and `BrowserTransferCommands`, and encrypted root-management operations in `VaultRootManagement`. Account epochs, source fingerprints and lock-revision admission remain with their existing authorities. Backend adapters retain the existing write, cancellation and local cleanup implementations; extracting commands does not authorize replaying an uncertain mutation.
+
 ## Typed transfer semantics — #52
 
 [TransferState](../core/model/src/main/kotlin/eu/opencloud/android/next/core/model/TransferState.kt) in `core:model` defines shared state semantics. The database exposes a compatibility type alias and parses `TransferEntity.state` through `typedState`. Room remains at schema 28; `transfers.state` stays `TEXT` with the same exact, case-sensitive values. No migration or automatic rewrite of existing rows is introduced.

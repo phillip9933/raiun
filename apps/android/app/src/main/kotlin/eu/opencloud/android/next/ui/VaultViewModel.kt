@@ -10,7 +10,6 @@ import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.security.VaultIdentity
 import eu.opencloud.android.next.core.security.VaultKeyStore
 import eu.opencloud.android.next.core.sync.VaultExternalCopyLease
-import eu.opencloud.android.next.core.sync.VaultExternalCopyStore
 import eu.opencloud.android.next.core.sync.VaultFolder
 import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.core.sync.VaultLocationKind
@@ -29,7 +28,6 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
@@ -175,6 +173,42 @@ class VaultViewModel internal constructor(
                 }
             },
         )
+    private val previewActions =
+        VaultPreviewActions(
+            application,
+            ioDispatcher,
+            viewModelScope,
+            mutableState,
+            previewContent,
+            object : VaultPreviewActionOwner {
+                override fun isCurrent(
+                    opened: VaultRouteSession,
+                    token: Long,
+                    account: String,
+                ): Boolean = this@VaultViewModel.isCurrent(token, account) && session === opened
+
+                override fun nextGeneration(): Long = this@VaultViewModel.nextGeneration()
+
+                override fun trackOperation(job: Job) = lifecycle.trackOperation(job)
+
+                override suspend fun revalidateSource(
+                    opened: VaultRouteSession,
+                    expected: VaultFolder,
+                ): VaultFolder = revalidateActionSource(opened, expected)
+
+                override fun reloadContents(
+                    opened: VaultRouteSession,
+                    token: Long,
+                    account: String,
+                ) = loadContents(opened, mutableState.value.currentPath, token, account)
+
+                override fun reportFailure(
+                    failure: Exception,
+                    fallback: VaultRouteError,
+                    context: VaultFailureContext,
+                ) = this@VaultViewModel.reportFailure(failure, fallback, context)
+            },
+        )
     private val destinationPicker =
         VaultDestinationPicker(
             viewModelScope,
@@ -262,6 +296,29 @@ class VaultViewModel internal constructor(
                     fallback: VaultRouteError,
                     context: VaultFailureContext,
                 ) = this@VaultViewModel.reportFailure(failure, fallback, context)
+            },
+        )
+
+    private val rootManagement =
+        VaultRootManagement(
+            repository,
+            viewModelScope,
+            mutableState,
+            lifecycle,
+            object : VaultRootManagementPresentation {
+                override fun presentLocation(location: VaultLocation): VaultRouteLocation =
+                    this@VaultViewModel.presentLocation(location)
+
+                override fun renamed(location: VaultLocation) {
+                    directLocation = location
+                }
+
+                override fun showCatalog() = this@VaultViewModel.showCatalog()
+
+                override fun reportFailure(
+                    failure: Exception,
+                    context: VaultFailureContext,
+                ) = this@VaultViewModel.reportFailure(failure, VaultRouteError.OPERATION, context)
             },
         )
 
@@ -649,9 +706,8 @@ class VaultViewModel internal constructor(
                 findEntry(id)?.remote
             }
         if (remote == null || remote.isFolder) return
-        val request = ExternalHandoffRequest(opened, account, remote, generation)
-        mutableState.value = mutableState.value.copy(loading = true, error = null)
-        lifecycle.trackOperation(viewModelScope.launch { createExternalHandoff(request, onReady) })
+        val request = VaultExternalHandoffRequest(opened, account, remote, generation)
+        previewActions.openWith(request, onReady)
     }
 
     private fun canStartExternalHandoff(): Boolean =
@@ -659,57 +715,6 @@ class VaultViewModel internal constructor(
             !mutableState.value.loading &&
             !mutableState.value.previewSaving &&
             mutableState.value.mode == VaultRouteMode.CONTENTS
-
-    @Suppress("TooGenericExceptionCaught") // Download, storage and Android launcher failures become safe UI state.
-    private suspend fun createExternalHandoff(
-        request: ExternalHandoffRequest,
-        onReady: (VaultExternalCopyLease) -> Unit,
-    ) {
-        var lease: VaultExternalCopyLease? = null
-        try {
-            val current = refreshExternalHandoffSource(request) ?: return
-            withContext(ioDispatcher) {
-                lease =
-                    VaultExternalCopyStore.create(
-                        getApplication(),
-                        current.name,
-                        eu.opencloud.android.next.core.model
-                            .fileMimeType(current.name, current.contentType),
-                    ) { sink -> request.session.download(current, sink, Long.MAX_VALUE) }
-            }
-            if (!isCurrent(request.token, request.account) || session !== request.session) return
-            mutableState.value = mutableState.value.copy(loading = false)
-            onReady(requireNotNull(lease))
-            lease = null // The external-launch owner now cleans up on return or expiry.
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            if (isCurrent(request.token, request.account) && session === request.session) {
-                mutableState.value = mutableState.value.copy(loading = false)
-                reportFailure(
-                    failure,
-                    VaultRouteError.PREVIEW,
-                    VaultFailureContext(request.token, request.account, true),
-                )
-            }
-        } finally {
-            lease?.cleanup()
-        }
-    }
-
-    private suspend fun refreshExternalHandoffSource(request: ExternalHandoffRequest): VaultFolder? {
-        val current = revalidateActionSource(request.session, request.remote)
-        if (!isCurrent(request.token, request.account) || session !== request.session) return null
-        previewContent.refreshSource(request.remote, current)
-        return current
-    }
-
-    private data class ExternalHandoffRequest(
-        val session: VaultRouteSession,
-        val account: String,
-        val remote: VaultFolder,
-        val token: Long,
-    )
 
     fun dismissPreview() {
         nextGeneration()
@@ -722,125 +727,14 @@ class VaultViewModel internal constructor(
     fun savePreviewText(
         preview: VaultRoutePreview,
         bytes: ByteArray,
-    ) = savePreviewTextContent(preview, bytes)
+    ) = previewActions.saveText(preview, bytes)
 
     fun savePreviewTextRange(
         preview: VaultRoutePreview,
         offset: Long,
         length: Long,
         bytes: ByteArray,
-    ) = savePreviewTextContent(preview, bytes, offset, length)
-
-    @Suppress("TooGenericExceptionCaught") // Server, stream and crypto failures share cancellation-safe cleanup.
-    private fun savePreviewTextContent(
-        preview: VaultRoutePreview,
-        bytes: ByteArray,
-        offset: Long? = null,
-        length: Long = 0,
-    ) {
-        val request = previewContent.loadedRequest
-        val backing = preview.backing
-        val rangeValid = validPreviewTextRange(backing, offset, length, bytes.size)
-        if (request == null || !canSavePreview(preview, request) || !rangeValid) {
-            bytes.fill(0)
-            return
-        }
-        if (!validEditableText(bytes)) {
-            bytes.fill(0)
-            mutableState.value = mutableState.value.copy(previewSaveError = VaultRouteError.OPERATION)
-            return
-        }
-        val token = nextGeneration()
-        mutableState.value = mutableState.value.copy(previewSaving = true, previewSaveError = null)
-        val saveJob =
-            viewModelScope.launch {
-                try {
-                    withContext(ioDispatcher) {
-                        val input =
-                            if (offset == null) {
-                                ByteArrayInputStream(bytes)
-                            } else {
-                                EncryptedTextReplacementStream(
-                                    requireNotNull(backing).inputStream(),
-                                    offset,
-                                    length,
-                                    bytes,
-                                )
-                            }
-                        input.use {
-                            val total =
-                                if (offset == null) {
-                                    bytes.size.toLong()
-                                } else {
-                                    requireNotNull(backing).size - length + bytes.size
-                                }
-                            request.session.queueReplacement(request.remoteEntry, it, total)
-                        }
-                    }
-                    if (!isCurrent(token, request.account) || session !== request.session) return@launch
-                    mutableState.value =
-                        mutableState.value.copy(queuedUploadCount = mutableState.value.queuedUploadCount + 1)
-                    clearPreview()
-                    mutableState.value = mutableState.value.copy(preview = null, loading = true, error = null)
-                    loadContents(request.session, mutableState.value.currentPath, token, request.account)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    if (isCurrent(token, request.account) && session === request.session) {
-                        // Admission may have committed before scheduling/delivery was interrupted.
-                        // Retain the draft but require a fresh version before another replacement.
-                        previewContent.forgetRequest()
-                        mutableState.value =
-                            mutableState.value.copy(
-                                preview = preview.copy(editable = false),
-                                previewSaving = false,
-                                previewSaveError = classifyVaultFailure(failure, VaultRouteError.OPERATION),
-                            )
-                        reportFailure(
-                            failure,
-                            VaultRouteError.OPERATION,
-                            VaultFailureContext(token, request.account, lockOnRevocation = true),
-                        )
-                    }
-                } finally {
-                    bytes.fill(0)
-                }
-            }
-        // Also covers cancellation before the launched coroutine has entered its try/finally.
-        saveJob.invokeOnCompletion { bytes.fill(0) }
-        lifecycle.trackOperation(saveJob)
-    }
-
-    private fun validPreviewTextRange(
-        backing: EncryptedPreviewBacking?,
-        offset: Long?,
-        length: Long,
-        replacementSize: Int,
-    ): Boolean =
-        offset == null ||
-            runCatching {
-                val size = requireNotNull(backing).size
-                offset >= 0 &&
-                    length >= 0 &&
-                    offset <= size &&
-                    length <= size - offset &&
-                    replacementSize.toLong() <= Long.MAX_VALUE - (size - length)
-            }.getOrDefault(false)
-
-    private fun canSavePreview(
-        preview: VaultRoutePreview,
-        request: VaultPreviewRequest,
-    ): Boolean =
-        routeActive &&
-            mutableState.value.mode == VaultRouteMode.CONTENTS &&
-            !mutableState.value.loading &&
-            !mutableState.value.previewSaving &&
-            mutableState.value.preview === preview &&
-            preview.editable &&
-            preview.kind == VaultPreviewKind.TEXT &&
-            !request.session.isOffline &&
-            session === request.session &&
-            isCurrent(request.token, request.account)
+    ) = previewActions.saveText(preview, bytes, offset, length)
 
     fun createFolder(name: String) =
         runSessionMutation { opened ->
@@ -1490,96 +1384,27 @@ class VaultViewModel internal constructor(
         }
     }
 
-    /** A management lease is valid only for this unlocked root and route revision. */
-    @Suppress("ReturnCount", "ComplexCondition") // Reject every stale lease dimension before exposing a target.
-    fun managementTarget(expectedLockRevision: Long): VaultLocation? {
-        val current = mutableState.value
-        val selected = target ?: return null
-        val opened = session ?: return null
-        if (!routeActive ||
-            current.mode != VaultRouteMode.CONTENTS ||
-            current.loading ||
-            opened.isOffline ||
-            current.lockRevision != expectedLockRevision ||
-            current.currentPath.isNotEmpty() ||
-            opened.identity != selected.expectedIdentity()
-        ) {
-            return null
-        }
-        return selected.location.copy(
-            title = selected.title,
-            kind =
-                if (selected.location.kind == VaultLocationKind.SPACE_VAULT) {
-                    VaultLocationKind.SPACE_VAULT
-                } else {
-                    VaultLocationKind.FOLDER_VAULT
-                },
-            remoteVaultId = selected.remoteVaultId,
-            vaultPath = selected.vaultPath,
-            isVaultRoot = true,
-        )
-    }
+    fun managementTarget(expectedLockRevision: Long): VaultLocation? =
+        rootManagement.managementTarget(expectedLockRevision)
 
     fun isManagementUnlocked(
         location: VaultLocation,
         expectedLockRevision: Long,
-    ): Boolean {
-        val current = managementTarget(expectedLockRevision) ?: return false
-        return current.accountId == location.accountId &&
-            current.canonicalServer == location.canonicalServer &&
-            current.driveId == location.driveId &&
-            current.remoteVaultId == location.remoteVaultId &&
-            current.sourceRootId == location.sourceRootId &&
-            current.vaultPath == location.vaultPath &&
-            current.rootWebDavUrl == location.rootWebDavUrl &&
-            current.kind == location.kind
-    }
+    ): Boolean = rootManagement.isManagementUnlocked(location, expectedLockRevision)
 
-    @Suppress("ReturnCount") // Updates require a live identity; metadata persistence is best effort.
     fun managedSpaceChanged(
         location: VaultLocation,
         expectedLockRevision: Long,
-    ) {
-        if (!isManagementUnlocked(location, expectedLockRevision)) return
-        lifecycle.updateTargetTitle(location.title)
-        mutableState.value = mutableState.value.copy(selectedTitle = location.title)
-    }
+    ) = rootManagement.managedSpaceChanged(location, expectedLockRevision)
 
-    @Suppress("TooGenericExceptionCaught") // Cleanup errors retain a locked route; cancellation is rethrown.
     fun managedSpaceLifecycleChanged(
         expectedLockRevision: Long,
         onComplete: () -> Unit,
-    ) {
-        val location = managementTarget(expectedLockRevision) ?: return
-        val identity = session?.identity ?: return
-        lock()
-        val token = generation
-        viewModelScope.launch {
-            try {
-                repository.removeOffline(identity)
-                if (isCurrent(token, location.accountId)) onComplete()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                reportFailure(failure, VaultRouteError.OPERATION, VaultFailureContext(token, location.accountId))
-            }
-        }
-    }
+    ) = rootManagement.managedSpaceLifecycleChanged(expectedLockRevision, onComplete)
 
-    @Suppress("ComplexCondition") // Only a live online root may expose server management.
-    fun showRootActions() {
-        if (session != null &&
-            session?.isOffline == false &&
-            mutableState.value.mode == VaultRouteMode.CONTENTS &&
-            mutableState.value.currentPath.isEmpty()
-        ) {
-            mutableState.value = mutableState.value.copy(rootActionsVisible = true)
-        }
-    }
+    fun showRootActions() = rootManagement.showRootActions()
 
-    fun dismissRootActions() {
-        mutableState.value = mutableState.value.copy(rootActionsVisible = false)
-    }
+    fun dismissRootActions() = rootManagement.dismissRootActions()
 
     private fun maybeOpenRootActions() {
         val current = mutableState.value
@@ -1593,114 +1418,12 @@ class VaultViewModel internal constructor(
         }
     }
 
-    // Explicit guards reject stale operations; provider failures become safe UI states.
-    @Suppress("ReturnCount", "TooGenericExceptionCaught")
     fun renameRoot(
         name: String,
         expectedLockRevision: Long,
-    ) {
-        if (!isCurrentRootAction(expectedLockRevision)) return
-        val opened = session ?: return
-        val account = accountId ?: return
-        val selected = target ?: return
-        if (selected.location.kind != VaultLocationKind.FOLDER_VAULT || name.isBlank()) return
-        val token = nextGeneration()
-        mutableState.value = mutableState.value.copy(loading = true, rootActionsVisible = false, error = null)
-        lifecycle.trackOperation(
-            viewModelScope.launch {
-                try {
-                    val changed = opened.renameVaultRoot(name)
-                    repository.removeOffline(opened.identity)
-                    if (!isCurrent(token, account)) return@launch
-                    closeSession()
-                    clearSensitiveState()
-                    lifecycle.replaceTarget(
-                        VaultSessionTarget(changed, changed.vaultPath, changed.title, changed.remoteVaultId),
-                    )
-                    directLocation = changed
-                    val enrollment = lifecycle.enrollmentStatus(requireNotNull(currentTargetIdentity))
-                    lifecycle.updatePreferenceTitle(requireNotNull(currentTargetIdentity), changed.title)
-                    mutableState.value =
-                        VaultRouteState(
-                            mode = VaultRouteMode.UNLOCK,
-                            selectedLocation = presentLocation(changed),
-                            selectedTitle = changed.title,
-                            biometricEnrolled = enrollment.first,
-                            biometricNeedsForget = enrollment.second,
-                            lockRevision = mutableState.value.lockRevision + 1,
-                        )
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    lockAfterAmbiguousRootChange(failure, token, account)
-                }
-            },
-        )
-    }
+    ) = rootManagement.renameRoot(name, expectedLockRevision)
 
-    // Explicit guards reject stale operations; provider failures become safe UI states.
-    @Suppress("ReturnCount", "TooGenericExceptionCaught")
-    fun deleteRoot(expectedLockRevision: Long) {
-        if (!isCurrentRootAction(expectedLockRevision)) return
-        val opened = session ?: return
-        val account = accountId ?: return
-        val selected = target ?: return
-        if (selected.location.kind != VaultLocationKind.FOLDER_VAULT) return
-        val token = nextGeneration()
-        mutableState.value = mutableState.value.copy(loading = true, rootActionsVisible = false, error = null)
-        lifecycle.trackOperation(
-            viewModelScope.launch {
-                try {
-                    opened.deleteVaultRoot()
-                    repository.removeOffline(opened.identity)
-                    if (!isCurrent(token, account)) return@launch
-                    val deletedIdentity = opened.identity
-                    closeSession()
-                    clearSensitiveState()
-                    lifecycle.clearTarget()
-                    showCatalog()
-                    lifecycle.cleanupDeletedTarget(deletedIdentity)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    lockAfterAmbiguousRootChange(failure, token, account)
-                }
-            },
-        )
-    }
-
-    private fun isCurrentRootAction(expectedLockRevision: Long): Boolean =
-        routeActive &&
-            !mutableState.value.loading &&
-            mutableState.value.lockRevision == expectedLockRevision &&
-            mutableState.value.mode == VaultRouteMode.CONTENTS &&
-            mutableState.value.currentPath.isEmpty() &&
-            mutableState.value.selectedLocation?.kind == VaultLocationKindUi.FOLDER_VAULT &&
-            session?.isOffline == false &&
-            target?.location?.kind == VaultLocationKind.FOLDER_VAULT
-
-    private fun lockAfterAmbiguousRootChange(
-        failure: Throwable,
-        token: Long,
-        account: String,
-    ) {
-        if (!isCurrent(token, account)) return
-        val classified = classifyVaultFailure(failure, VaultRouteError.OPERATION)
-        closeSession()
-        clearSensitiveState()
-        val selected = target
-        val enrollment = selected?.let { lifecycle.enrollmentStatus(it.expectedIdentity()) }
-        mutableState.value =
-            VaultRouteState(
-                mode = if (selected == null) VaultRouteMode.CATALOG else VaultRouteMode.UNLOCK,
-                selectedLocation = selected?.let { presentLocation(it.location) },
-                selectedTitle = selected?.title,
-                error = if (classified.requiresVaultRelock()) classified else VaultRouteError.OPERATION,
-                biometricEnrolled = enrollment?.first ?: false,
-                biometricNeedsForget = enrollment?.second ?: false,
-                lockRevision = mutableState.value.lockRevision + 1,
-            )
-    }
+    fun deleteRoot(expectedLockRevision: Long) = rootManagement.deleteRoot(expectedLockRevision)
 
     private fun folderRequest(id: String): VaultContentsRequest? {
         val entry = findEntry(id)?.route?.takeIf { it.isFolder } ?: return null
@@ -2076,7 +1799,7 @@ private class VaultSourceChangedException : IllegalStateException("The selected 
 
 internal class VaultIdentityChangedException : IllegalStateException("Vault identity changed during unlock.")
 
-private fun VaultRouteError.requiresVaultRelock(): Boolean =
+internal fun VaultRouteError.requiresVaultRelock(): Boolean =
     this == VaultRouteError.AUTHENTICATION ||
         this == VaultRouteError.ACCESS_DENIED ||
         this == VaultRouteError.VAULT_CHANGED

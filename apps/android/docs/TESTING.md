@@ -19,6 +19,14 @@ These Gradle tasks match the [quality workflow](../../../.github/workflows/quali
 
 For focused changes, run the affected module's tests first. Documentation-only changes need path, link and command inspection rather than an app suite. A release candidate still needs the complete quality and emulator gates on the exact commit proposed for release.
 
+## Preview and ordinary export ownership
+
+The local refactoring after Android 1.5.0 adds `OrdinaryExportOwnerTest` and `VaultPreviewActionsTest`. They cover account-epoch changes during export, one in-flight export across account round trips, cancelled preparation/provider writes, local-copy retention after failure, edit-buffer wiping before a save starts, late save results after replacing a preview, external-launch failures and lease cleanup after a cancelled download returns. The vault fixtures execute on Robolectric API 26 and API 35; they are not connected-native or physical-device tests. Successful external-copy fixtures initialize WorkManager just as the provider fixtures do.
+
+Run these together with `BrowserAccountContextTest`, `VaultViewModelTransferTest`, `VaultPreviewContentTest` and `VaultViewModelRaceTest` before the broader quality checks. Existing lock/provider/native checks remain relevant; these unit fixtures do not establish behavior for every external app or document provider.
+
+The subsequent command extractions add focused backup, transfer-conflict and vault root-management fixtures. Their regressions exercise account-epoch changes after admission, source-fingerprint rejection, exact conflict decisions, stale lock revisions and mutation outcomes after replacing a route. These use synthetic backends; they do not rename or delete a real server location. Existing ViewModel, root-menu, source-selection and conflict tests remain part of the broader checks.
+
 ## OpenCloud 9 and guest links
 
 See [OpenCloud 9 compatibility](OPENCLOUD-9.md) for the protocol scope, security boundaries and pending real-server acceptance. Guest tests use synthetic mock responses; they must not send live invitation or renewal emails. Existing 1.2.0 device acceptance does not establish this new feature.

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Improvements
+
+- Separate ordinary file exports and encrypted preview actions into focused components, preserving account checks, cancellation and temporary-file cleanup.
+- Extract backup, transfer-conflict and encrypted root-management commands from the ViewModels while keeping their validation and recovery rules together.
+
 ## 1.5.0
 
 ### Fixes
