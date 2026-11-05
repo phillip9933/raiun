@@ -531,6 +531,7 @@ pub struct FileCreateTask {
 }
 struct Preparation {
     parent_components: Vec<String>,
+    name: String,
     recovery: Arc<dyn PreparedEditRecovery>,
     job: crate::StreamedRecoveryJob,
     current: crate::opencloud::file_create::Current,
@@ -612,7 +613,7 @@ impl FileCreateTask {
                     trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
                     let space = admission
-                        .fresh_create_space(&self.backend)?
+                        .fresh_create_space_for_child(&self.backend, &prep.name)?
                         .with_preparation_trace(Arc::clone(&trace));
                     if wait_for_recovery_health(&prep.job, &trace, &mut health_wait, || {
                         trace.enter(PreparationStage::Job);
@@ -843,6 +844,7 @@ impl ConfiguredRootConnection {
             Phase::Prepare,
             TaskKind::Prepare(Box::new(Preparation {
                 parent_components: attempt.parent_components.clone(),
+                name: attempt.name.clone(),
                 recovery,
                 job,
                 current,

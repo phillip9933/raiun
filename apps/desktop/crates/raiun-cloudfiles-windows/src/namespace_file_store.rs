@@ -1575,7 +1575,7 @@ pub(super) fn history_counts_with_acknowledged_gaps_existing(
     remaining: usize,
 ) -> Result<(usize, usize, usize), StoreError> {
     history_counts_existing_inner(
-        root, protector, policy, provider, physical, budget, remaining, false, None,
+        root, protector, policy, provider, physical, budget, remaining, false, None, None,
     )
     .map(|(records, unresolved, gaps, _, _)| (records, unresolved, gaps))
 }
@@ -1592,13 +1592,13 @@ pub(super) fn history_counts_detailed_existing(
     remaining: usize,
 ) -> Result<(usize, usize, usize, Vec<PendingFileCreateClassification>), StoreError> {
     history_counts_existing_inner(
-        root, protector, policy, provider, physical, budget, remaining, true, None,
+        root, protector, policy, provider, physical, budget, remaining, true, None, None,
     )
     .map(|(records, unresolved, gaps, details, _)| (records, unresolved, gaps, details))
 }
 
 /// Caller retains the original quota lease. Keys identify only exact historical
-/// originals in a different Space AND remote root, never replay/native custody.
+/// originals isolated from the exact fresh target, never replay/native custody.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn history_counts_for_fresh_create_space_existing(
     root: Arc<dyn Directory>,
@@ -1609,6 +1609,7 @@ pub(super) fn history_counts_for_fresh_create_space_existing(
     budget: &mut Budget,
     remaining: usize,
     candidate_scope: &EditJournalScope,
+    candidate_target: Option<&crate::fresh_create_target::FreshCreateTarget>,
 ) -> Result<(usize, usize, usize, Vec<StreamedRecordKey>), StoreError> {
     history_counts_existing_inner(
         root,
@@ -1620,6 +1621,7 @@ pub(super) fn history_counts_for_fresh_create_space_existing(
         remaining,
         false,
         Some(candidate_scope),
+        candidate_target,
     )
     .map(|(records, unresolved, gaps, _, keys)| (records, unresolved, gaps, keys))
 }
@@ -1643,6 +1645,7 @@ fn history_counts_existing_inner(
     remaining: usize,
     include_details: bool,
     candidate_scope: Option<&EditJournalScope>,
+    candidate_target: Option<&crate::fresh_create_target::FreshCreateTarget>,
 ) -> Result<FileHistoryScan, StoreError> {
     let files = root.child(ROOT, false)?;
     let scopes = catalogs(&*files, &*protector, budget)?;
@@ -1703,10 +1706,16 @@ fn history_counts_existing_inner(
                 let eligible = decoder.acknowledged_original(&loaded, budget)?;
                 acknowledged_join_gaps += usize::from(eligible);
                 let progress = loaded.record.progress;
-                if candidate_scope.is_some_and(|candidate| {
+                let different_space_root = candidate_scope.is_some_and(|candidate| {
                     scope.space_id != candidate.space_id
                         && scope.root_resource_id != candidate.root_resource_id
-                }) && progress.remote == NamespacePhase::Submitted
+                });
+                let same_space_root = candidate_scope.is_some_and(|candidate| {
+                    scope.space_id == candidate.space_id
+                        && scope.root_resource_id == candidate.root_resource_id
+                });
+                if (different_space_root || (same_space_root && candidate_target.is_some()))
+                    && progress.remote == NamespacePhase::Submitted
                     && progress.sequence == 1
                     && progress.attention.is_none()
                     && !progress.local_completed
@@ -1724,11 +1733,27 @@ fn history_counts_existing_inner(
                         budget,
                     )? == StreamedAttemptState::NotAttempted
                     {
-                        let key = StreamedRecordKey::from_manifest(&manifest)?;
-                        if space_exemptions.contains(&key) {
-                            return Err(StoreError::CorruptEvidence);
+                        // The manifest/reference/reservation join above already
+                        // authenticated the exact CreateFile destination, path,
+                        // FileID, generation and full snapshot commitment.
+                        let old = destination(&loaded.record.joined.intent)
+                            .map_err(|_| StoreError::CorruptEvidence)?;
+                        let target_disjoint = different_space_root
+                            || (same_space_root
+                                && candidate_target.is_some_and(|target| {
+                                    target.definitely_disjoint_from_file(
+                                        &old.parent.remote.resource_id,
+                                        &old.name,
+                                        &manifest.binding().relative_path,
+                                    )
+                                }));
+                        if target_disjoint {
+                            let key = StreamedRecordKey::from_manifest(&manifest)?;
+                            if space_exemptions.contains(&key) {
+                                return Err(StoreError::CorruptEvidence);
+                            }
+                            space_exemptions.push(key);
                         }
-                        space_exemptions.push(key);
                     }
                 }
                 if include_details && !loaded.record.progress.recorded_complete {

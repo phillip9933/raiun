@@ -189,6 +189,7 @@ fn history_summary_existing_inner(
         &mut budget,
         include_details,
         None,
+        None,
     )?;
     lock.verify()?;
     Ok(result)
@@ -205,6 +206,7 @@ pub(super) fn history_summary_for_fresh_create_space_existing_locked(
     provider: &crate::ProviderScope,
     physical_root: crate::ConfiguredRootIdentity,
     candidate_scope: &EditJournalScope,
+    candidate_target: Option<&crate::fresh_create_target::FreshCreateTarget>,
     budget: &mut Budget,
 ) -> Result<(NamespaceHistorySummary, Vec<StreamedRecordKey>), StoreError> {
     history_summary_existing_locked(
@@ -216,6 +218,7 @@ pub(super) fn history_summary_for_fresh_create_space_existing_locked(
         budget,
         false,
         Some(candidate_scope),
+        candidate_target,
     )
 }
 
@@ -229,6 +232,7 @@ fn history_summary_existing_locked(
     budget: &mut Budget,
     include_details: bool,
     candidate_scope: Option<&EditJournalScope>,
+    candidate_target: Option<&crate::fresh_create_target::FreshCreateTarget>,
 ) -> Result<(NamespaceHistorySummary, Vec<StreamedRecordKey>), StoreError> {
     // Re-enumerate only after locking; charge both bounded observations to the
     // same allowance rather than resetting it per catalog or remote scope.
@@ -340,6 +344,7 @@ fn history_summary_existing_locked(
                         budget,
                         remaining,
                         candidate,
+                        candidate_target,
                     )?;
                 space_exemptions = keys;
                 (records, unresolved, gaps, Vec::new())

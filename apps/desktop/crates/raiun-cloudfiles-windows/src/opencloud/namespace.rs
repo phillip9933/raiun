@@ -952,9 +952,47 @@ pub(crate) struct RefreshedDirectory {
 impl OwnedDirectorySession {
     /// Mint only from this original SDK-verified parent, which is retained
     /// through directory send/publication. The token grants no native custody.
+    #[allow(dead_code)] // Scope-only callers retain the conservative health policy.
     pub(crate) fn fresh_create_space(&self) -> Result<crate::FreshCreateSpace, BackendError> {
         self.check()?;
         let space = crate::FreshCreateSpace::from_verified_scope(self.captured.scope.clone());
+        self.check()?;
+        Ok(space)
+    }
+    pub(crate) fn fresh_create_space_for_child(
+        &self,
+        original_components: &[String],
+        name: &str,
+    ) -> Result<crate::FreshCreateSpace, BackendError> {
+        self.check()?;
+        let components: Vec<_> = original_components.iter().map(String::as_str).collect();
+        let prefix = match components.first().copied() {
+            Some("Personal") => 1,
+            Some("Spaces") if components.len() >= 2 => 2,
+            _ => return Err(BackendError::Unavailable),
+        };
+        if !valid_windows_component(name)
+            || crate::personal_create_relative(&components, name).is_none()
+            || self.captured.path != format!("/{}", components[prefix..].join("/"))
+            || self.captured.route.len() != original_components.len()
+            || !self
+                .captured
+                .route
+                .iter()
+                .zip(original_components)
+                .all(|(child, component)| child.name == *component)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let target = crate::fresh_create_target::FreshCreateTarget::from_verified_parent(
+            &self.captured.path,
+            &self.captured.remote.resource_id,
+            name,
+            crate::fresh_create_target::FreshCreateTargetKind::Directory,
+        )
+        .ok_or(BackendError::Unavailable)?;
+        let space =
+            crate::FreshCreateSpace::from_verified_target(self.captured.scope.clone(), target);
         self.check()?;
         Ok(space)
     }

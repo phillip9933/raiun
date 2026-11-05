@@ -312,12 +312,15 @@ pub struct VaultCleanupDiagnostics {
 // SDK helpers also compile on the host; only native workers emit these labels.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod creation_preparation;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod fresh_create_target;
 
 /// An exact Space identity captured by the retained SDK create admission.
 /// This read-only health input grants no dispatch or old-record authority.
 #[cfg(windows)]
 pub struct FreshCreateSpace {
     scope: EditJournalScope,
+    target: Option<fresh_create_target::FreshCreateTarget>,
     preparation_trace: Option<std::sync::Arc<creation_preparation::Trace>>,
 }
 #[cfg(windows)]
@@ -325,8 +328,22 @@ impl FreshCreateSpace {
     pub(crate) fn from_verified_scope(scope: EditJournalScope) -> Self {
         Self {
             scope,
+            target: None,
             preparation_trace: None,
         }
+    }
+    pub(crate) fn from_verified_target(
+        scope: EditJournalScope,
+        target: fresh_create_target::FreshCreateTarget,
+    ) -> Self {
+        Self {
+            scope,
+            target: Some(target),
+            preparation_trace: None,
+        }
+    }
+    pub(crate) fn target(&self) -> Option<&fresh_create_target::FreshCreateTarget> {
+        self.target.as_ref()
     }
     pub(crate) fn with_preparation_trace(
         mut self,

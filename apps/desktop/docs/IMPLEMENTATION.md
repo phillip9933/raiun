@@ -96,7 +96,16 @@ opaque-parent and conditional-create checks. A joint bounded custody scan can
 also isolate an exact retained Submitted/sequence-1, attention-free file create
 with its original NotAttempted snapshot from a different SDK-verified Space AND
 remote root. The same quota lease and metadata allowance cover namespace,
-exact original-key matching, other content and legacy checks. Same-Space work,
+exact original-key matching, other content and legacy checks. An SDK-minted
+original child target can also isolate that strict historical state inside the
+same exact Space/root. It binds the retained canonical parent path, remote parent
+identity, original validated leaf and file/folder kind. After authenticating the
+full old namespace/snapshot join, both complete target paths must be provably
+nonoverlapping (neither equal nor ancestor/descendant), and the same remote parent
+with an aliasing leaf remains blocked even if its path spelling changed. This
+exception accepts only unambiguous ASCII components; Unicode, short-name syntax
+and other ambiguous comparisons remain held. Ordinary Unicode creation without
+conflicting history is unchanged. Scope-only callers, mixed Space/root identities,
 unmatched snapshots, other pending operations and unknown evidence still block.
 This proves neither absence nor success of the old request and changes none of
 its records, bytes or recovery status. The new operation keeps its original SDK
@@ -104,6 +113,15 @@ parent, ticket, native pins, retained FileID collision fence and create-only wri
 Encrypted routing keeps its strict pending guard before capture; ordinary routing
 must pass the joint check. Dispatch admission is claimed before the write-ahead
 Submitted marker, and the marker still precedes creation of any Send task.
+
+Preparation workers wait only for exact existing quota-open/lock contention
+inside their original task, context and bounded deadline. They rerun the same
+authenticated health check before proceeding, retain the whole Prepare barrier,
+and do not turn other failures into retries or weaken any recovery guard. Native
+directory notifications are serviced independently of a pending dispatch wave
+using a bounded FIFO of complete validated batches; actual continuity loss still
+holds the connection without adopting or replaying old files. These changes are
+source implementations, not evidence of a completed physical bulk upload.
 
 Explicit continuation of an already acknowledged original stops before capture,
 staging or PUT and returns a retained review result. GUI and CLI validate the

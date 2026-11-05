@@ -439,6 +439,7 @@ impl SnapshotStore {
         provider: &crate::ProviderScope,
         physical_root: crate::ConfiguredRootIdentity,
         candidate_scope: &EditJournalScope,
+        candidate_target: Option<&crate::fresh_create_target::FreshCreateTarget>,
         namespace_configured: bool,
         trace: Option<&crate::creation_preparation::Trace>,
         scan_legacy: impl FnOnce(&mut DiscoveryBudget) -> Result<bool, StoreError>,
@@ -512,6 +513,7 @@ impl SnapshotStore {
                     provider,
                     physical_root,
                     candidate_scope,
+                    candidate_target,
                     &mut budget,
                 )?;
             // Keep every unknown/unconfigured-format and summary-bound refusal.

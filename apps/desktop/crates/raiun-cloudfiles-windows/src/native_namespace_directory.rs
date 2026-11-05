@@ -683,6 +683,7 @@ enum DirectoryTaskKind {
     Prepare {
         backend: Arc<crate::OpenCloudPlaceholderBackend>,
         components: Vec<String>,
+        name: String,
         job: crate::StreamedRecoveryJob,
         current: DirectoryCurrent,
         recovery: Arc<dyn crate::PreparedEditRecovery>,
@@ -724,6 +725,7 @@ impl DirectoryCreateTask {
             DirectoryTaskKind::Prepare {
                 backend,
                 components,
+                name,
                 job,
                 current,
                 recovery,
@@ -746,7 +748,7 @@ impl DirectoryCreateTask {
                     trace.enter(PreparationStage::Current);
                     session.check()?;
                     let space = session
-                        .fresh_create_space()?
+                        .fresh_create_space_for_child(&components, &name)?
                         .with_preparation_trace(Arc::clone(&trace));
                     if wait_for_recovery_health(&job, &trace, &mut health_wait, || {
                         trace.enter(PreparationStage::Job);
@@ -943,6 +945,7 @@ impl ConfiguredRootConnection {
         let kind = DirectoryTaskKind::Prepare {
             backend: backend.clone(),
             components: attempt.components.clone(),
+            name: attempt.name.clone(),
             job,
             current,
             recovery,

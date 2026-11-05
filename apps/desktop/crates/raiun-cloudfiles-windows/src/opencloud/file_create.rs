@@ -25,12 +25,34 @@ pub(crate) struct Admission {
 impl Admission {
     /// This token describes only the exact freshly verified parent used by
     /// this admission. It is never selected from an event or caller scope.
+    #[allow(dead_code)] // Scope-only callers retain the conservative health policy.
     pub(crate) fn fresh_create_space(
         &self,
         backend: &Arc<OpenCloudPlaceholderBackend>,
     ) -> Result<crate::FreshCreateSpace, BackendError> {
         self.check(backend)?;
         let space = crate::FreshCreateSpace::from_verified_scope(self.parent.scope.clone());
+        self.check(backend)?;
+        Ok(space)
+    }
+    pub(crate) fn fresh_create_space_for_child(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        name: &str,
+    ) -> Result<crate::FreshCreateSpace, BackendError> {
+        self.check(backend)?;
+        if !valid_windows_component(name) {
+            return Err(BackendError::Unavailable);
+        }
+        let target = crate::fresh_create_target::FreshCreateTarget::from_verified_parent(
+            &self.parent.path,
+            &self.parent.remote.resource_id,
+            name,
+            crate::fresh_create_target::FreshCreateTargetKind::File,
+        )
+        .ok_or(BackendError::Unavailable)?;
+        let space =
+            crate::FreshCreateSpace::from_verified_target(self.parent.scope.clone(), target);
         self.check(backend)?;
         Ok(space)
     }

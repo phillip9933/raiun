@@ -2024,6 +2024,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             &self.scope,
             self.root_identity,
             candidate,
+            space.target(),
             true,
             trace,
             |budget| {
