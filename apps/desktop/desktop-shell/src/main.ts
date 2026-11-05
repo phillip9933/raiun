@@ -1374,10 +1374,17 @@ function transfersPage() {
   const filter: TransferTab = state.transferFilter === 'attention' || state.transferFilter === 'history' ? state.transferFilter : 'active';
   const summary = transferTabSummary(filter);
   const counts = transferCounts(state.transfers);
+  const windows = isWindowsAgentStatus(state.status);
+  const accountIssue = windows && state.agentReachable && state.status?.connected
+    ? state.status.error?.trim() || '' : '';
+  const historyScope = windows
+    ? 'These filters show recent Sync Folders records. Copies through File Explorer are not included in these counts. An empty history does not mean all files have synced.'
+    : 'These filters cover provider operations, including folder sync and cloud-file changes.';
   const matching = state.transfers.filter(item => transferPresentation(item.state, item.direction, item.operation).tab === filter);
   return `<div class="page-title-row"><div><div class="eyebrow">ACTIVITY</div><h1>Transfers</h1><p class="lede">Review recent provider activity, offline files, and saved edits for this account.</p></div></div>
+    ${accountIssue ? `<div class="notice-card offline" role="alert"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>This account needs attention</b><p>${esc(accountIssue)}</p><p>Transfer history can be empty while this problem is still active.</p></div></div>` : ''}
     <div class="filter-tabs" role="group" aria-label="Provider activity filters">${filters.map(key => `<button class="filter-tab ${filter === key ? 'active' : ''}" data-filter="${key}" aria-pressed="${filter === key}">${transferTabSummary(key).label}${providerEnabled && state.agentReachable && state.status?.connected ? `<span class="tab-badge">${counts[key]}</span>` : ''}</button>`).join('')}</div>
-    <p class="helper-note">${esc(summary.description)} These filters cover provider operations, including folder sync and cloud-file changes. Counts reflect the agent’s 500 most recent records, not all past activity. Offline files and saved edits stay visible below.</p>
+    <p class="helper-note">${esc(summary.description)} ${esc(historyScope)} Counts reflect the agent’s 500 most recent records, not all past activity. Offline files and saved edits stay visible below.</p>
     ${isWindowsAgentStatus(state.status) ? windowsRecoverySettingsCard() : ''}
     ${!isWindowsAgentStatus(state.status) && state.agentReachable ? pendingOfflineWritesSection() : ''}
     ${vaultPendingFeaturesAvailable() && state.agentReachable ? encryptedOperationsTransferSection() : ''}

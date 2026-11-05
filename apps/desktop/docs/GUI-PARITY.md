@@ -53,6 +53,15 @@ vault operations remain ordered; close/dirty-state uncertainty still fences the
 whole wave. This removes the global one-file custody bottleneck without making
 folder dependency or native completion concurrent.
 
+A native bulk-copy follow-up removes the separate 64-work-item planner limit:
+plans now share the existing 1,024-hint/64-KiB notification bound and retain full
+batch pairing/alias validation before any capture. The first fixed failure reason
+is retained after a hold. Windows Transfers explicitly separates Sync Folders
+history from File Explorer copies and keeps current account problems visible even
+when that history is empty. The first 211-file laptop attempt stopped with a
+namespace hold; its exact historical branch was not recorded, so this source
+correction is not yet a successful measured upload claim.
+
 Cached stable-directory rename/delete and replacement-style editors still need
 their native custody paths; they cannot be enabled by deleting a capability
 check. Recovery quotas, conditional writes, root/account binding and exact native

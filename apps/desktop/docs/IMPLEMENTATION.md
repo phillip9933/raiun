@@ -31,6 +31,15 @@ parents remain ordered. Unknown/dirty close observations still invalidate the
 whole wave, and teardown cancels/drains original flights before releasing native
 owners. Compilation and review are not native throughput or refresh acceptance.
 
+The bounded native follow-up accepts a complete validated plan up to the parser's
+1,024-hint ceiling rather than refusing its 65th ordinary create endpoint. No
+prefix is processed before full pairing/alias validation, and the independent
+32-rename bound is unchanged. Fixed observer/planner/cursor reasons survive the
+existing status path and are latched for the held dispatcher's lifetime; no raw
+paths, server text or native error strings are surfaced. Windows UI history is
+labelled as Sync Folders history, with a persistent current-account warning on
+Transfers. No observer reattach, automatic rescan or held-file replay is added.
+
 ## Current candidate — 3 November 2026
 
 The canonical Linux/Windows GUI and headless CLI source is consolidated in the

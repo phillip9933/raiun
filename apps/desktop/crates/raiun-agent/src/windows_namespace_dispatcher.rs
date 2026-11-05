@@ -1,6 +1,14 @@
 //! One owner-thread observer and ordered, volatile routing. Names/counters are
 //! metadata only; existing consumers independently admit every mutation.
-const MAX_WORK: usize = 64;
+// A work item consumes at least one already-validated kernel hint. Keep the
+// volatile plan bounded by that same full-batch limit rather than refusing a
+// valid bulk copy before any independent native create admission can run.
+#[cfg(windows)]
+const MAX_WORK: usize = raiun_control_windows::directory_notifications::MAX_NOTIFICATION_HINTS;
+// The planner is also compiled by existing host-only regressions, where the
+// Windows adapter dependency is absent. Production uses the shared limit above.
+#[cfg(not(windows))]
+const MAX_WORK: usize = 1024;
 const MAX_PAIRS: usize = 32;
 /// Held until a typed non-admitting directory classifier and native evidence
 /// distinguish provider-created placeholders from new ordinary directories.
@@ -146,6 +154,9 @@ fn route_accounted(
     creates: bool,
     accounted: &[bool],
 ) -> Result<Vec<Work>, &'static str> {
+    if hints.len() > MAX_WORK {
+        return Err("Namespace batch limit");
+    }
     let mut result = Vec::new();
     let mut endpoints: Vec<&[String]> = Vec::new();
     let mut pair = 0;
@@ -264,7 +275,10 @@ impl Cursor {
         self.index < self.work.len()
     }
     fn admit(&mut self, work: Vec<Work>) -> Result<(), &'static str> {
-        if self.held || self.pending() || work.len() > MAX_WORK {
+        if work.len() > MAX_WORK {
+            return Err("Namespace batch limit");
+        }
+        if self.held || self.pending() {
             return Err("Namespace cursor unavailable");
         }
         self.work = work;
@@ -324,13 +338,83 @@ mod connected {
         OpenCloudPlaceholderBackend,
     };
     use raiun_control_windows::directory_notifications::{
-        DirectoryAction, NotificationBatch, ObserverPoll,
-        directory_rename_hints::{RenameHintBatch, pair_move_hints},
+        DirectoryAction, NotificationBatch, ObserverPoll, RescanReason,
+        directory_rename_hints::{RenameHintBatch, RenameHintReason, pair_move_hints},
     };
     use std::{sync::Arc, time::Duration};
 
     pub(crate) const HOLD: &str =
         "File namespace sync needs attention. Existing recovery files have been kept.";
+    const BATCH_LIMIT: &str =
+        "File namespace sync paused: notification batch limit. Recovery files have been kept.";
+    const RENAME_LIMIT: &str =
+        "File namespace sync paused: rename batch limit. Recovery files have been kept.";
+    const OBSERVER_LOSS: &str =
+        "File namespace sync paused: notification continuity lost. Recovery files have been kept.";
+    const OBSERVER_INVALID: &str =
+        "File namespace sync paused: malformed notification batch. Recovery files have been kept.";
+    const OBSERVER_STOPPED: &str =
+        "File namespace sync paused: observer stopped. Recovery files have been kept.";
+    const OBSERVER_UNAVAILABLE: &str =
+        "File namespace sync paused: observer unavailable. Recovery files have been kept.";
+    const CONTEXT_CHANGED: &str =
+        "File namespace sync paused: observer context changed. Recovery files have been kept.";
+    const PLAN_PAIRING: &str =
+        "File namespace sync paused: incomplete rename plan. Recovery files have been kept.";
+    const PLAN_AMBIGUOUS: &str =
+        "File namespace sync paused: ambiguous namespace plan. Recovery files have been kept.";
+    const PLAN_UNSUPPORTED: &str =
+        "File namespace sync paused: unsupported namespace plan. Recovery files have been kept.";
+    const PLAN_STATE: &str =
+        "File namespace sync paused: planner state unavailable. Recovery files have been kept.";
+    const OWNER_HOLD: &str = "File namespace sync paused: native owner preflight needs attention. Recovery files have been kept.";
+
+    // Only fixed, nonsecret reasons cross the existing status boundary. Never
+    // format native error values, notification names, paths or server text.
+    fn plan_hold(reason: &'static str) -> &'static str {
+        match reason {
+            "Namespace batch limit" => BATCH_LIMIT,
+            "Unpaired completed replacement hint" | "Unpaired namespace notification" => {
+                PLAN_PAIRING
+            }
+            "Ambiguous completed replacement endpoints" | "Ambiguous namespace endpoints" => {
+                PLAN_AMBIGUOUS
+            }
+            "Unsupported create namespace"
+            | "Unsupported observed namespace"
+            | "Unsupported namespace rename"
+            | "Unsupported namespace removal" => PLAN_UNSUPPORTED,
+            "Namespace cursor unavailable" | "Namespace generation exhausted" => PLAN_STATE,
+            "Observed entry needs attention" => OWNER_HOLD,
+            _ => HOLD,
+        }
+    }
+    fn observer_hold(reason: RescanReason) -> &'static str {
+        match reason {
+            RescanReason::Limit => BATCH_LIMIT,
+            RescanReason::EmptyCompletion => OBSERVER_LOSS,
+            RescanReason::MalformedBuffer => OBSERVER_INVALID,
+            RescanReason::NativeError(_) => OBSERVER_UNAVAILABLE,
+            RescanReason::RootChanged => CONTEXT_CHANGED,
+            RescanReason::Cancelled => OBSERVER_STOPPED,
+        }
+    }
+    fn pairing_hold(reason: RenameHintReason) -> &'static str {
+        match reason {
+            RenameHintReason::SourceRescan(reason) => observer_hold(reason),
+            RenameHintReason::Limit => BATCH_LIMIT,
+            RenameHintReason::UnpairedOldName
+            | RenameHintReason::UnpairedNewName
+            | RenameHintReason::InterleavedRename => PLAN_PAIRING,
+            RenameHintReason::DifferentParent | RenameHintReason::UnsupportedName => {
+                PLAN_UNSUPPORTED
+            }
+            RenameHintReason::CaseOnlyRename
+            | RenameHintReason::DuplicateEndpoint
+            | RenameHintReason::RenameChain
+            | RenameHintReason::CaseAmbiguousEndpoint => PLAN_AMBIGUOUS,
+        }
+    }
     #[cfg(all(test, debug_assertions))]
     #[derive(Clone, Copy, Debug)]
     pub(crate) struct Observation {
@@ -350,6 +434,7 @@ mod connected {
         instance: Option<u64>,
         batch: Option<NotificationBatch>,
         cursor: Cursor,
+        hold_reason: Option<&'static str>,
         pending_files: Vec<(Vec<String>, u64)>,
         file_wave_started: bool,
         #[cfg(all(test, debug_assertions))]
@@ -413,6 +498,7 @@ mod connected {
                 instance: None,
                 batch: None,
                 cursor: Cursor::default(),
+                hold_reason: None,
                 pending_files: Vec::new(),
                 file_wave_started: false,
                 #[cfg(all(test, debug_assertions))]
@@ -463,6 +549,7 @@ mod connected {
             self.rename.as_deref()
         }
         pub(crate) fn hold(&mut self) {
+            self.hold_reason.get_or_insert(HOLD);
             self.cursor.hold();
             self.batch = None;
             self.pending_files.clear();
@@ -510,9 +597,15 @@ mod connected {
             save_or_command_active: bool,
             workers: Option<&mut create::Workers>,
         ) -> Result<(), &'static str> {
+            // A held owner is never polled or replayed. Preserve its original
+            // fixed reason instead of replacing it with generic HOLD next tick.
+            if let Some(reason) = self.hold_reason {
+                return Err(reason);
+            }
             let result =
                 self.tick_inner(connection, backend, root, save_or_command_active, workers);
-            if result.is_err() {
+            if let Err(reason) = result {
+                self.hold_reason = Some(reason);
                 self.stop_create(connection);
                 self.hold();
             }
@@ -605,29 +698,32 @@ mod connected {
                 } else {
                     connection.attach_namespace_observer()
                 }
-                .map_err(|_| HOLD)?;
+                .map_err(|_| OBSERVER_UNAVAILABLE)?;
                 if value.root_identity() != root
                     || value.provider_scope() != backend.scope()
                     || value.instance() == 0
                     || self.instance.is_some_and(|id| id != value.instance())
                     || !self.current(backend, root)
                 {
-                    return Err(HOLD);
+                    return Err(CONTEXT_CHANGED);
                 }
                 self.attached = true;
                 self.instance = Some(value.instance());
                 match value.poll() {
                     ObserverPoll::Idle | ObserverPoll::Pending => return Ok(()),
-                    ObserverPoll::Stopped => return Err(HOLD),
+                    ObserverPoll::Stopped => return Err(OBSERVER_STOPPED),
                     ObserverPoll::Batch(batch) => {
-                        let RenameHintBatch::Pairs(pairs) = pair_move_hints(batch) else {
-                            return Err(HOLD);
+                        let pairs = match pair_move_hints(batch) {
+                            RenameHintBatch::Pairs(pairs) => pairs,
+                            RenameHintBatch::RescanRequired(reason) => {
+                                return Err(pairing_hold(reason));
+                            }
                         };
                         if pairs.len() > MAX_PAIRS {
-                            return Err(HOLD);
+                            return Err(RENAME_LIMIT);
                         }
                         let NotificationBatch::Hints(hints) = batch else {
-                            return Err(HOLD);
+                            return Err(PLAN_STATE);
                         };
                         let inputs = hints
                             .iter()
@@ -652,7 +748,7 @@ mod connected {
                                     .collect::<Vec<_>>();
                                 connection
                                     .completed_file_replacement(&refs)
-                                    .map_err(|_| HOLD)
+                                    .map_err(|_| OWNER_HOLD)
                             })
                             .collect::<Result<Vec<_>, _>>()?;
                         // A published replacement may arrive as temp->target.
@@ -680,9 +776,9 @@ mod connected {
                                     .collect::<Vec<_>>();
                                 if !connection
                                     .completed_replacement_source_absent(&old, &new)
-                                    .map_err(|_| HOLD)?
+                                    .map_err(|_| OWNER_HOLD)?
                                 {
-                                    return Err(HOLD);
+                                    return Err(OWNER_HOLD);
                                 }
                                 accounted[i] = true;
                                 retired_sources.push(inputs[i].components);
@@ -703,11 +799,11 @@ mod connected {
                             self.create.is_some(),
                             &accounted,
                         )
-                        .map_err(|_| HOLD)?;
+                        .map_err(plan_hold)?;
                         if work.is_empty() {
                             return Ok(());
                         }
-                        self.cursor.admit(work).map_err(|_| HOLD)?;
+                        self.cursor.admit(work).map_err(plan_hold)?;
                         // Only untrusted notification data is cloned, not any
                         // admission, publication receipt, store or native lease.
                         self.batch = Some(batch.clone());
@@ -718,20 +814,21 @@ mod connected {
                 return Err(HOLD);
             }
             let work = self.cursor.front().ok_or(HOLD)?;
-            let generation = self.cursor.generation().map_err(|_| HOLD)?;
+            let generation = self.cursor.generation().map_err(plan_hold)?;
             match work {
                 Work::Rename(index) => {
-                    let RenameHintBatch::Pairs(pairs) =
-                        pair_move_hints(self.batch.as_ref().ok_or(HOLD)?)
-                    else {
-                        return Err(HOLD);
+                    let pairs = match pair_move_hints(self.batch.as_ref().ok_or(HOLD)?) {
+                        RenameHintBatch::Pairs(pairs) => pairs,
+                        RenameHintBatch::RescanRequired(reason) => {
+                            return Err(pairing_hold(reason));
+                        }
                     };
                     let pair = pairs.get(index).cloned().ok_or(HOLD)?;
                     let components = pair.new_components().to_vec();
                     let refs = components.iter().map(String::as_str).collect::<Vec<_>>();
                     let plain = connection
                         .observe_namespace_entry(&refs)
-                        .map_err(|_| HOLD)?
+                        .map_err(|_| OWNER_HOLD)?
                         .kind
                         == NamespaceEntryKind::PlainFile;
                     if plain
@@ -752,14 +849,14 @@ mod connected {
                             CreateKind::File,
                             workers.ok_or(HOLD)?,
                         )? {
-                            self.cursor.complete().map_err(|_| HOLD)?;
+                            self.cursor.complete().map_err(plan_hold)?;
                         }
                     } else {
                         self.rename
                             .as_mut()
                             .ok_or(HOLD)?
                             .dispatch_pair(connection, backend, root, pair, generation)?;
-                        self.cursor.complete().map_err(|_| HOLD)?;
+                        self.cursor.complete().map_err(plan_hold)?;
                     }
                 }
                 Work::Directory(index) => {
@@ -800,14 +897,14 @@ mod connected {
                             kind,
                             workers.as_deref_mut().ok_or(HOLD)?,
                         )? {
-                            self.cursor.complete().map_err(|_| HOLD)?;
+                            self.cursor.complete().map_err(plan_hold)?;
                         } else if self
                             .create
                             .as_ref()
                             .is_some_and(|create| create.pipeline_ready(generation))
                         {
                             self.pending_files.push((components.to_vec(), generation));
-                            self.cursor.complete().map_err(|_| HOLD)?;
+                            self.cursor.complete().map_err(plan_hold)?;
                         }
                     } else if !self.cursor.directory_started {
                         let NotificationBatch::Hints(hints) = self.batch.as_ref().ok_or(HOLD)?
@@ -849,7 +946,7 @@ mod connected {
                                     .is_some_and(create::Producer::allows_file),
                             )
                         };
-                        match selection.map_err(|_| HOLD)? {
+                        match selection.map_err(plan_hold)? {
                             Selection::OfferDirectory => {
                                 if self
                                     .create
@@ -865,7 +962,7 @@ mod connected {
                                         CreateKind::Directory,
                                         workers.ok_or(HOLD)?,
                                     )? {
-                                        self.cursor.complete().map_err(|_| HOLD)?;
+                                        self.cursor.complete().map_err(plan_hold)?;
                                     }
                                 } else {
                                     // Kind/FileID are hints only. The original consumer
@@ -889,7 +986,7 @@ mod connected {
                                 // ownership, clean-content or upload claim is made.
                                 #[cfg(all(test, debug_assertions))]
                                 {
-                                    let observed = observed.map_err(|_| HOLD)?;
+                                    let observed = observed.map_err(|_| OWNER_HOLD)?;
                                     let index =
                                         if observed.kind == NamespaceEntryKind::CloudDirectory {
                                             0
@@ -904,7 +1001,7 @@ mod connected {
                                     self.fixture_counts[index] =
                                         self.fixture_counts[index].checked_add(1).ok_or(HOLD)?;
                                 }
-                                self.cursor.complete().map_err(|_| HOLD)?;
+                                self.cursor.complete().map_err(plan_hold)?;
                             }
                             Selection::CreateFile => {
                                 let create = self.create.as_mut().ok_or(HOLD)?;
@@ -918,10 +1015,10 @@ mod connected {
                                     CreateKind::File,
                                     workers,
                                 )? {
-                                    self.cursor.complete().map_err(|_| HOLD)?;
+                                    self.cursor.complete().map_err(plan_hold)?;
                                 } else if create.pipeline_ready(generation) {
                                     self.pending_files.push((components, generation));
-                                    self.cursor.complete().map_err(|_| HOLD)?;
+                                    self.cursor.complete().map_err(plan_hold)?;
                                 }
                             }
                         }
@@ -936,7 +1033,7 @@ mod connected {
                             .step_shared(connection, backend, root)
                         {
                             mkdir::SharedStep::Completed => {
-                                self.cursor.complete().map_err(|_| HOLD)?
+                                self.cursor.complete().map_err(plan_hold)?
                             }
                             mkdir::SharedStep::Waiting | mkdir::SharedStep::DeferredPristine => (),
                             mkdir::SharedStep::Held => return Err(HOLD),
