@@ -842,7 +842,7 @@ impl ConfiguredRootConnection {
         if slot.attempt.is_some() {
             return Ok(DirectoryCreateStep::BusyBeforeCapture);
         }
-        let (tracker, recovery) = self.file_rename_guard_context(backend)?;
+        let (tracker, recovery) = self.file_create_guard_context(backend)?;
         let Some(admission) = tracker.try_begin_directory() else {
             if tracker.known_busy_for_create() {
                 return Ok(DirectoryCreateStep::BusyBeforeCapture);
@@ -934,7 +934,7 @@ impl ConfiguredRootConnection {
         }
         root.verify_identity(true)?;
         root.verify_registered()?;
-        let (tracker, recovery) = self.file_rename_guard_context(&attempt.backend)?;
+        let (tracker, recovery) = self.file_create_guard_context(&attempt.backend)?;
         if !Arc::ptr_eq(&tracker, &attempt.tracker) || !Arc::ptr_eq(&recovery, &attempt.recovery) {
             return Err(Error::ProviderUnavailable);
         }

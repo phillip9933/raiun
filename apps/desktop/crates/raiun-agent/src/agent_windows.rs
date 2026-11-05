@@ -1529,6 +1529,7 @@ impl ProviderManager {
                                 Ok(json!({
                                     "modified_closes": observation.modified_closes,
                                     "unverifiable_closes": observation.unverifiable_closes,
+                                    "observed_unverifiable_closes": observation.observed_unverifiable_closes,
                                     "journaled_closes": observation.journaled_closes,
                                     "close_callbacks": observation.close_callbacks,
                                     "close_pool_refusals": observation.close_pool_refusals,

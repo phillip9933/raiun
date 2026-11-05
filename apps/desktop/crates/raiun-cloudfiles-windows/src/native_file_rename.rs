@@ -236,7 +236,7 @@ impl ConfiguredRootConnection {
     fn file_mutation_guard_context(
         &self,
         backend: &Arc<crate::OpenCloudPlaceholderBackend>,
-        create_diagnostics: bool,
+        fresh_create: bool,
     ) -> Result<
         (
             Arc<crate::close_capture_admission::CloseCaptureAdmission>,
@@ -246,7 +246,7 @@ impl ConfiguredRootConnection {
     > {
         use crate::CreateAdmissionStage as S;
         let refused = |stage, original| {
-            if create_diagnostics {
+            if fresh_create {
                 Error::CreateAdmission { stage }
             } else {
                 original
@@ -261,12 +261,15 @@ impl ConfiguredRootConnection {
         {
             return Err(refused(S::NativeContext, Error::EditRecoveryUnavailable));
         }
-        if self
-            .state
-            .unverifiable_placeholder_closes
-            .load(Ordering::Acquire)
-            != 0
-        {
+        // A retained tree's scan uncertainty remains a hard cleanup/legacy
+        // mutation barrier. Fresh creates independently pin their exact parent
+        // and source; they never adopt or replay historical objects.
+        let unverifiable = if fresh_create {
+            &self.state.observed_unverifiable_closes
+        } else {
+            &self.state.unverifiable_placeholder_closes
+        };
+        if unverifiable.load(Ordering::Acquire) != 0 {
             return Err(refused(S::UnverifiedClose, Error::EditRecoveryUnavailable));
         }
         if self

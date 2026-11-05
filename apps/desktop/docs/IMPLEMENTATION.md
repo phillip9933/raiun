@@ -57,6 +57,15 @@ closed owner, stale authorization and root binding. It checks each original
 condition once in its original order; existing rename error handling is retained.
 These diagnostics neither clear protected history nor grant retry authority.
 
+Fresh Windows creation distinguishes an observed failed close from conservative
+restart inventory uncertainty. All six actual close-failure paths set a sticky
+observed counter and the original aggregate; restart scans affect the aggregate
+only. Fresh file/directory admission and file publication use the observed
+counter, with their original opaque-parent, account/root, protected-history,
+close-ticket and conditional-create checks. Legacy mutations, cached status,
+cleanup, eviction and unregister retain the aggregate historical barrier. The
+split never adopts, queues, removes or certifies an old local object.
+
 ## Current candidate — 3 November 2026
 
 The canonical Linux/Windows GUI and headless CLI source is consolidated in the

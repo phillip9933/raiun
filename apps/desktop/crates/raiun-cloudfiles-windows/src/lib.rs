@@ -292,7 +292,11 @@ pub trait OrdinaryEditStatusSource: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaultCleanupDiagnostics {
     pub modified_closes: usize,
+    /// Legacy aggregate includes both actual close failures and reconnect
+    /// inventory uncertainty; existing destructive-operation guards retain it.
     pub unverifiable_closes: usize,
+    /// Actual observed close failures only; excludes reconnect scan inventory.
+    pub observed_unverifiable_closes: usize,
     pub journaled_closes: usize,
     pub close_callbacks: usize,
     pub close_pool_refusals: usize,

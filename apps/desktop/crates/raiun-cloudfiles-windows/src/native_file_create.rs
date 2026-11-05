@@ -738,7 +738,7 @@ impl ConfiguredRootConnection {
                 crate::FreshFileCreateOutcome::BusyBeforeCapture,
             ));
         }
-        let (tracker, recovery) = self.file_rename_guard_context(backend)?;
+        let (tracker, recovery) = self.file_create_guard_context(backend)?;
         let Some(ticket) = tracker.try_begin_independent_create(
             parent_components
                 .iter()
@@ -833,7 +833,7 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::ConfiguredRootChanged);
         }
-        let (tracker, recovery) = self.file_rename_guard_context(&attempt.backend)?;
+        let (tracker, recovery) = self.file_create_guard_context(&attempt.backend)?;
         if !Arc::ptr_eq(&tracker, &attempt.tracker) || !Arc::ptr_eq(&recovery, &attempt.recovery) {
             return Err(Error::ProviderUnavailable);
         }
@@ -1336,7 +1336,7 @@ impl ConfiguredRootConnection {
         let after_publication = || {
             current(authorization)
                 && self
-                    .file_rename_guard_context(backend)
+                    .file_create_guard_context(backend)
                     .is_ok_and(|(actual_tracker, actual)| {
                         Arc::ptr_eq(&actual, &recovery) && Arc::ptr_eq(&actual_tracker, &tracker)
                     })
@@ -1353,7 +1353,7 @@ impl ConfiguredRootConnection {
                 && !backend.is_revoked()
                 && self
                     .state
-                    .unverifiable_placeholder_closes
+                    .observed_unverifiable_closes
                     .load(Ordering::Acquire)
                     == 0
         };
