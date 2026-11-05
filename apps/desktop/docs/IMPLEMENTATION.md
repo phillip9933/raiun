@@ -4632,8 +4632,9 @@ root and parent permission checks still decide whether creation can proceed.
 
 The Windows namespace dispatcher services its original owner-thread observer
 before waiting on active file waves, native operations or paused execution.
-Up to 16 complete batches and 16,384 hints wait in a bounded FIFO; intake does not
-perform cloud work or grant native ownership. Existing full-batch planning, rename
+Up to 1,024 complete batches and 16,384 hints wait in a bounded FIFO with a checked
+4 MiB metadata-weight budget; this is not a total-process memory limit. Intake
+does not perform cloud work or grant native ownership. Existing full-batch planning, rename
 validation and file-wave completion order govern consumption. Actual observer
 loss, invalid context or a full backlog still holds the dispatcher and preserves
 recovery; intake never substitutes a rescan or adopts unobserved filesystem data.

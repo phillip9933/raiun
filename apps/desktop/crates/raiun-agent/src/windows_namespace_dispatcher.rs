@@ -338,13 +338,33 @@ mod connected {
         OpenCloudPlaceholderBackend,
     };
     use raiun_control_windows::directory_notifications::{
-        DirectoryAction, NotificationBatch, ObserverPoll, RescanReason,
+        DirectoryAction, DirectoryHint, NotificationBatch, ObserverPoll, RescanReason,
         directory_rename_hints::{RenameHintBatch, RenameHintReason, pair_move_hints},
     };
     use std::{collections::VecDeque, sync::Arc, time::Duration};
 
-    const MAX_WAITING_BATCHES: usize = 16;
-    const MAX_QUEUED_HINTS: usize = MAX_WAITING_BATCHES * MAX_WORK;
+    const MAX_WAITING_BATCHES: usize = MAX_WORK;
+    const MAX_QUEUED_HINTS: usize = 16 * MAX_WORK;
+    const MAX_QUEUED_WEIGHT: usize = 4 * 1024 * 1024;
+    type QueuedBatch = (NotificationBatch, usize);
+
+    fn queued_batch_weight(hints: &[DirectoryHint]) -> Option<usize> {
+        // Charge batch/queue headers, every owned hint and String header, and
+        // all UTF-8 component bytes. Double the structural charge conservatively
+        // for allocation/spare-capacity overhead; this is a queue weight budget,
+        // not an estimate of the complete process's memory usage.
+        let mut weight = std::mem::size_of::<QueuedBatch>()
+            .checked_add(std::mem::size_of::<VecDeque<QueuedBatch>>())?;
+        for hint in hints {
+            weight = weight.checked_add(std::mem::size_of::<DirectoryHint>())?;
+            for component in hint.components() {
+                weight = weight
+                    .checked_add(std::mem::size_of::<String>())?
+                    .checked_add(component.len())?;
+            }
+        }
+        weight.checked_mul(2)
+    }
 
     pub(crate) const HOLD: &str =
         "File namespace sync needs attention. Existing recovery files have been kept.";
@@ -438,8 +458,9 @@ mod connected {
         attached: bool,
         instance: Option<u64>,
         batch: Option<NotificationBatch>,
-        waiting_batches: VecDeque<NotificationBatch>,
+        waiting_batches: VecDeque<QueuedBatch>,
         queued_hints: usize,
+        queued_weight: usize,
         cursor: Cursor,
         hold_reason: Option<&'static str>,
         pending_files: Vec<(Vec<String>, u64)>,
@@ -506,6 +527,7 @@ mod connected {
                 batch: None,
                 waiting_batches: VecDeque::new(),
                 queued_hints: 0,
+                queued_weight: 0,
                 cursor: Cursor::default(),
                 hold_reason: None,
                 pending_files: Vec::new(),
@@ -563,6 +585,7 @@ mod connected {
             self.batch = None;
             self.waiting_batches.clear();
             self.queued_hints = 0;
+            self.queued_weight = 0;
             self.pending_files.clear();
             if let Some(file) = &mut self.rename {
                 file.hold();
@@ -671,13 +694,20 @@ mod connected {
                         .queued_hints
                         .checked_add(hints.len())
                         .ok_or(BACKLOG_LIMIT)?;
+                    let weight = queued_batch_weight(hints).ok_or(BACKLOG_LIMIT)?;
+                    let queued_weight = self
+                        .queued_weight
+                        .checked_add(weight)
+                        .ok_or(BACKLOG_LIMIT)?;
                     if self.waiting_batches.len() >= MAX_WAITING_BATCHES
                         || queued_hints > MAX_QUEUED_HINTS
+                        || queued_weight > MAX_QUEUED_WEIGHT
                     {
                         return Err(BACKLOG_LIMIT);
                     }
-                    self.waiting_batches.push_back(batch.clone());
+                    self.waiting_batches.push_back((batch.clone(), weight));
                     self.queued_hints = queued_hints;
+                    self.queued_weight = queued_weight;
                     Ok(())
                 }
             }
@@ -763,7 +793,7 @@ mod connected {
                 self.batch = None;
             }
             if self.batch.is_none() {
-                let Some(batch) = self.waiting_batches.pop_front() else {
+                let Some((batch, weight)) = self.waiting_batches.pop_front() else {
                     return Ok(());
                 };
                 let NotificationBatch::Hints(hints) = &batch else {
@@ -773,6 +803,7 @@ mod connected {
                     .queued_hints
                     .checked_sub(hints.len())
                     .ok_or(PLAN_STATE)?;
+                self.queued_weight = self.queued_weight.checked_sub(weight).ok_or(PLAN_STATE)?;
                 // Retain original whole-batch validation at consumption. Queue
                 // membership remains only observation metadata, never authority.
                 let pairs = match pair_move_hints(&batch) {
