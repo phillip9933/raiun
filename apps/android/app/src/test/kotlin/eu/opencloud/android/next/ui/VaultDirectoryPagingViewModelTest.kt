@@ -171,6 +171,61 @@ class VaultDirectoryPagingViewModelTest {
             model.leaveRoute()
         }
 
+    @Test fun `late first page after leaving and returning cannot close or replace the new session`() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            var pending: Continuation<List<VaultFolder>>? = null
+            val old = SnapshotSession(rows(2), delayedPage = { _, _ -> suspendCoroutine { pending = it } })
+            val replacement = SnapshotSession(listOf(fixtures.folder("replacement")))
+            var unlocks = 0
+            val model =
+                fixtures.newViewModel(
+                    TestRepository(unlockBlock = { _, _, _, _ -> if (unlocks++ == 0) old else replacement }),
+                )
+            model.enterRoute(ACCOUNT)
+            runCurrent()
+            model.selectLocation(
+                model.state.value.locations
+                    .single()
+                    .id,
+            )
+            model.unlock("secret".toCharArray())
+            runCurrent()
+            assertTrue(old.snapshots.isNotEmpty())
+            assertTrue(pending != null)
+
+            model.lock()
+            model.leaveRoute()
+            model.enterRoute(ACCOUNT)
+            runCurrent()
+            model.selectLocation(
+                model.state.value.locations
+                    .single()
+                    .id,
+            )
+            model.unlock("secret".toCharArray())
+            advanceUntilIdle()
+            assertEquals(
+                listOf("replacement"),
+                model.state.value.entries
+                    .map { it.name },
+            )
+
+            requireNotNull(pending).resume(rows(2))
+            advanceUntilIdle()
+            assertTrue(old.closed)
+            assertTrue(old.snapshots.single().closed)
+            assertFalse(replacement.closed)
+            assertFalse(replacement.snapshots.single().closed)
+            assertEquals(
+                listOf("replacement"),
+                model.state.value.entries
+                    .map { it.name },
+            )
+            model.leaveRoute()
+            assertTrue(replacement.closed)
+        }
+
     @Test fun `late page completion cannot mix an old directory with a refreshed generation`() =
         runTest {
             Dispatchers.setMain(StandardTestDispatcher(testScheduler))

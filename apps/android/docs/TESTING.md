@@ -823,3 +823,21 @@ The eight-module normal native matrix passes API26:89/7explicit skips and API35:
 Eleven advisory-checker tests and locale validation pass. The live OSV lookup reports no matches for127 pinned runtime Maven coordinates; bundled implementations/native/models/build/test components are outside that scan. Dependency-monitoring workflows remain local and have not run on GitHub. Earlier emulator disconnection and incomplete attempts remain recorded separately; completed matrices are not relabelled as physical-device or remote-CI results.
 
 The final actual release APK also passes all seven independent scanner/native/crypto/settings probes on each API, including standard/learned processing, native exceptions, full-resolution JPEG/two-page PDF export, staging-cancellation cleanup and source preservation. The fixture contains only framework probe code and no target keep roots; its reviewed residual recipe is bound to the exact installed debug-key APK and R8 mapping. Original unsigned payload entries are byte-identical to the debug-key test copy. Hardware camera quality and physical biometric enforcement remain separate owner-device checks. Evidence: project `outputs/android-review-fixes-20261104/`.
+
+### Local remembered-unlock measurements — 2026-11-05
+
+The local 1.5.0 candidate separates restore, server verification, initial directory acquisition and final admission timings. Total time ends at contents-state publication, before post-open transfers; it excludes initial coroutine queuing and frame rendering. Final admission includes any visibility-triggered directory reacquisition. Measurement is internal and disabled by default, with no runtime log or persisted history.
+
+Three host fixtures cover distinct boundaries:
+
+- `app`'s `VaultUnlockTimingTest` checks stage ordering, cancellation, observer failure, ownership and rejection at all six key-currency guards and changed account/binding snapshots. A bounded wall-clock fixture uses real dispatchers with synthetic 10 ms backing-service delays. Median total time changed from 215.081 ms to 185.003 ms after skipping three biometric-diagnostic-only IO steps for reused keys. These are controlled fixture timings, not a phone speed claim.
+- `core:security`'s `VaultRememberRestoreTimingTest` measures real durable-record IO and AES/GCM with an injected software provider; it checks one envelope load per restore, revocation and cleanup. This does not measure hardware Keystore.
+- `core:sync`'s `VaultUnlockTimingTest` measures the production repository/directory pipeline with real host rclone crypto and a loopback server, using empty/50-file Spaces and folders and controlled 0/40 ms response delays. Wrong-key and revoked-page denials remain mandatory. These results do not measure a deployed server.
+
+The host gate passes 2,179 cases with no failures/errors/skips. Fixed timing observations and before/after sources are retained in project `outputs/android-unlock-latency-20261105/`. No attached phone was available; the owner's perceived latency regression is not established or ruled out by these local timings. Existing native and phone results remain historical, and no new publication is implied.
+
+### Android 1.5.0 release freeze
+
+The release assigns code 58, above the accepted local phone test builds 56 and 57. Application identity, Room 28, credential aliases and encryption formats stay unchanged. Runtime source matches the accepted build 57 candidate apart from the build number; release documentation is updated separately. The owner reported that the production-signed build 57 worked well after checking encrypted access. This is general owner-reported acceptance, not measured phone latency or an exhaustive device/server matrix.
+
+Publication requires the frozen release commit's quality/build checks, complete API 26/API 35 matrix, optimized instrumentation, original-key signature/alignment checks and a production-signed upgrade from 1.4.0. Record exact results and hashes in project `outputs/android-release-1.5.0/`; preparation alone does not establish those outcomes. Earlier standalone scanner/native probes may be reused only within their unchanged-boundary scope, not presented as fresh tests of this APK. Synthetic upgrade retention and bounded startup do not establish complete real-account, offline or biometric acceptance.

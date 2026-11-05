@@ -4,27 +4,16 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.IntentFilter
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
-import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -35,10 +24,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -47,7 +33,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -58,27 +43,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.core.content.ContextCompat
@@ -92,11 +66,6 @@ import eu.opencloud.android.next.SensitiveWindowProtection
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.core.ui.FileNameConflictDialog
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.withContext
-import javax.crypto.Cipher
 import eu.opencloud.android.next.feature.files.R as FilesR
 
 // The route owns the model; only its lifecycle and prompt controller receive it. UI content is state-hoisted.
@@ -361,97 +330,6 @@ private data class VaultConfirmationKey(
     val lockRevision: Long,
     val path: String,
 )
-
-private class VaultPromptController(
-    private val activity: ComponentActivity,
-    private val viewModel: VaultViewModel,
-) {
-    private var activePrompt: BiometricPrompt? = null
-    private var cancelPending: (() -> Unit)? = null
-    private var generation = 0L
-
-    fun cancel() {
-        generation += 1
-        val prompt = activePrompt
-        val cancelOperation = cancelPending
-        activePrompt = null
-        cancelPending = null
-        runCatching { prompt?.cancelAuthentication() }
-        cancelOperation?.invoke()
-    }
-
-    fun showUnlock(title: String) {
-        cancel()
-        if (!hardwareAvailable()) return unavailable()
-        val cipher = viewModel.prepareBiometricUnlock() ?: return
-        startPrompt(title, cipher, viewModel::cancelBiometricUnlock, viewModel::completeBiometricUnlock, false)
-    }
-
-    fun showEnrollment(title: String) {
-        cancel()
-        if (!hardwareAvailable()) return unavailable()
-        val cipher = viewModel.prepareBiometricEnrollment() ?: return
-        startPrompt(title, cipher, viewModel::cancelBiometricEnrollment, viewModel::completeBiometricEnrollment)
-    }
-
-    private fun startPrompt(
-        title: String,
-        cipher: Cipher,
-        cancelOperation: () -> Unit,
-        complete: (Cipher?) -> Unit,
-        confirmationRequired: Boolean = true,
-    ) {
-        cancelPending = cancelOperation
-        val requestGeneration = ++generation
-        try {
-            val prompt =
-                biometricPrompt(
-                    activity,
-                    { result ->
-                        if (generation == requestGeneration) {
-                            generation += 1
-                            activePrompt = null
-                            cancelPending = null
-                            complete(result.cryptoObject?.cipher)
-                        }
-                    },
-                    {
-                        if (generation == requestGeneration) {
-                            generation += 1
-                            activePrompt = null
-                            cancelPending = null
-                            cancelOperation()
-                        }
-                    },
-                )
-            activePrompt = prompt
-            prompt.authenticate(
-                biometricPromptInfo(
-                    title = activity.getString(R.string.vault_biometric_title, title),
-                    subtitle = activity.getString(R.string.vault_biometric_subtitle),
-                    negativeButton = activity.getString(R.string.vault_biometric_cancel),
-                    confirmationRequired = confirmationRequired,
-                ),
-                BiometricPrompt.CryptoObject(cipher),
-            )
-        } catch (_: RuntimeException) {
-            if (generation == requestGeneration) {
-                cancel()
-                unavailable()
-            }
-        }
-    }
-
-    private fun hardwareAvailable(): Boolean =
-        runCatching {
-            BiometricManager.from(activity).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
-                BiometricManager.BIOMETRIC_SUCCESS
-        }.getOrDefault(false)
-
-    private fun unavailable() {
-        Toast.makeText(activity, R.string.vault_biometric_unavailable, Toast.LENGTH_SHORT).show()
-    }
-}
 
 /** The route retains notification state while scanner content temporarily replaces the browser. */
 @Composable
@@ -794,90 +672,6 @@ private fun VaultModeContent(
 }
 
 @Composable
-private fun UnlockContent(
-    state: VaultRouteState,
-    callbacks: VaultRouteCallbacks,
-    modifier: Modifier = Modifier,
-) {
-    var password by remember(state.selectedLocation?.id, state.mode, state.lockRevision) { mutableStateOf("") }
-    var passwordVisible by remember(
-        state.selectedLocation?.id,
-        state.mode,
-        state.lockRevision,
-    ) { mutableStateOf(false) }
-    if (state.loading) {
-        Column(
-            modifier = modifier.fillMaxSize().semantics { liveRegion = LiveRegionMode.Polite },
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm, Alignment.CenterVertically),
-        ) {
-            CircularProgressIndicator()
-            Text(
-                stringResource(
-                    if (state.lockingRememberedAccess) {
-                        R.string.vault_locking_remembered_access
-                    } else {
-                        R.string.vault_verifying_key
-                    },
-                ),
-                style = MaterialTheme.typography.bodyLarge,
-            )
-        }
-    } else {
-        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm)) {
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                label = { Text(stringResource(R.string.vault_password_label)) },
-                singleLine = true,
-                visualTransformation =
-                    if (passwordVisible) {
-                        VisualTransformation.None
-                    } else {
-                        PasswordVisualTransformation()
-                    },
-                trailingIcon = {
-                    IconButton(onClick = { passwordVisible = !passwordVisible }) {
-                        Icon(
-                            if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                            stringResource(
-                                if (passwordVisible) R.string.vault_hide_password else R.string.vault_show_password,
-                            ),
-                        )
-                    }
-                },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm),
-                verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
-            ) {
-                Button(
-                    enabled = password.isNotEmpty(),
-                    onClick = {
-                        val suppliedPassword = password.toCharArray()
-                        password = ""
-                        passwordVisible = false
-                        callbacks.onUnlock(suppliedPassword)
-                    },
-                ) { Text(stringResource(R.string.vault_unlock_action)) }
-                if (state.biometricEnrolled) {
-                    TextButton(onClick = callbacks.onBiometricUnlock) {
-                        Text(stringResource(R.string.vault_biometric_unlock))
-                    }
-                }
-                if (state.biometricEnrolled || state.biometricNeedsForget) {
-                    TextButton(onClick = callbacks.onForgetBiometric) {
-                        Text(stringResource(R.string.vault_biometric_forget))
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun CatalogContent(
     state: VaultRouteState,
     callbacks: VaultRouteCallbacks,
@@ -955,209 +749,6 @@ private fun DiscoveryContent(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-@Suppress("LongParameterList") // Secure preview state and independent reader/editor actions.
-private fun VaultPreviewDialog(
-    preview: VaultRoutePreview,
-    saving: Boolean,
-    saveError: VaultRouteError?,
-    onSaveText: (VaultRoutePreview, ByteArray) -> Unit,
-    onSaveRange: (VaultRoutePreview, Long, Long, ByteArray) -> Unit,
-    onOpenWith: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    if (preview.kind == VaultPreviewKind.TEXT) {
-        if (preview.backing != null) {
-            EncryptedPagedTextPreview(preview, saving, saveError, onSaveRange, onDismiss, onOpenWith)
-        } else {
-            EncryptedTextPreviewDialog(preview, saving, saveError, onSaveText, onDismiss, onOpenWith)
-        }
-        return
-    }
-    BackHandler(onBack = onDismiss)
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn, usePlatformDefaultWidth = false),
-    ) {
-        Scaffold(
-            modifier = Modifier.fillMaxSize(),
-            topBar = {
-                TopAppBar(
-                    title = { Text(preview.title, maxLines = 1) },
-                    actions = {
-                        TextButton(onClick = onOpenWith) { Text(stringResource(R.string.vault_open_with)) }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onDismiss) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.vault_close))
-                        }
-                    },
-                )
-            },
-        ) { padding ->
-            Box(
-                Modifier.fillMaxSize().padding(padding).padding(OpenCloudDimensions.SpacingMd),
-                contentAlignment = Alignment.Center,
-            ) {
-                when (preview.kind) {
-                    VaultPreviewKind.IMAGE -> {
-                        val owner = remember(preview.bytes, preview.backing) { OwnedBitmap() }
-                        DisposableEffect(owner) { onDispose { owner.close() } }
-                        var decoded by remember(owner) { mutableStateOf(DecodedBitmap(false, null)) }
-                        LaunchedEffect(owner) {
-                            val copy = preview.bytes.copyOf()
-                            var bitmap: Bitmap? = null
-                            try {
-                                // Cancellation may discard withContext's result on its return dispatch.
-                                withContext(Dispatchers.IO) {
-                                    bitmap = preview.backing?.let(::decodeBoundedBitmap) ?: decodeBoundedBitmap(copy)
-                                }
-                                currentCoroutineContext().ensureActive()
-                                val ready = bitmap
-                                if (ready != null && !owner.adopt(ready)) return@LaunchedEffect
-                                bitmap = null
-                                decoded = DecodedBitmap(true, ready)
-                            } finally {
-                                bitmap?.recycle()
-                                copy.fill(0)
-                            }
-                        }
-                        if (!decoded.complete) {
-                            CircularProgressIndicator()
-                        } else if (decoded.bitmap == null) {
-                            Text(stringResource(R.string.vault_preview_unavailable))
-                        } else {
-                            VaultPreviewImage(requireNotNull(decoded.bitmap), preview.title)
-                        }
-                    }
-                    VaultPreviewKind.PDF -> EncryptedPdfPreview(preview.bytes, encryptedBacking = preview.backing)
-                    else -> Text(stringResource(R.string.vault_preview_unavailable))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun VaultPreviewImage(
-    bitmap: Bitmap,
-    title: String,
-) {
-    var scale by remember(bitmap) { mutableFloatStateOf(1f) }
-    var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
-    val transform =
-        rememberTransformableState { zoom, pan, _ ->
-            scale = (scale * zoom).coerceIn(1f, 5f)
-            offset = if (scale == 1f) Offset.Zero else offset + pan
-        }
-    Box(Modifier.fillMaxSize().clipToBounds().transformable(transform), contentAlignment = Alignment.Center) {
-        Image(
-            bitmap.asImageBitmap(),
-            title,
-            Modifier.fillMaxSize().graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
-            },
-        )
-    }
-}
-
-internal fun decodeBoundedBitmap(
-    backing: EncryptedPreviewBacking,
-    maximumDimension: Int = MAX_IMAGE_DIMENSION,
-): Bitmap? {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    backing.inputStream().use { BitmapFactory.decodeStream(it, null, bounds) }
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-    var sample = 1
-    while (bounds.outWidth / sample > maximumDimension ||
-        bounds.outHeight / sample > maximumDimension ||
-        bounds.outWidth.toLong() * bounds.outHeight / (sample.toLong() * sample) > MAX_DECODED_PIXELS
-    ) {
-        sample *= 2
-    }
-    return backing.inputStream().use { input ->
-        BitmapFactory.decodeStream(
-            input,
-            null,
-            BitmapFactory.Options().apply {
-                inSampleSize = sample
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-            },
-        )
-    }
-}
-
-internal fun decodeBoundedBitmap(
-    bytes: ByteArray,
-    maximumDimension: Int = MAX_IMAGE_DIMENSION,
-): Bitmap? {
-    var bitmap: Bitmap? = null
-    if (bytes.size <= MAX_IMAGE_PREVIEW_BYTES) {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        if (bounds.outWidth > 0 &&
-            bounds.outHeight > 0 &&
-            bounds.outWidth.toLong() * bounds.outHeight <= MAX_IMAGE_PIXELS
-        ) {
-            var sample = 1
-            while (bounds.outWidth / sample > maximumDimension ||
-                bounds.outHeight / sample > maximumDimension ||
-                bounds.outWidth.toLong() * bounds.outHeight / (sample.toLong() * sample) > MAX_DECODED_PIXELS
-            ) {
-                sample *= 2
-            }
-            bitmap =
-                BitmapFactory.decodeByteArray(
-                    bytes,
-                    0,
-                    bytes.size,
-                    BitmapFactory.Options().apply {
-                        inSampleSize = sample
-                        inPreferredConfig = Bitmap.Config.ARGB_8888
-                    },
-                )
-        }
-    }
-    return bitmap
-}
-
-private fun biometricPrompt(
-    activity: ComponentActivity,
-    onSuccess: (BiometricPrompt.AuthenticationResult) -> Unit,
-    onError: () -> Unit,
-): BiometricPrompt =
-    BiometricPrompt(
-        activity as androidx.fragment.app.FragmentActivity,
-        ContextCompat.getMainExecutor(activity),
-        object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) = onSuccess(result)
-
-            override fun onAuthenticationError(
-                errorCode: Int,
-                errString: CharSequence,
-            ) = onError()
-        },
-    )
-
-internal fun biometricPromptInfo(
-    title: String,
-    subtitle: String,
-    negativeButton: String,
-    confirmationRequired: Boolean = true,
-): BiometricPrompt.PromptInfo =
-    BiometricPrompt.PromptInfo
-        .Builder()
-        .setTitle(title)
-        .setSubtitle(subtitle)
-        .setNegativeButtonText(negativeButton)
-        .setConfirmationRequired(confirmationRequired)
-        .setAllowedAuthenticators(androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG)
-        .build()
-
 private fun Context.findComponentActivity(): ComponentActivity {
     var current = this
     while (current is ContextWrapper) {
@@ -1166,213 +757,6 @@ private fun Context.findComponentActivity(): ComponentActivity {
     }
     error("Vault screens require an activity context.")
 }
-
-private const val MAX_IMAGE_PREVIEW_BYTES = 8 * 1024 * 1024
-private const val MAX_IMAGE_PIXELS = 100_000_000L
-private const val MAX_DECODED_PIXELS = 4_194_304L
-private const val MAX_IMAGE_DIMENSION = 2048
-
-internal data class DecodedBitmap(
-    val complete: Boolean,
-    val bitmap: Bitmap?,
-)
-
-/** Transfers decoded bitmap ownership to the dialog before publishing it to Compose. */
-internal class OwnedBitmap {
-    private var bitmap: Bitmap? = null
-    private var closed = false
-
-    fun adopt(value: Bitmap): Boolean {
-        if (closed) return false
-        check(bitmap == null)
-        bitmap = value
-        return true
-    }
-
-    fun close() {
-        closed = true
-        bitmap?.recycle()
-        bitmap = null
-    }
-}
-
-enum class VaultRouteMode { CATALOG, DISCOVERY, UNLOCK, CONTENTS }
-
-enum class VaultPreviewKind { TEXT, IMAGE, PDF, UNSUPPORTED }
-
-enum class VaultRouteError(
-    val stringRes: Int,
-    val retryable: Boolean,
-) {
-    CATALOG(R.string.vault_catalog_error, true),
-    SERVER_RESPONSE(R.string.vault_server_response_error, true),
-    DISCOVERY(R.string.vault_discovery_error, true),
-    UNLOCK(R.string.vault_unlock_error, false),
-    CONNECTION(R.string.vault_connection_error, true),
-    SECURE_CONNECTION(R.string.vault_secure_connection_error, false),
-    AUTHENTICATION(R.string.vault_authentication_error, false),
-    ACCESS_DENIED(R.string.vault_access_denied_error, false),
-    VAULT_CHANGED(R.string.vault_changed_error, false),
-    UNLOCK_PROOF(R.string.vault_unlock_proof_error, false),
-    CONTENTS(R.string.vault_contents_error, true),
-    PREVIEW(R.string.vault_preview_error, false),
-    BIOMETRIC(R.string.vault_biometric_unavailable, false),
-    BIOMETRIC_SETUP(R.string.vault_biometric_setup_error, false),
-    OPERATION(R.string.vault_operation_failed, false),
-    OFFLINE_PREPARATION(R.string.vault_offline_preparation_failed, false),
-    LOCAL_STORAGE(eu.opencloud.android.next.core.network.R.string.error_local_storage, false),
-    LOCAL_SAVE(eu.opencloud.android.next.core.network.R.string.error_local_storage_write_failed, false),
-    SOURCE_UNAVAILABLE(eu.opencloud.android.next.core.network.R.string.error_source_unavailable, false),
-    SOURCE_CHANGED(eu.opencloud.android.next.core.network.R.string.error_source_changed, false),
-    SOURCE_PERMISSION(eu.opencloud.android.next.core.network.R.string.error_source_permission_denied, false),
-    INTEGRITY(eu.opencloud.android.next.core.network.R.string.error_download_integrity, false),
-    SAVED_UNLOCK(eu.opencloud.android.next.core.network.R.string.error_encrypted_unlock_failed, false),
-    OFFLINE_CHANGED(eu.opencloud.android.next.core.network.R.string.error_offline_snapshot_changed, false),
-    OFFLINE_BUSY(eu.opencloud.android.next.core.network.R.string.error_offline_group_busy, false),
-    LISTING_TOO_LARGE(eu.opencloud.android.next.core.network.R.string.error_directory_listing_too_large, false),
-    OFFLINE_INDEX_FULL(eu.opencloud.android.next.core.network.R.string.error_encrypted_offline_index_full, false),
-    REMOTE_QUOTA(eu.opencloud.android.next.core.network.R.string.error_quota_exceeded, false),
-    NAME_CONFLICT(eu.opencloud.android.next.core.network.R.string.error_conflict, false),
-    SERVER_BUSY(eu.opencloud.android.next.core.network.R.string.error_rate_limited, false),
-    TRANSFER_UNLOCK_REQUIRED(R.string.vault_unlock_to_finish, false),
-    EXPORT_FAILED(R.string.vault_export_failed, false),
-    BIOMETRIC_CLEANUP(R.string.vault_biometric_cleanup_error, true),
-    PHONE_LOCK_FAILED(R.string.vault_phone_lock_failed, false),
-    PHONE_REMEMBER_FAILED(R.string.vault_phone_remember_failed, false),
-}
-
-data class VaultRouteLocation(
-    val id: String,
-    val title: String,
-    val kind: VaultLocationKindUi,
-    val isVaultRoot: Boolean,
-    val offline: Boolean = false,
-)
-
-enum class VaultLocationKindUi(
-    val stringRes: Int,
-) {
-    FOLDER_VAULT(R.string.vault_folder),
-    SPACE_VAULT(R.string.vault_space),
-    PERSONAL(R.string.vault_personal_files),
-    SPACE(R.string.vault_space),
-}
-
-data class VaultRouteEntry(
-    val id: String,
-    val name: String,
-    val path: String,
-    val isFolder: Boolean,
-    val isVaultRoot: Boolean,
-    val size: Long,
-    val contentType: String?,
-    val offlineAvailable: Boolean? = null,
-    val displaySize: Long? = size,
-)
-
-data class VaultRoutePreview(
-    val title: String,
-    val bytes: ByteArray,
-    val kind: VaultPreviewKind,
-    val editable: Boolean = false,
-    val backing: EncryptedPreviewBacking? = null,
-)
-
-data class VaultDirectoryPageState(
-    val offset: Long,
-    val total: Long,
-    val count: Int,
-    val hasPrevious: Boolean,
-) {
-    val hasNext: Boolean get() = offset + count < total
-}
-
-data class VaultRouteState(
-    val mode: VaultRouteMode = VaultRouteMode.CATALOG,
-    val locations: List<VaultRouteLocation> = emptyList(),
-    val entries: List<VaultRouteEntry> = emptyList(),
-    val directoryPage: VaultDirectoryPageState? = null,
-    val selectedLocation: VaultRouteLocation? = null,
-    val selectedTitle: String? = null,
-    val browseTitle: String? = null,
-    val currentPath: String = "",
-    val loading: Boolean = false,
-    val error: VaultRouteError? = null,
-    val biometricDiagnostic: String? = null,
-    val phoneSessionIssueCode: String? = null,
-    val biometricEnrolled: Boolean = false,
-    val biometricNeedsForget: Boolean = false,
-    val canEnrollBiometric: Boolean = false,
-    val biometricOfferPending: Boolean = false,
-    val phoneRememberOffer: Boolean = false,
-    val lockingRememberedAccess: Boolean = false,
-    val allowAutomaticBiometric: Boolean = true,
-    val rootActionsVisible: Boolean = false,
-    val offline: Boolean = false,
-    val offlineCatalog: Boolean = false,
-    val preview: VaultRoutePreview? = null,
-    val previewSaving: Boolean = false,
-    val previewSaveError: VaultRouteError? = null,
-    val lockRevision: Long = 0,
-    val transferConflict: VaultTransferConflict? = null,
-    val destinationPickerPath: String? = null,
-    val destinationPickerEntries: List<VaultRouteEntry> = emptyList(),
-    val destinationPickerPage: VaultDirectoryPageState? = null,
-    val destinationPickerLoading: Boolean = false,
-    val destinationPickerError: VaultRouteError? = null,
-    val preparingUpload: Boolean = false,
-    val queuedUploadCount: Long = 0,
-)
-
-data class VaultRouteCallbacks(
-    val onNavigateBack: () -> Unit,
-    val onSelectLocation: (String) -> Unit,
-    val onOpenDiscoveryFolder: (String) -> Unit,
-    val onSelectVaultFolder: (String) -> Unit,
-    val onUnlock: (CharArray) -> Unit,
-    val onBiometricUnlock: () -> Unit,
-    val onBiometricEnroll: () -> Unit,
-    val onForgetBiometric: () -> Unit,
-    val onOpenVaultFolder: (String) -> Unit,
-    val onOpenPreview: (String) -> Unit,
-    val onDismissPreview: () -> Unit,
-    val onOpenWithPreview: () -> Unit = {},
-    val onSavePreviewText: (VaultRoutePreview, ByteArray) -> Unit = { _, bytes -> bytes.fill(0) },
-    val onSavePreviewTextRange: (
-        VaultRoutePreview,
-        Long,
-        Long,
-        ByteArray,
-    ) -> Unit = { _, _, _, bytes -> bytes.fill(0) },
-    val onLoadThumbnail: suspend (String) -> ByteArray? = { null },
-    val onUp: () -> Unit,
-    val onLock: () -> Unit,
-    val onRetry: () -> Unit,
-    val onDirectoryPage: (Boolean) -> Unit = {},
-    val onShowHidden: (Boolean) -> Unit = {},
-    val onResolveTransferConflict: (Boolean) -> Unit = {},
-    val onLoadDestinationFolders: (String) -> Unit = {},
-    val onBeginDestinationPicker: (String, String) -> Unit = { _, path -> onLoadDestinationFolders(path) },
-    val onDestinationPage: (Boolean) -> Unit = {},
-    val onOtherLocation: (String, Boolean) -> Unit = { _, _ -> },
-    val onDismissDestinationPicker: () -> Unit = {},
-    val onShowOffline: () -> Unit = {},
-    val onKeepDirectoryOffline: () -> Unit = {},
-    val onRemoveOffline: () -> Unit = {},
-    val onShowOfflineActions: () -> Unit = {},
-    val onCreateFolder: (String) -> Unit = {},
-    val onUpload: () -> Unit = {},
-    val onScan: () -> Unit = {},
-    val onEntryAction: (String, VaultEntryAction, String?) -> Unit = { _, _, _ -> },
-    val onAcceptBiometricOffer: () -> Unit = {},
-    val onRememberOnPhone: () -> Unit = {},
-    val onDeclineBiometricOffer: () -> Unit = {},
-    val onShowRootActions: () -> Unit = {},
-    val onManageLocation: () -> Unit = {},
-    val onDismissRootActions: () -> Unit = {},
-    val onRenameRoot: (String) -> Unit = {},
-    val onDeleteRoot: () -> Unit = {},
-)
 
 @Composable
 internal fun VaultPageNavigation(
@@ -1512,17 +896,12 @@ private fun VaultOfflineActionsDialog(
     )
 }
 
-data class VaultTransferConflict(
-    val sourceId: String,
-    val name: String,
-    val path: String,
-    val action: VaultEntryAction,
-    val proposedName: String,
-)
-
 /** Returns true when Back belongs to the in-browser destination selection. */
 @Suppress("ViewModelForwarding") // This route navigation helper invokes only destination navigation actions.
-private fun navigateVaultDestinationBack(state: VaultRouteState, viewModel: VaultViewModel): Boolean {
+private fun navigateVaultDestinationBack(
+    state: VaultRouteState,
+    viewModel: VaultViewModel,
+): Boolean {
     val destination = state.destinationPickerPath ?: return false
     if (!state.loading && !state.destinationPickerLoading) {
         if (destination.isEmpty()) {

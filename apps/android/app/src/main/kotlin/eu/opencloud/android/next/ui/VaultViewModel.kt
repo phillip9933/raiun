@@ -2,23 +2,13 @@ package eu.opencloud.android.next.ui
 
 import android.app.Application
 import android.app.KeyguardManager
-import android.content.ContentResolver
 import android.net.Uri
-import android.provider.DocumentsContract
-import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.toOpenCloudError
-import eu.opencloud.android.next.core.security.VaultDeviceRememberException
-import eu.opencloud.android.next.core.security.VaultDeviceRememberOutcomeUnknownException
 import eu.opencloud.android.next.core.security.VaultIdentity
 import eu.opencloud.android.next.core.security.VaultKeyStore
-import eu.opencloud.android.next.core.security.VaultPreferenceStatus
-import eu.opencloud.android.next.core.security.VaultPreferenceTargetKind
-import eu.opencloud.android.next.core.security.VaultRememberBinding
-import eu.opencloud.android.next.core.security.VaultRememberChoice
-import eu.opencloud.android.next.core.security.VaultUnlockPolicy
 import eu.opencloud.android.next.core.sync.VaultExternalCopyLease
 import eu.opencloud.android.next.core.sync.VaultExternalCopyStore
 import eu.opencloud.android.next.core.sync.VaultFolder
@@ -27,13 +17,10 @@ import eu.opencloud.android.next.core.sync.VaultLocationKind
 import eu.opencloud.android.next.core.sync.VaultUnlockException
 import eu.opencloud.android.next.core.sync.VaultUnlockFailure
 import eu.opencloud.android.next.core.sync.asBoundaryEntry
-import eu.opencloud.android.next.core.sync.withCancellableVaultUploadSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -50,7 +37,7 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import javax.crypto.Cipher
 
-@Suppress("LargeClass") // One owner serializes account, session, preview, and lock generations for this route.
+@Suppress("LargeClass") // Coordinates route actions; VaultSessionLifecycle owns session and key admission.
 class VaultViewModel internal constructor(
     application: Application,
     private val repository: VaultRouteRepository,
@@ -70,36 +57,97 @@ class VaultViewModel internal constructor(
     private val mutableState = kotlinx.coroutines.flow.MutableStateFlow(VaultRouteState())
     val state = mutableState.asStateFlow()
 
-    private var accountId: String? = null
-    private var routeActive = false
+    private val accountId: String? get() = lifecycle.accountId
+    private val routeActive: Boolean get() = lifecycle.routeActive
+    private val generation: Long get() = lifecycle.generation
+    private val session: VaultRouteSession? get() = lifecycle.session
+    private val target: VaultSessionTarget? get() = lifecycle.target
+    private val currentTargetIdentity: VaultIdentity? get() = lifecycle.currentTargetIdentity
     private var openRootMenuAfterUnlock = false
-    private var generation = 0L
     private var catalogJob: Job? = null
-    private var operationJob: Job? = null
     private var offlineCompletionJob: Job? = null
-    private var session: VaultRouteSession? = null
-    private var directory: VaultRouteDirectorySnapshot? = null
-    private val previousDirectoryOffsets = mutableListOf<Long>()
     private var showHidden = false
     private var pendingTransferSource: VaultFolder? = null
     private var currentSource: VaultLocation? = null
     private var discoveryReturn: DiscoveryReturn? = null
-    private var target: VaultTarget? = null
-    private var currentTargetIdentity: VaultIdentity? = null
-    private var phoneSessionIssueIdentity: VaultIdentity? = null
-    private var verifiedKeyMaterial: ByteArray? = null
-    private var provenAccountSnapshot: Any? = null
-    private var provenCredentialPermit: (() -> Boolean)? = null
-    private var pendingBiometricIdentity: VaultIdentity? = null
-    private var explicitDeviceForgetIdentity: VaultIdentity? = null
-    private var explicitDeviceForgetJob: Job? = null
-    private var pendingEnrollmentIdentity: VaultIdentity? = null
-    private var pendingDeletedVaultCleanup: VaultIdentity? = null
     private val presentedEntries = mutableMapOf<String, PresentedVaultFolder>()
     private var pendingTransfer: PendingVaultTransfer? = null
     private val pickerLease = VaultPickerLease()
     private var pickerTimeout: Job? = null
     private var pickerSuspended = false
+    private val directoryContent =
+        VaultDirectoryContent(
+            mutableState,
+            object : VaultDirectoryOwner {
+                override fun showHidden(): Boolean = showHidden
+
+                override fun isCurrent(
+                    opened: VaultRouteSession,
+                    token: Long,
+                    account: String,
+                ): Boolean = this@VaultViewModel.isCurrent(token, account) && session === opened
+
+                override fun isRouteCurrent(
+                    token: Long,
+                    account: String,
+                ): Boolean = this@VaultViewModel.isCurrent(token, account)
+
+                override fun present(entries: List<VaultFolder>): List<VaultRouteEntry> = presentEntries(entries)
+
+                override fun clearPresented() = presentedEntries.clear()
+
+                override fun reportFailure(
+                    failure: Exception,
+                    token: Long,
+                    account: String,
+                ) {
+                    this@VaultViewModel.reportFailure(
+                        failure,
+                        VaultRouteError.CONTENTS,
+                        VaultFailureContext(token, account, lockOnRevocation = true),
+                    )
+                }
+            },
+        )
+    private val pickedTransferExecution =
+        VaultPickedTransferExecution(
+            application,
+            ioDispatcher,
+            adapters.uploadPollReady,
+            mutableState,
+            object : VaultPickedTransferOwner {
+                override fun isCurrent(
+                    opened: VaultRouteSession,
+                    token: Long,
+                    account: String,
+                ): Boolean = this@VaultViewModel.isCurrent(token, account) && session === opened
+
+                override fun isCurrentTransferSession(
+                    opened: VaultRouteSession,
+                    identity: VaultIdentity,
+                    token: Long,
+                    account: String,
+                ): Boolean = this@VaultViewModel.isCurrentTransferSession(opened, identity, token, account)
+
+                override suspend fun verifyUploadDirectory(
+                    opened: VaultRouteSession,
+                    path: String,
+                ) = this@VaultViewModel.verifyUploadDirectory(opened, path)
+
+                override suspend fun revalidateExportSource(
+                    opened: VaultRouteSession,
+                    path: String,
+                    request: PendingVaultTransfer.Export,
+                ): VaultFolder = this@VaultViewModel.revalidateExportSource(opened, path, request)
+
+                override suspend fun publishTransferListing(
+                    opened: VaultRouteSession,
+                    path: String,
+                    token: Long,
+                    account: String,
+                ) = this@VaultViewModel.publishTransferListing(opened, path, token, account)
+            },
+        )
     private val previewContent =
         VaultPreviewContent(
             application,
@@ -152,6 +200,71 @@ class VaultViewModel internal constructor(
             },
         )
 
+    private val lifecycle: VaultSessionLifecycle =
+        VaultSessionLifecycle(
+            application,
+            repository,
+            biometricStore,
+            biometricPreferences,
+            ioDispatcher,
+            adapters.deviceRemember,
+            viewModelScope,
+            mutableState,
+            directoryContent,
+            object : VaultSessionPresentation {
+                override fun invalidateRoutePresentation() {
+                    catalogJob?.cancel()
+                    catalogJob = null
+                    currentSource = null
+                }
+
+                override fun closeSessionContent() {
+                    closeDirectory()
+                    offlineCompletionJob?.cancel()
+                    offlineCompletionJob = null
+                    clearDestinationPicker()
+                    pickerTimeout?.cancel()
+                    pickerTimeout = null
+                    pickerLease.clear()
+                    pickerSuspended = false
+                }
+
+                override fun clearSensitivePresentation() {
+                    pendingTransferSource = null
+                    mutableState.value = mutableState.value.copy(transferConflict = null)
+                    clearPreview()
+                    presentedEntries.clear()
+                }
+
+                override fun clearPreview() = this@VaultViewModel.clearPreview()
+
+                override fun presentLocation(location: VaultLocation): VaultRouteLocation =
+                    this@VaultViewModel.presentLocation(location)
+
+                override fun presentEntries(entries: List<VaultFolder>): List<VaultRouteEntry> =
+                    this@VaultViewModel.presentEntries(entries)
+
+                override fun offersResolved() = maybeOpenRootActions()
+
+                override suspend fun postOpen(
+                    opened: VaultRouteSession,
+                    token: Long,
+                    account: String,
+                ) {
+                    processPendingTransfer(opened, token, account)
+                    if (isCurrent(token, account) && session === opened) {
+                        observePendingOffline(opened, account)
+                    }
+                }
+
+                override fun reportFailure(
+                    failure: Throwable,
+                    fallback: VaultRouteError,
+                    context: VaultFailureContext,
+                ) = this@VaultViewModel.reportFailure(failure, fallback, context)
+            },
+        )
+
     fun enterRoute(
         accountId: String,
         initialLocation: VaultLocation? = null,
@@ -163,8 +276,7 @@ class VaultViewModel internal constructor(
             return
         }
         leaveRoute()
-        routeActive = true
-        this.accountId = accountId
+        lifecycle.enter(accountId)
         directLocation = initialLocation
         openRootMenuAfterUnlock = openMenuAfterUnlock
         if (initialLocation == null) {
@@ -176,17 +288,13 @@ class VaultViewModel internal constructor(
 
     fun leaveRoute() {
         val phoneSessionIssueCode = mutableState.value.phoneSessionIssueCode
-        routeActive = false
-        accountId = null
-        invalidateRequests()
-        clearSensitiveState()
+        lifecycle.leave()
         currentSource = null
         discoveryReturn = null
         sourceLocations = emptyMap()
         directLocation = null
         pendingTransfer = null
-        target = null
-        currentTargetIdentity = null
+        lifecycle.clearTarget()
         mutableState.value =
             VaultRouteState(
                 lockRevision = mutableState.value.lockRevision + 1,
@@ -203,9 +311,8 @@ class VaultViewModel internal constructor(
     fun showOfflineCatalog() {
         discoveryReturn = null
         closeSession()
-        target = null
+        lifecycle.clearTarget()
         currentSource = null
-        currentTargetIdentity = null
         loadCatalog(offlineOnly = true)
     }
 
@@ -269,8 +376,8 @@ class VaultViewModel internal constructor(
                 )
             return
         }
-        val selected = VaultTarget(location, location.vaultPath, location.title, location.remoteVaultId)
-        target = selected
+        val selected = VaultSessionTarget(location, location.vaultPath, location.title, location.remoteVaultId)
+        lifecycle.selectTarget(selected)
         currentSource = null
         showPasswordUnlock(selected)
     }
@@ -281,12 +388,12 @@ class VaultViewModel internal constructor(
         clearSensitiveState()
         currentSource = location
         if (location.isVaultRoot) {
-            val selectedTarget = VaultTarget(location, location.vaultPath, location.title, location.remoteVaultId)
-            target = selectedTarget
+            val selectedTarget =
+                VaultSessionTarget(location, location.vaultPath, location.title, location.remoteVaultId)
+            lifecycle.selectTarget(selectedTarget)
             showPasswordUnlock(selectedTarget)
         } else {
-            target = null
-            currentTargetIdentity = null
+            lifecycle.clearTarget()
             val token = nextGeneration()
             mutableState.value =
                 mutableState.value.copy(
@@ -331,8 +438,8 @@ class VaultViewModel internal constructor(
                 isVaultRoot = true,
             )
         discoveryReturn = DiscoveryReturn(source, mutableState.value.currentPath, mutableState.value.browseTitle)
-        val selectedTarget = VaultTarget(folderLocation, entry.path, entry.name, presented.remote.id)
-        target = selectedTarget
+        val selectedTarget = VaultSessionTarget(folderLocation, entry.path, entry.name, presented.remote.id)
+        lifecycle.selectTarget(selectedTarget)
         showPasswordUnlock(selectedTarget)
     }
 
@@ -341,8 +448,7 @@ class VaultViewModel internal constructor(
         invalidateRequests()
         clearSensitiveState()
         currentSource = null
-        target = null
-        currentTargetIdentity = null
+        lifecycle.clearTarget()
         mutableState.value =
             mutableState.value.copy(
                 mode = VaultRouteMode.CATALOG,
@@ -387,357 +493,6 @@ class VaultViewModel internal constructor(
         val path: String,
         val title: String?,
     )
-
-    // These boundaries expose heterogeneous failures; CancellationException is rethrown explicitly.
-    @Suppress("TooGenericExceptionCaught")
-    fun unlock(password: CharArray) {
-        val account = accountId
-        val selected = target
-        if (account == null || selected == null || password.isEmpty()) {
-            password.fill('\u0000')
-            mutableState.value = mutableState.value.copy(error = VaultRouteError.UNLOCK)
-            return
-        }
-        val token = nextGeneration()
-        mutableState.value = mutableState.value.copy(loading = true, error = null, mode = VaultRouteMode.UNLOCK)
-        val unlockJob =
-            viewModelScope.launch {
-                var unlocked: VaultRouteSession? = null
-                try {
-                    val snapshot = repository.unlockAccountSnapshot(account)
-                    val credentialPermit = repository.unlockCredentialPermit(account)
-                    unlocked = repository.unlock(account, selected.location, selected.vaultPath, password)
-                    if (!isCurrent(token, account)) {
-                        unlocked.close()
-                        return@launch
-                    }
-                    installSession(
-                        unlocked,
-                        selected,
-                        token,
-                        account,
-                        phoneAdmission =
-                            PhoneUnlockAdmission(
-                                snapshot,
-                                credentialPermit,
-                                captureKeyMaterial = true,
-                            ),
-                    )
-                    unlocked = null
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    reportFailure(failure, VaultRouteError.UNLOCK, VaultFailureContext(token, account))
-                } finally {
-                    password.fill('\u0000')
-                    unlocked?.close()
-                }
-            }
-        unlockJob.invokeOnCompletion { password.fill('\u0000') }
-        operationJob = unlockJob
-    }
-
-    @Suppress("ReturnCount") // Independent phone admission checks surround one-shot key export.
-    private suspend fun installSession(
-        opened: VaultRouteSession,
-        selected: VaultTarget,
-        token: Long,
-        account: String,
-        phoneAdmission: PhoneUnlockAdmission = PhoneUnlockAdmission(),
-    ) {
-        var capturedMaterial: ByteArray? = null
-        var firstDirectory: OpenedVaultDirectory? = null
-        try {
-            if (opened.identity != selected.expectedIdentity()) throw VaultIdentityChangedException()
-            firstDirectory = openFirstDirectory(opened, "")
-            if (!keepCurrentRouteSession(opened, token, account, phoneAdmission.reusedKey)) return
-            requireCurrentReuse(account, phoneAdmission)
-            capturedMaterial = captureVerifiedMaterial(opened, phoneAdmission.captureKeyMaterial)
-            if (capturedMaterial == null && phoneAdmission.provenBiometricMaterial != null) {
-                capturedMaterial = phoneAdmission.provenBiometricMaterial.copyOf()
-            }
-            if (!keepCurrentRouteSession(opened, token, account, phoneAdmission.reusedKey)) return
-            val phoneSessionIssueCode = rememberProvenPhoneUnlock(opened, account, capturedMaterial, phoneAdmission)
-            updatePhoneSessionIssue(opened.identity, phoneAdmission, phoneSessionIssueCode)
-            if (keepCurrentRouteSession(opened, token, account, phoneAdmission.reusedKey)) {
-                val installed =
-                    publishOpenedSession(
-                        SessionPublication(
-                            opened,
-                            selected,
-                            token,
-                            account,
-                            phoneAdmission,
-                            checkNotNull(firstDirectory),
-                            capturedMaterial,
-                        ),
-                    )
-                if (installed) {
-                    firstDirectory = null
-                    capturedMaterial = null
-                }
-            }
-        } finally {
-            firstDirectory?.snapshot?.close()
-            capturedMaterial?.fill(0)
-        }
-    }
-
-    private suspend fun publishOpenedSession(publication: SessionPublication): Boolean {
-        val opened = publication.opened
-        val selected = publication.selected
-        val phoneAdmission = publication.phoneAdmission
-        val capturedMaterial = publication.capturedMaterial
-        val offers = determinePhoneUnlockOffers(opened, phoneAdmission, capturedMaterial)
-        val visibleDirectory = currentVisibilityDirectory(opened, publication.initialDirectory)
-        if (!keepCurrentRouteSession(opened, publication.token, publication.account, phoneAdmission.reusedKey)) {
-            if (visibleDirectory !== publication.initialDirectory) visibleDirectory.snapshot.close()
-            return false
-        }
-        val entries = visibleDirectory.entries
-        closeSession()
-        clearVerifiedKeyMaterial()
-        session = opened
-        directory = visibleDirectory.snapshot
-        previousDirectoryOffsets.clear()
-        val page = VaultDirectoryPageState(0, visibleDirectory.snapshot.totalCount, entries.size, false)
-        currentTargetIdentity = opened.identity
-        verifiedKeyMaterial = offers.pendingMaterial
-        provenAccountSnapshot = phoneAdmission.accountSnapshot
-        provenCredentialPermit = phoneAdmission.credentialPermit
-        presentedEntries.clear()
-        mutableState.value =
-            mutableState.value.copy(
-                mode = VaultRouteMode.CONTENTS,
-                offline = opened.isOffline,
-                selectedLocation = presentLocation(selected.location),
-                selectedTitle = selected.title,
-                browseTitle = null,
-                currentPath = "",
-                entries = presentEntries(entries),
-                directoryPage = page,
-                loading = false,
-                error = null,
-                biometricEnrolled = offers.enrollment.first,
-                biometricNeedsForget = offers.enrollment.second,
-                canEnrollBiometric = offers.legacyBiometricOffer,
-                biometricOfferPending = offers.offerPending,
-                phoneRememberOffer = offers.phoneRememberOffer,
-                allowAutomaticBiometric =
-                    mutableState.value.allowAutomaticBiometric || phoneAdmission.captureKeyMaterial,
-                rootActionsVisible = mutableState.value.rootActionsVisible,
-                preview = null,
-            )
-        maybeOpenRootActions()
-        processPendingTransfer(opened, publication.token, publication.account)
-        observePendingOffline(opened, publication.account)
-        return true
-    }
-
-    private suspend fun determinePhoneUnlockOffers(
-        opened: VaultRouteSession,
-        phoneAdmission: PhoneUnlockAdmission,
-        capturedMaterial: ByteArray?,
-    ): PhoneUnlockOffers {
-        val enrollment = enrollmentStatus(opened.identity)
-        val hasFreshMaterial = capturedMaterial != null && phoneAdmission.reusedKey == null
-        val (rememberChoice, deviceRememberSupported) =
-            withContext(ioDispatcher) {
-                runCatching { adapters.deviceRemember.choice(opened.identity) }.getOrNull() to
-                    (
-                        !VaultUnlockPolicy(getApplication<Application>()).askEveryTime() &&
-                            runCatching { adapters.deviceRemember.isSupported() }.getOrDefault(false)
-                    )
-            }
-        val phoneRememberOffer = hasFreshMaterial && deviceRememberSupported && rememberChoice == null
-        val legacyBiometricOffer =
-            hasFreshMaterial &&
-                !deviceRememberSupported &&
-                rememberChoice != VaultRememberChoice.DECLINED &&
-                !enrollment.first &&
-                preferenceStatus(opened.identity) == null
-        val offerPending = phoneRememberOffer || legacyBiometricOffer
-        val pendingMaterial = if (offerPending) capturedMaterial else null
-        if (!offerPending) capturedMaterial?.fill(0)
-        return PhoneUnlockOffers(enrollment, phoneRememberOffer, legacyBiometricOffer, offerPending, pendingMaterial)
-    }
-
-    private fun updatePhoneSessionIssue(
-        identity: VaultIdentity,
-        admission: PhoneUnlockAdmission,
-        issueCode: String?,
-    ) {
-        val existing = mutableState.value.phoneSessionIssueCode
-        val next =
-            when {
-                issueCode != null -> issueCode
-                admission.reusedKey != null || admission.captureKeyMaterial -> null
-                admission.provenBiometricMaterial != null && existing == "US7" -> "US7"
-                admission.provenBiometricMaterial != null -> null
-                else -> existing
-            }
-        if (next != existing) {
-            phoneSessionIssueIdentity = if (next == null) null else identity
-            mutableState.value = mutableState.value.copy(phoneSessionIssueCode = next)
-        }
-    }
-
-    private data class PhoneUnlockAdmission(
-        val accountSnapshot: Any? = null,
-        val credentialPermit: () -> Boolean = { false },
-        val provenBiometricMaterial: ByteArray? = null,
-        val reusedKey: VaultDeviceRememberKey? = null,
-        val rememberBinding: VaultRememberBinding? = null,
-        val captureKeyMaterial: Boolean = false,
-    )
-
-    private data class PhoneRememberRequest(
-        val opened: VaultRouteSession,
-        val identity: VaultIdentity,
-        val account: String,
-        val material: ByteArray,
-        val accountSnapshot: Any,
-        val credentialPermit: () -> Boolean,
-        val token: Long,
-        val lockRevision: Long,
-    )
-
-    private data class SessionPublication(
-        val opened: VaultRouteSession,
-        val selected: VaultTarget,
-        val token: Long,
-        val account: String,
-        val phoneAdmission: PhoneUnlockAdmission,
-        val initialDirectory: OpenedVaultDirectory,
-        val capturedMaterial: ByteArray?,
-    )
-
-    private data class PhoneUnlockOffers(
-        val enrollment: Pair<Boolean, Boolean>,
-        val phoneRememberOffer: Boolean,
-        val legacyBiometricOffer: Boolean,
-        val offerPending: Boolean,
-        val pendingMaterial: ByteArray?,
-    )
-
-    private sealed interface PhoneRestoreLookup {
-        data object Unavailable : PhoneRestoreLookup
-
-        data object RevocationFailed : PhoneRestoreLookup
-
-        data class Ready(
-            val key: VaultDeviceRememberKey,
-            val snapshot: Any,
-            val binding: VaultRememberBinding,
-            val credentialPermit: () -> Boolean,
-        ) : PhoneRestoreLookup
-    }
-
-    private suspend fun keepCurrentRouteSession(
-        opened: VaultRouteSession,
-        token: Long,
-        account: String,
-        reusedKey: VaultDeviceRememberKey? = null,
-    ): Boolean {
-        val keyCurrent = reusedKey == null || withContext(ioDispatcher) { reusedKey.isCurrent() }
-        val current = isCurrent(token, account) && keyCurrent
-        if (!current) opened.close()
-        return current
-    }
-
-    private suspend fun requireCurrentReuse(
-        account: String,
-        admission: PhoneUnlockAdmission,
-    ) {
-        val key = admission.reusedKey ?: return
-        val accountStillCurrent =
-            withContext(ioDispatcher) { repository.unlockAccountSnapshot(account) == admission.accountSnapshot }
-        val bindingStillCurrent =
-            admission.rememberBinding == null ||
-                withContext(ioDispatcher) { repository.rememberBinding(account) } == admission.rememberBinding
-        if (!withContext(ioDispatcher) { key.isCurrent() } || !accountStillCurrent || !bindingStillCurrent) {
-            throw VaultIdentityChangedException()
-        }
-    }
-
-    private suspend fun captureVerifiedMaterial(
-        opened: VaultRouteSession,
-        capture: Boolean,
-    ): ByteArray? {
-        if (!capture) return null
-        return try {
-            opened.exportVerifiedKeyMaterial()
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private suspend fun rememberProvenPhoneUnlock(
-        opened: VaultRouteSession,
-        account: String,
-        capturedMaterial: ByteArray?,
-        admission: PhoneUnlockAdmission,
-    ): String? {
-        val sameAccount = accountSnapshotIsCurrent(account, admission.accountSnapshot)
-        if (admission.reusedKey != null && !sameAccount) throw VaultIdentityChangedException()
-        val material = capturedMaterial ?: admission.provenBiometricMaterial
-        val binding = resolveRememberedBinding(account, material, sameAccount, admission.rememberBinding)
-        val acceptedRememberMode = isAcceptedRememberMode(opened.identity, account, binding)
-        val diagnose = admission.provenBiometricMaterial != null && acceptedRememberMode && admission.reusedKey == null
-        return phoneSessionIssue(admission, sameAccount, material, diagnose)
-    }
-
-    private suspend fun accountSnapshotIsCurrent(
-        account: String,
-        snapshot: Any?,
-    ): Boolean = snapshot != null && withContext(ioDispatcher) { repository.unlockAccountSnapshot(account) == snapshot }
-
-    private suspend fun resolveRememberedBinding(
-        account: String,
-        material: ByteArray?,
-        sameAccount: Boolean,
-        previousBinding: VaultRememberBinding?,
-    ): VaultRememberBinding? =
-        if (sameAccount && material != null) {
-            withContext(ioDispatcher) { repository.rememberBinding(account) }
-        } else {
-            previousBinding
-        }
-
-    private suspend fun isAcceptedRememberMode(
-        identity: VaultIdentity,
-        account: String,
-        binding: VaultRememberBinding?,
-    ): Boolean {
-        val modeAndStoreSupported =
-            withContext(ioDispatcher) {
-                !VaultUnlockPolicy(getApplication<Application>()).askEveryTime() &&
-                    runCatching { adapters.deviceRemember.isSupported() }.getOrDefault(false)
-            }
-        val remembered =
-            withContext(
-                ioDispatcher,
-            ) { runCatching { adapters.deviceRemember.hasRemembered(identity) }.getOrDefault(false) }
-        val bindingCurrent =
-            binding != null && withContext(ioDispatcher) { repository.rememberBinding(account) == binding }
-        return modeAndStoreSupported && remembered && bindingCurrent
-    }
-
-    private fun phoneSessionIssue(
-        admission: PhoneUnlockAdmission,
-        sameAccount: Boolean,
-        material: ByteArray?,
-        diagnose: Boolean,
-    ): String? =
-        when {
-            !diagnose -> null
-            !sameAccount -> "US6"
-            material == null -> "US3"
-            !runCatching(admission.credentialPermit).getOrDefault(false) -> "US2"
-            else -> null
-        }
 
     private fun observePendingOffline(
         opened: VaultRouteSession,
@@ -818,178 +573,6 @@ class VaultViewModel internal constructor(
         }
     }
 
-    private fun showPasswordUnlock(selected: VaultTarget) {
-        val token = nextGeneration()
-        closeSession()
-        clearVerifiedKeyMaterial()
-        clearPreview()
-        val expectedIdentity = selected.expectedIdentity()
-        val phoneSessionIssueCode =
-            if (phoneSessionIssueIdentity == null || phoneSessionIssueIdentity == expectedIdentity) {
-                mutableState.value.phoneSessionIssueCode
-            } else {
-                phoneSessionIssueIdentity = null
-                null
-            }
-        val enrollment = enrollmentStatus(expectedIdentity)
-        currentTargetIdentity = expectedIdentity
-        mutableState.value =
-            mutableState.value.copy(
-                mode = VaultRouteMode.UNLOCK,
-                selectedLocation = presentLocation(selected.location),
-                selectedTitle = selected.title,
-                browseTitle = null,
-                currentPath = "",
-                entries = emptyList(),
-                loading = false,
-                error = null,
-                phoneSessionIssueCode = phoneSessionIssueCode,
-                biometricEnrolled = enrollment.first,
-                biometricNeedsForget = enrollment.second,
-                canEnrollBiometric = false,
-                biometricOfferPending = false,
-                phoneRememberOffer = false,
-                allowAutomaticBiometric = true,
-                preview = null,
-                lockRevision = mutableState.value.lockRevision + 1,
-            )
-        tryPhoneSessionUnlock(selected, token)
-    }
-
-    @Suppress("TooGenericExceptionCaught") // Failed optional reuse falls back to the normal unlock surface.
-    private fun tryPhoneSessionUnlock(selected: VaultTarget, token: Long) {
-        val account = accountId ?: return
-        // Keep the biometric prompt ineligible until this bounded lookup/revalidation finishes.
-        mutableState.value = mutableState.value.copy(loading = true)
-        operationJob =
-            viewModelScope.launch {
-                var key: VaultDeviceRememberKey? = null
-                var opened: VaultRouteSession? = null
-                var attemptedCachedKeyProof = false
-                try {
-                    val lookup = resolvePhoneRestore(selected.expectedIdentity(), account, token)
-                    if (lookup is PhoneRestoreLookup.RevocationFailed) {
-                        showPhoneRestoreRevocationFailure(selected.expectedIdentity(), token, account)
-                        return@launch
-                    }
-                    val ready = lookup as? PhoneRestoreLookup.Ready ?: return@launch
-                    key = ready.key
-                    if (!isCurrent(token, account)) return@launch
-                    attemptedCachedKeyProof = true
-                    opened =
-                        repository.unlockWithKeyMaterial(
-                            account,
-                            selected.location,
-                            selected.vaultPath,
-                            ready.key.material,
-                        )
-                    if (!isCurrent(token, account)) return@launch
-                    installSession(
-                        opened,
-                        selected,
-                        token,
-                        account,
-                        phoneAdmission =
-                            PhoneUnlockAdmission(
-                                accountSnapshot = ready.snapshot,
-                                credentialPermit = ready.credentialPermit,
-                                reusedKey = ready.key,
-                                rememberBinding = ready.binding,
-                            ),
-                    )
-                    opened = null
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    if (attemptedCachedKeyProof && isCurrent(token, account)) {
-                        phoneSessionIssueIdentity = selected.expectedIdentity()
-                        mutableState.value = mutableState.value.copy(phoneSessionIssueCode = "US7")
-                    }
-                } finally {
-                    opened?.close()
-                    key?.close()
-                    if (isCurrent(token, account) && mutableState.value.mode == VaultRouteMode.UNLOCK) {
-                        mutableState.value = mutableState.value.copy(loading = false)
-                    }
-                }
-            }
-    }
-
-    private suspend fun resolvePhoneRestore(
-        identity: VaultIdentity,
-        account: String,
-        token: Long,
-    ): PhoneRestoreLookup {
-        val priorFence = VaultDeviceRememberRevocations.await(identity)
-        if (priorFence == false) {
-            return if (retryFailedDeviceForget(identity)) {
-                PhoneRestoreLookup.Unavailable
-            } else {
-                PhoneRestoreLookup.RevocationFailed
-            }
-        }
-        return loadPhoneRestoreCandidate(identity, account, token)
-    }
-
-    private suspend fun loadPhoneRestoreCandidate(
-        identity: VaultIdentity,
-        account: String,
-        token: Long,
-    ): PhoneRestoreLookup {
-        val snapshot = withContext(ioDispatcher) { repository.unlockAccountSnapshot(account) }
-        val restoreAllowed = phoneRestoreAllowed()
-        val remembered =
-            restoreAllowed &&
-                withContext(ioDispatcher) {
-                    runCatching { adapters.deviceRemember.hasRemembered(identity) }.getOrDefault(false)
-                }
-        val binding = if (remembered) withContext(ioDispatcher) { repository.rememberBinding(account) } else null
-        val credentialPermit = if (binding != null) repository.unlockCredentialPermit(account) else null
-        val restoredKey =
-            if (binding != null && credentialPermit != null) {
-                withContext(ioDispatcher) { adapters.deviceRemember.restore(identity, binding, credentialPermit) }
-            } else {
-                null
-            }
-        val currentKey =
-            restoredKey?.takeIf {
-                isCurrent(token, account) && withContext(ioDispatcher) { it.isCurrent() }
-            }
-        if (currentKey == null) restoredKey?.close()
-        return currentKey?.let { safeKey ->
-            val currentSnapshot = snapshot
-            val currentBinding = binding
-            val currentPermit = credentialPermit
-            if (currentSnapshot != null && currentBinding != null && currentPermit != null) {
-                PhoneRestoreLookup.Ready(safeKey, currentSnapshot, currentBinding, currentPermit)
-            } else {
-                safeKey.close()
-                null
-            }
-        } ?: PhoneRestoreLookup.Unavailable
-    }
-
-    private suspend fun phoneRestoreAllowed(): Boolean =
-        withContext(ioDispatcher) {
-            !VaultUnlockPolicy(getApplication<Application>()).askEveryTime() &&
-                runCatching { adapters.deviceRemember.isSupported() }.getOrDefault(false)
-        }
-
-    private fun showPhoneRestoreRevocationFailure(
-        identity: VaultIdentity,
-        token: Long,
-        account: String,
-    ) {
-        if (!isCurrent(token, account)) return
-        phoneSessionIssueIdentity = identity
-        mutableState.value =
-            mutableState.value.copy(
-                loading = false,
-                error = VaultRouteError.PHONE_LOCK_FAILED,
-                phoneSessionIssueCode = "US8",
-            )
-    }
-
     // These boundaries expose heterogeneous failures; CancellationException is rethrown explicitly.
     @Suppress("TooGenericExceptionCaught")
     private fun loadDiscovery(
@@ -998,7 +581,7 @@ class VaultViewModel internal constructor(
         token: Long,
     ) {
         val account = accountId ?: return
-        operationJob =
+        lifecycle.trackOperation(
             viewModelScope.launch {
                 try {
                     val entries = repository.folders(account, location, path)
@@ -1021,7 +604,8 @@ class VaultViewModel internal constructor(
                         VaultFailureContext(token, account, classifyVaultIdentity = false),
                     )
                 }
-            }
+            },
+        )
     }
 
     fun openVaultFolder(id: String) {
@@ -1046,7 +630,7 @@ class VaultViewModel internal constructor(
         mutableState.value = mutableState.value.copy(preview = null, loading = false, error = null)
         val request = previewRequest(id, token) ?: return
         mutableState.value = mutableState.value.copy(loading = true, error = null, preview = null)
-        operationJob = viewModelScope.launch { previewContent.load(request) }
+        lifecycle.trackOperation(viewModelScope.launch { previewContent.load(request) })
     }
 
     /** Creates a short-lived plaintext handoff only after the user accepts the external-app warning. */
@@ -1067,7 +651,7 @@ class VaultViewModel internal constructor(
         if (remote == null || remote.isFolder) return
         val request = ExternalHandoffRequest(opened, account, remote, generation)
         mutableState.value = mutableState.value.copy(loading = true, error = null)
-        operationJob = viewModelScope.launch { createExternalHandoff(request, onReady) }
+        lifecycle.trackOperation(viewModelScope.launch { createExternalHandoff(request, onReady) })
     }
 
     private fun canStartExternalHandoff(): Boolean =
@@ -1168,7 +752,7 @@ class VaultViewModel internal constructor(
         }
         val token = nextGeneration()
         mutableState.value = mutableState.value.copy(previewSaving = true, previewSaveError = null)
-        operationJob =
+        val saveJob =
             viewModelScope.launch {
                 try {
                     withContext(ioDispatcher) {
@@ -1223,7 +807,8 @@ class VaultViewModel internal constructor(
                 }
             }
         // Also covers cancellation before the launched coroutine has entered its try/finally.
-        operationJob?.invokeOnCompletion { bytes.fill(0) }
+        saveJob.invokeOnCompletion { bytes.fill(0) }
+        lifecycle.trackOperation(saveJob)
     }
 
     private fun validPreviewTextRange(
@@ -1362,7 +947,7 @@ class VaultViewModel internal constructor(
         val identity = opened.identity
         val path = mutableState.value.currentPath
         mutableState.value = mutableState.value.copy(loading = true, error = null)
-        operationJob =
+        lifecycle.trackOperation(
             viewModelScope.launch {
                 try {
                     val encryptedParent = opened.encodeDirectoryPath(path)
@@ -1384,7 +969,8 @@ class VaultViewModel internal constructor(
                             mutableState.value.copy(loading = false, error = VaultRouteError.OPERATION)
                     }
                 }
-            }
+            },
+        )
     }
 
     fun acceptUploadUri(uri: Uri?) = acceptTransferUri(uri, isUpload = true)
@@ -1407,7 +993,7 @@ class VaultViewModel internal constructor(
         val token = nextGeneration()
         val identity = opened.identity
         mutableState.value = mutableState.value.copy(loading = true, error = null)
-        operationJob =
+        lifecycle.trackOperation(
             viewModelScope.launch {
                 try {
                     val encryptedParent = opened.encodeDirectoryPath(entry.path.substringBeforeLast('/', ""))
@@ -1437,7 +1023,8 @@ class VaultViewModel internal constructor(
                             mutableState.value.copy(loading = false, error = VaultRouteError.OPERATION)
                     }
                 }
-            }
+            },
+        )
     }
 
     fun acceptExportUri(uri: Uri?) = acceptTransferUri(uri, isUpload = false)
@@ -1477,7 +1064,7 @@ class VaultViewModel internal constructor(
     fun onRouteStarted() {
         val selected = target ?: return
         if (routeActive && mutableState.value.mode == VaultRouteMode.UNLOCK && !mutableState.value.loading) {
-            tryPhoneSessionUnlock(selected, nextGeneration())
+            lifecycle.tryPhoneSessionUnlock(selected, nextGeneration())
         }
     }
 
@@ -1521,7 +1108,7 @@ class VaultViewModel internal constructor(
             val account = accountId
             if (opened != null && account != null && mutableState.value.mode == VaultRouteMode.CONTENTS) {
                 val token = nextGeneration()
-                operationJob = viewModelScope.launch { processPendingTransfer(opened, token, account) }
+                lifecycle.trackOperation(viewModelScope.launch { processPendingTransfer(opened, token, account) })
             } else {
                 mutableState.value = mutableState.value.copy(error = VaultRouteError.TRANSFER_UNLOCK_REQUIRED)
             }
@@ -1547,8 +1134,14 @@ class VaultViewModel internal constructor(
         mutableState.value = mutableState.value.copy(loading = true, error = null)
         try {
             when (request) {
-                is PendingVaultTransfer.Upload -> uploadPicked(opened, request, token, account)
-                is PendingVaultTransfer.Export -> exportWithCleanup(opened, request, token, account)
+                is PendingVaultTransfer.Upload -> pickedTransferExecution.uploadPicked(opened, request, token, account)
+                is PendingVaultTransfer.Export ->
+                    pickedTransferExecution.exportWithCleanup(
+                        opened,
+                        request,
+                        token,
+                        account,
+                    )
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -1561,67 +1154,6 @@ class VaultViewModel internal constructor(
                 }
             reportFailure(failure, fallback, VaultFailureContext(token, account, lockOnRevocation = true))
         }
-    }
-
-    private suspend fun exportWithCleanup(
-        opened: VaultRouteSession,
-        request: PendingVaultTransfer.Export,
-        token: Long,
-        account: String,
-    ) {
-        var completed = false
-        try {
-            exportPicked(opened, request, token, account)
-            completed = true
-        } finally {
-            if (!completed) discardIncompleteExport(requireNotNull(request.uri))
-        }
-    }
-
-    private suspend fun discardIncompleteExport(uri: Uri) {
-        withContext(NonCancellable + ioDispatcher) {
-            // ACTION_CREATE_DOCUMENT creates a new destination. A provider may refuse deletion;
-            // the export error deliberately still tells the user to check for an incomplete copy.
-            runCatching { DocumentsContract.deleteDocument(getApplication<Application>().contentResolver, uri) }
-        }
-    }
-
-    private suspend fun uploadPicked(
-        opened: VaultRouteSession,
-        request: PendingVaultTransfer.Upload,
-        token: Long,
-        account: String,
-    ) {
-        val uri = requireNotNull(request.uri)
-        val parentPath = opened.decodeDirectoryPath(request.encryptedParentPath)
-        val resolver = getApplication<Application>().contentResolver
-        val metadata = withContext(ioDispatcher) { readDocumentMetadata(resolver, uri) }
-        if (!isCurrentTransferSession(opened, request.identity, token, account)) return
-        verifyUploadDirectory(opened, parentPath)
-        if (!isCurrentTransferSession(opened, request.identity, token, account)) return
-        mutableState.value = mutableState.value.copy(preparingUpload = true)
-        try {
-            withContext(ioDispatcher) {
-                withCancellableVaultUploadSource(getApplication(), uri, adapters.uploadPollReady) { source ->
-                    opened.queueUpload(
-                        parentPath,
-                        metadata.name,
-                        source,
-                        metadata.size?.takeIf { it >= 0 } ?: -1L,
-                        metadata.mimeType,
-                    )
-                }
-            }
-            if (isCurrent(token, account) && session === opened) {
-                mutableState.value =
-                    mutableState.value.copy(queuedUploadCount = mutableState.value.queuedUploadCount + 1)
-            }
-        } finally {
-            if (isCurrent(token, account) && session === opened) {
-                mutableState.value = mutableState.value.copy(preparingUpload = false)
-            }
-        }
-        publishTransferListing(opened, parentPath, token, account)
     }
 
     private fun isCurrentTransferSession(
@@ -1639,35 +1171,20 @@ class VaultViewModel internal constructor(
         opened.openDirectory(path, true).use { currentCoroutineContext().ensureActive() }
     }
 
-    // Reject identity, size and destination failures before exposing plaintext.
-    @Suppress("ThrowsCount")
-    private suspend fun exportPicked(
+    private suspend fun revalidateExportSource(
         opened: VaultRouteSession,
+        path: String,
         request: PendingVaultTransfer.Export,
-        token: Long,
-        account: String,
-    ) {
-        val uri = requireNotNull(request.uri)
-        val parentPath = opened.decodeDirectoryPath(request.encryptedParentPath)
-        val source =
-            findFreshDirectoryEntry(opened, parentPath) {
-                it.id == request.id &&
-                    it.encryptedPath == request.encryptedPath &&
-                    request.strongETag.isStrongVaultETag() &&
-                    it.strongETag == request.strongETag &&
-                    it.strongETag.isStrongVaultETag() &&
-                    it.size == request.observedSize &&
-                    !it.isFolder
-            }
-        if (!isCurrent(token, account) || session !== opened || request.identity != opened.identity) return
-        val resolver = getApplication<Application>().contentResolver
-        withContext(ioDispatcher) {
-            resolver.openOutputStream(uri, "wt")?.use { sink ->
-                opened.download(source, sink, Long.MAX_VALUE)
-            } ?: error("The selected destination is unavailable.")
+    ): VaultFolder =
+        findFreshDirectoryEntry(opened, path) {
+            it.id == request.id &&
+                it.encryptedPath == request.encryptedPath &&
+                request.strongETag.isStrongVaultETag() &&
+                it.strongETag == request.strongETag &&
+                it.strongETag.isStrongVaultETag() &&
+                it.size == request.observedSize &&
+                !it.isFolder
         }
-        publishTransferListing(opened, parentPath, token, account)
-    }
 
     private suspend fun publishTransferListing(
         opened: VaultRouteSession,
@@ -1676,7 +1193,7 @@ class VaultViewModel internal constructor(
         account: String,
     ) {
         if (!isCurrent(token, account) || session !== opened) return
-        replaceDirectory(opened, path, token, account)
+        directoryContent.replace(opened, path, token, account)
     }
 
     private data class BoundaryPreparation(
@@ -1707,7 +1224,7 @@ class VaultViewModel internal constructor(
         val token = nextGeneration()
         clearDestinationPicker()
         mutableState.value = mutableState.value.copy(loading = true, error = null)
-        operationJob =
+        lifecycle.trackOperation(
             viewModelScope.launch {
                 try {
                     val current = revalidateActionSource(request.opened, request.source)
@@ -1730,7 +1247,8 @@ class VaultViewModel internal constructor(
                         VaultFailureContext(token, request.account, lockOnRevocation = true),
                     )
                 }
-            }
+            },
+        )
     }
 
     fun beginDestinationPicker(
@@ -1818,8 +1336,7 @@ class VaultViewModel internal constructor(
                 if (!isCurrent(token, account) || session !== opened) throw CancellationException()
                 val found = entries.singleOrNull(matches)
                 if (found != null) {
-                    directory = snapshot
-                    previousDirectoryOffsets.addAll(bookmarks)
+                    directoryContent.adopt(snapshot, bookmarks)
                     adopted = true
                     mutableState.value =
                         mutableState.value.copy(
@@ -1894,12 +1411,12 @@ class VaultViewModel internal constructor(
         val account = accountId ?: return
         val token = nextGeneration()
         mutableState.value = mutableState.value.copy(loading = true, error = null)
-        operationJob =
+        lifecycle.trackOperation(
             viewModelScope.launch {
                 try {
                     block(opened)
                     if (!isCurrent(token, account) || session !== opened) return@launch
-                    replaceDirectory(opened, mutableState.value.currentPath, token, account)
+                    directoryContent.replace(opened, mutableState.value.currentPath, token, account)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: Exception) {
@@ -1909,7 +1426,8 @@ class VaultViewModel internal constructor(
                         VaultFailureContext(token, account, lockOnRevocation = true),
                     )
                 }
-            }
+            },
+        )
     }
 
     internal fun editTarget(revision: Long): VaultLocation? {
@@ -2023,22 +1541,8 @@ class VaultViewModel internal constructor(
         expectedLockRevision: Long,
     ) {
         if (!isManagementUnlocked(location, expectedLockRevision)) return
-        val selected = target ?: return
-        target = selected.copy(location = selected.location.copy(title = location.title), title = location.title)
+        lifecycle.updateTargetTitle(location.title)
         mutableState.value = mutableState.value.copy(selectedTitle = location.title)
-        val identity = session?.identity ?: return
-        runCatching {
-            when (preferenceStatus(identity)) {
-                VaultPreferenceStatus.REMEMBERED ->
-                    biometricPreferences.remember(
-                        identity,
-                        location.title,
-                        targetKind(),
-                    )
-                VaultPreferenceStatus.DECLINED -> biometricPreferences.decline(identity, location.title, targetKind())
-                null -> Unit
-            }
-        }
     }
 
     @Suppress("TooGenericExceptionCaught") // Cleanup errors retain a locked route; cancellation is rethrown.
@@ -2102,7 +1606,7 @@ class VaultViewModel internal constructor(
         if (selected.location.kind != VaultLocationKind.FOLDER_VAULT || name.isBlank()) return
         val token = nextGeneration()
         mutableState.value = mutableState.value.copy(loading = true, rootActionsVisible = false, error = null)
-        operationJob =
+        lifecycle.trackOperation(
             viewModelScope.launch {
                 try {
                     val changed = opened.renameVaultRoot(name)
@@ -2110,35 +1614,12 @@ class VaultViewModel internal constructor(
                     if (!isCurrent(token, account)) return@launch
                     closeSession()
                     clearSensitiveState()
-                    target = VaultTarget(changed, changed.vaultPath, changed.title, changed.remoteVaultId)
-                    currentTargetIdentity =
-                        VaultIdentity(
-                            changed.accountId,
-                            changed.canonicalServer,
-                            changed.driveId,
-                            changed.remoteVaultId,
-                        )
+                    lifecycle.replaceTarget(
+                        VaultSessionTarget(changed, changed.vaultPath, changed.title, changed.remoteVaultId),
+                    )
                     directLocation = changed
-                    val enrollment = enrollmentStatus(requireNotNull(currentTargetIdentity))
-                    when (preferenceStatus(requireNotNull(currentTargetIdentity))) {
-                        VaultPreferenceStatus.REMEMBERED ->
-                            runCatching {
-                                biometricPreferences.remember(
-                                    requireNotNull(currentTargetIdentity),
-                                    changed.title,
-                                    targetKind(),
-                                )
-                            }
-                        VaultPreferenceStatus.DECLINED ->
-                            runCatching {
-                                biometricPreferences.decline(
-                                    requireNotNull(currentTargetIdentity),
-                                    changed.title,
-                                    targetKind(),
-                                )
-                            }
-                        null -> Unit
-                    }
+                    val enrollment = lifecycle.enrollmentStatus(requireNotNull(currentTargetIdentity))
+                    lifecycle.updatePreferenceTitle(requireNotNull(currentTargetIdentity), changed.title)
                     mutableState.value =
                         VaultRouteState(
                             mode = VaultRouteMode.UNLOCK,
@@ -2153,7 +1634,8 @@ class VaultViewModel internal constructor(
                 } catch (failure: Exception) {
                     lockAfterAmbiguousRootChange(failure, token, account)
                 }
-            }
+            },
+        )
     }
 
     // Explicit guards reject stale operations; provider failures become safe UI states.
@@ -2166,7 +1648,7 @@ class VaultViewModel internal constructor(
         if (selected.location.kind != VaultLocationKind.FOLDER_VAULT) return
         val token = nextGeneration()
         mutableState.value = mutableState.value.copy(loading = true, rootActionsVisible = false, error = null)
-        operationJob =
+        lifecycle.trackOperation(
             viewModelScope.launch {
                 try {
                     opened.deleteVaultRoot()
@@ -2175,19 +1657,16 @@ class VaultViewModel internal constructor(
                     val deletedIdentity = opened.identity
                     closeSession()
                     clearSensitiveState()
-                    target = null
-                    currentTargetIdentity = null
+                    lifecycle.clearTarget()
                     showCatalog()
-                    if (!clearDeletedVaultAccess(deletedIdentity)) {
-                        pendingDeletedVaultCleanup = deletedIdentity
-                        mutableState.value = mutableState.value.copy(error = VaultRouteError.BIOMETRIC_CLEANUP)
-                    }
+                    lifecycle.cleanupDeletedTarget(deletedIdentity)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: Exception) {
                     lockAfterAmbiguousRootChange(failure, token, account)
                 }
-            }
+            },
+        )
     }
 
     private fun isCurrentRootAction(expectedLockRevision: Long): Boolean =
@@ -2210,7 +1689,7 @@ class VaultViewModel internal constructor(
         closeSession()
         clearSensitiveState()
         val selected = target
-        val enrollment = selected?.let { enrollmentStatus(it.expectedIdentity()) }
+        val enrollment = selected?.let { lifecycle.enrollmentStatus(it.expectedIdentity()) }
         mutableState.value =
             VaultRouteState(
                 mode = if (selected == null) VaultRouteMode.CATALOG else VaultRouteMode.UNLOCK,
@@ -2221,28 +1700,6 @@ class VaultViewModel internal constructor(
                 biometricNeedsForget = enrollment?.second ?: false,
                 lockRevision = mutableState.value.lockRevision + 1,
             )
-    }
-
-    // A failed local cleanup remains retryable without repeating the remote deletion.
-    @Suppress("TooGenericExceptionCaught", "SwallowedException")
-    private fun clearDeletedVaultAccess(identity: VaultIdentity): Boolean =
-        try {
-            biometricStore.forget(identity)
-            biometricPreferences.remove(identity)
-            true
-        } catch (_: Exception) {
-            false
-        }
-
-    private fun retryDeletedVaultCleanup(): Boolean {
-        val identity = pendingDeletedVaultCleanup ?: return false
-        if (clearDeletedVaultAccess(identity)) {
-            pendingDeletedVaultCleanup = null
-            mutableState.value = mutableState.value.copy(error = null)
-        } else {
-            mutableState.value = mutableState.value.copy(error = VaultRouteError.BIOMETRIC_CLEANUP)
-        }
-        return true
     }
 
     private fun folderRequest(id: String): VaultContentsRequest? {
@@ -2299,72 +1756,6 @@ class VaultViewModel internal constructor(
         return null
     }
 
-    /** The first page retains the same root/password proof as the complete validated directory. */
-    private suspend fun openFirstDirectory(
-        opened: VaultRouteSession,
-        path: String,
-    ): OpenedVaultDirectory {
-        while (true) {
-            val visibility = showHidden
-            val snapshot = opened.openDirectory(path, visibility)
-            var delivered = false
-            try {
-                currentCoroutineContext().ensureActive()
-                val entries = snapshot.page(0, VAULT_DIRECTORY_PAGE_SIZE)
-                currentCoroutineContext().ensureActive()
-                if (visibility == showHidden) {
-                    delivered = true
-                    return OpenedVaultDirectory(snapshot, entries, visibility)
-                }
-            } finally {
-                if (!delivered) snapshot.close()
-            }
-        }
-    }
-
-    private suspend fun currentVisibilityDirectory(
-        opened: VaultRouteSession,
-        first: OpenedVaultDirectory,
-    ): OpenedVaultDirectory {
-        if (first.showHidden == showHidden) return first
-        first.snapshot.close()
-        return openFirstDirectory(opened, "")
-    }
-
-    private data class OpenedVaultDirectory(
-        val snapshot: VaultRouteDirectorySnapshot,
-        val entries: List<VaultFolder>,
-        val showHidden: Boolean,
-    )
-
-    private suspend fun replaceDirectory(
-        opened: VaultRouteSession,
-        path: String,
-        token: Long,
-        account: String,
-    ) {
-        if (!isCurrent(token, account) || session !== opened) return
-        closeDirectory()
-        val first = openFirstDirectory(opened, path)
-        var adopted = false
-        try {
-            if (!isCurrent(token, account) || session !== opened) return
-            directory = first.snapshot
-            previousDirectoryOffsets.clear()
-            adopted = true
-            mutableState.value =
-                mutableState.value.copy(
-                    entries = presentEntries(first.entries),
-                    directoryPage = VaultDirectoryPageState(0, first.snapshot.totalCount, first.entries.size, false),
-                    currentPath = path,
-                    loading = false,
-                    error = null,
-                )
-        } finally {
-            if (!adopted) first.snapshot.close()
-        }
-    }
-
     // These boundaries expose heterogeneous failures; CancellationException is rethrown explicitly.
     @Suppress("TooGenericExceptionCaught")
     private fun loadContents(
@@ -2375,10 +1766,10 @@ class VaultViewModel internal constructor(
     ) {
         closeDirectory()
         mutableState.value = mutableState.value.copy(entries = emptyList(), directoryPage = null)
-        operationJob =
+        lifecycle.trackOperation(
             viewModelScope.launch {
                 try {
-                    replaceDirectory(opened, path, token, account)
+                    directoryContent.replace(opened, path, token, account)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: Exception) {
@@ -2388,7 +1779,8 @@ class VaultViewModel internal constructor(
                         VaultFailureContext(token, account, lockOnRevocation = true),
                     )
                 }
-            }
+            },
+        )
     }
 
     fun setShowHidden(value: Boolean) {
@@ -2402,89 +1794,20 @@ class VaultViewModel internal constructor(
         }
     }
 
+    @Suppress("ReturnCount") // Session, account and directory admission remain independent of page loading.
     fun directoryPage(previous: Boolean) {
-        val request = directoryPageRequest(previous) ?: return
+        val opened = session ?: return
+        val account = accountId ?: return
+        val request = directoryContent.pageRequest(opened, account, previous) ?: return
         val token = nextGeneration()
         clearPreview()
         presentedEntries.clear()
         mutableState.value =
             mutableState.value.copy(entries = emptyList(), loading = true, preview = null, error = null)
-        operationJob = viewModelScope.launch { loadDirectoryPage(request, token) }
+        lifecycle.trackOperation(viewModelScope.launch { directoryContent.loadPage(request, token) })
     }
 
-    private data class DirectoryPageRequest(
-        val opened: VaultRouteSession,
-        val snapshot: VaultRouteDirectorySnapshot,
-        val account: String,
-        val page: VaultDirectoryPageState,
-        val offset: Long,
-        val previous: Boolean,
-    )
-
-    @Suppress("ReturnCount") // Independent session/account/page admission fails closed before replacing action leases.
-    private fun directoryPageRequest(previous: Boolean): DirectoryPageRequest? {
-        val opened = session ?: return null
-        val snapshot = directory ?: return null
-        val account = accountId ?: return null
-        val page = mutableState.value.directoryPage ?: return null
-        val canMove = if (previous) page.hasPrevious else page.hasNext
-        if (mutableState.value.loading || !canMove) return null
-        val offset = if (previous) previousDirectoryOffsets.lastOrNull() ?: return null else page.offset + page.count
-        return DirectoryPageRequest(opened, snapshot, account, page, offset, previous)
-    }
-
-    @Suppress("TooGenericExceptionCaught") // Page failure revokes its leases and preserves cancellation.
-    private suspend fun loadDirectoryPage(request: DirectoryPageRequest, token: Long) {
-        var delivered = false
-        try {
-            val entries = request.snapshot.page(request.offset, VAULT_DIRECTORY_PAGE_SIZE)
-            currentCoroutineContext().ensureActive()
-            if (!isCurrent(token, request.account) ||
-                session !== request.opened ||
-                directory !== request.snapshot
-            ) {
-                return
-            }
-            if (request.previous) {
-                previousDirectoryOffsets.removeAt(previousDirectoryOffsets.lastIndex)
-            } else {
-                previousDirectoryOffsets += request.page.offset
-            }
-            mutableState.value =
-                mutableState.value.copy(
-                    entries = presentEntries(entries),
-                    directoryPage =
-                        VaultDirectoryPageState(
-                            request.offset,
-                            request.snapshot.totalCount,
-                            entries.size,
-                            previousDirectoryOffsets.isNotEmpty(),
-                        ),
-                    loading = false,
-                    error = null,
-                )
-            delivered = true
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            if (isCurrent(token, request.account) && directory === request.snapshot) closeDirectory()
-            reportFailure(
-                failure,
-                VaultRouteError.CONTENTS,
-                VaultFailureContext(token, request.account, lockOnRevocation = true),
-            )
-        } finally {
-            if (!delivered && directory === request.snapshot) closeDirectory()
-        }
-    }
-
-    private fun closeDirectory() {
-        directory?.close()
-        directory = null
-        previousDirectoryOffsets.clear()
-        presentedEntries.clear()
-        mutableState.value = mutableState.value.copy(directoryPage = null)
-    }
+    private fun closeDirectory() = directoryContent.close()
 
     fun up() {
         when (mutableState.value.mode) {
@@ -2521,96 +1844,8 @@ class VaultViewModel internal constructor(
         return if (opened != null && account != null) VaultContentsRequest(opened, path, account) else null
     }
 
-    fun lock() {
-        val identity = currentTargetIdentity ?: target?.expectedIdentity()
-        closeRouteSession()
-        if (identity == null) return
-        val revocationTicket = VaultDeviceRememberRevocations.begin(identity)
-        explicitDeviceForgetIdentity = identity
-        mutableState.value =
-            mutableState.value.copy(
-                loading = true,
-                lockingRememberedAccess = true,
-                allowAutomaticBiometric = false,
-                error = null,
-            )
-        val previousForget = explicitDeviceForgetJob
-        explicitDeviceForgetJob =
-            viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
-                val forgotten =
-                    withContext(NonCancellable + ioDispatcher) {
-                        previousForget?.join()
-                        VaultDeviceRememberRevocations.awaitPredecessor(revocationTicket)
-                        runCatching { adapters.deviceRemember.forget(identity) }.isSuccess.also {
-                            VaultDeviceRememberRevocations.finish(revocationTicket, it)
-                        }
-                    }
-                if (routeActive &&
-                    currentTargetIdentity == identity &&
-                    mutableState.value.lockingRememberedAccess
-                ) {
-                    mutableState.value =
-                        mutableState.value.copy(
-                            loading = false,
-                            lockingRememberedAccess = false,
-                            error = if (forgotten) null else VaultRouteError.PHONE_LOCK_FAILED,
-                        )
-                }
-            }
-    }
-
-    /** A failed process fence is cleared only by a new durable forget under a replacement ticket. */
-    private suspend fun retryFailedDeviceForget(identity: VaultIdentity): Boolean {
-        val ticket = VaultDeviceRememberRevocations.begin(identity)
-        val forgotten =
-            withContext(NonCancellable + ioDispatcher) {
-                VaultDeviceRememberRevocations.awaitPredecessor(ticket)
-                runCatching { adapters.deviceRemember.forget(identity) }.isSuccess.also {
-                    VaultDeviceRememberRevocations.finish(ticket, it)
-                }
-            }
-        return forgotten
-    }
-
-    /** Screen-off closes the live route while durable phone consent survives. */
-    fun onDeviceLocked() {
-        closeRouteSession()
-    }
-
-    private fun closeRouteSession() {
-        invalidateRequests()
-        closeSession()
-        clearSensitiveState()
-        currentSource = null
-        val currentTarget = target
-        mutableState.value =
-            mutableState.value.copy(
-                mode = if (currentTarget != null) VaultRouteMode.UNLOCK else VaultRouteMode.CATALOG,
-                selectedLocation = currentTarget?.let { presentLocation(it.location) },
-                selectedTitle = currentTarget?.title,
-                browseTitle = null,
-                currentPath = "",
-                entries = emptyList(),
-                loading = false,
-                error = null,
-                canEnrollBiometric = false,
-                biometricOfferPending = false,
-                phoneRememberOffer = false,
-                preview = null,
-                lockRevision = mutableState.value.lockRevision + 1,
-            )
-        if (currentTarget != null) {
-            val enrollment = enrollmentStatus(currentTarget.expectedIdentity())
-            mutableState.value =
-                mutableState.value.copy(
-                    biometricEnrolled = enrollment.first,
-                    biometricNeedsForget = enrollment.second,
-                )
-        }
-    }
-
     fun retry() {
-        if (retryDeletedVaultCleanup()) return
+        if (lifecycle.retryDeletedVaultCleanup()) return
         when (mutableState.value.mode) {
             VaultRouteMode.CATALOG -> {
                 val direct = directLocation
@@ -2637,531 +1872,6 @@ class VaultViewModel internal constructor(
                 loadContents(request.session, request.path, token, request.account)
             }
         }
-    }
-
-    fun prepareBiometricUnlock(): Cipher? {
-        val identity = currentTargetIdentity ?: return null
-        return try {
-            pendingBiometricIdentity = identity
-            biometricStore.prepareUnlock(identity)
-        } catch (_: Exception) {
-            mutableState.value =
-                mutableState.value.copy(
-                    error = VaultRouteError.BIOMETRIC,
-                    biometricEnrolled = true,
-                    biometricNeedsForget = true,
-                )
-            null
-        }
-    }
-
-    // These boundaries expose heterogeneous failures; CancellationException is rethrown explicitly.
-    @Suppress("TooGenericExceptionCaught")
-    fun completeBiometricUnlock(cipher: Cipher?) {
-        val identity = pendingBiometricIdentity
-        val selected = target
-        val account = accountId
-        pendingBiometricIdentity = null
-        if (!isCurrentBiometricUnlock(identity, selected, account, cipher)) {
-            identity?.let { runCatching { biometricStore.cancelUnlock(it) } }
-            return
-        }
-        checkNotNull(identity)
-        checkNotNull(selected)
-        checkNotNull(account)
-        checkNotNull(cipher)
-        val material =
-            try {
-                biometricStore.completeUnlock(identity, cipher)
-            } catch (_: Exception) {
-                runCatching { biometricStore.cancelUnlock(identity) }
-                mutableState.value =
-                    mutableState.value.copy(
-                        error = VaultRouteError.BIOMETRIC_SETUP,
-                        biometricEnrolled = true,
-                        biometricNeedsForget = true,
-                    )
-                return
-            }
-        val token = nextGeneration()
-        mutableState.value = mutableState.value.copy(loading = true, error = null)
-        val biometricJob =
-            viewModelScope.launch {
-                var unlocked: VaultRouteSession? = null
-                try {
-                    val snapshot = repository.unlockAccountSnapshot(account)
-                    val credentialPermit = repository.unlockCredentialPermit(account)
-                    unlocked =
-                        repository.unlockWithKeyMaterial(account, selected.location, selected.vaultPath, material)
-                    if (!isCurrent(token, account)) {
-                        unlocked.close()
-                        return@launch
-                    }
-                    installSession(
-                        unlocked,
-                        selected,
-                        token,
-                        account,
-                        phoneAdmission =
-                            PhoneUnlockAdmission(
-                                accountSnapshot = snapshot,
-                                credentialPermit = credentialPermit,
-                                provenBiometricMaterial = material,
-                            ),
-                    )
-                    unlocked = null
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    reportFailure(
-                        failure,
-                        VaultRouteError.UNLOCK,
-                        VaultFailureContext(token, account, lockOnRevocation = true),
-                    )
-                } finally {
-                    material.fill(0)
-                    unlocked?.close()
-                }
-            }
-        biometricJob.invokeOnCompletion { material.fill(0) }
-        operationJob = biometricJob
-    }
-
-    fun cancelBiometricUnlock() {
-        val identity = pendingBiometricIdentity
-        pendingBiometricIdentity = null
-        if (identity != null) runCatching { biometricStore.cancelUnlock(identity) }
-    }
-
-    fun prepareBiometricEnrollment(): Cipher? {
-        val identity = session?.identity
-        return if (identity == null || verifiedKeyMaterial == null) {
-            mutableState.value = mutableState.value.copy(error = VaultRouteError.BIOMETRIC)
-            null
-        } else {
-            try {
-                pendingEnrollmentIdentity = identity
-                biometricStore.prepareEnrollment(identity)
-            } catch (_: Exception) {
-                mutableState.value = mutableState.value.copy(error = VaultRouteError.BIOMETRIC)
-                null
-            }
-        }
-    }
-
-    fun acceptBiometricOffer() {
-        val currentState = mutableState.value
-        val legacyOffer = currentState.biometricOfferPending && !currentState.phoneRememberOffer
-        val verifiedMaterialAvailable = session != null && verifiedKeyMaterial != null
-        if (routeActive && legacyOffer && verifiedMaterialAvailable) {
-            mutableState.value = currentState.copy(biometricOfferPending = false)
-            maybeOpenRootActions()
-        }
-    }
-
-    fun declineBiometricOffer() {
-        val currentState = mutableState.value
-        if (!routeActive || !currentState.biometricOfferPending) return
-        val identity = session?.identity
-        if (identity == null) {
-            return
-        } else if (currentState.phoneRememberOffer) {
-            declinePhoneRememberOffer(identity, currentState)
-        } else {
-            declineLegacyBiometricOffer(identity, currentState)
-        }
-    }
-
-    private fun declineLegacyBiometricOffer(
-        identity: VaultIdentity,
-        currentState: VaultRouteState,
-    ) {
-        runCatching {
-            biometricPreferences.decline(identity, currentState.selectedTitle.orEmpty(), targetKind())
-        }
-        clearVerifiedKeyMaterial()
-        mutableState.value =
-            currentState.copy(biometricOfferPending = false, phoneRememberOffer = false, canEnrollBiometric = false)
-        maybeOpenRootActions()
-    }
-
-    /** Saves only after the user accepts the explicit per-location phone-remember question. */
-    fun rememberOnPhone() {
-        val request = capturePhoneRememberRequest() ?: return
-        mutableState.value = mutableState.value.copy(loading = true, error = null)
-        operationJob =
-            launchWithOwnedMaterial(viewModelScope, request.material) {
-                runPhoneRemember(request)
-            }
-    }
-
-    private fun capturePhoneRememberRequest(): PhoneRememberRequest? {
-        val state = mutableState.value
-        val opened = session
-        val account = accountId
-        val material = verifiedKeyMaterial?.copyOf()
-        val snapshot = provenAccountSnapshot
-        val permit = provenCredentialPermit
-        val canRemember = isPhoneRememberOfferReady(state)
-        val hasProof = snapshot != null && permit != null
-        val hasContext = opened != null && account != null && material != null
-        if (!hasContext || !hasProof || !canRemember) material?.fill(0)
-        return if (hasContext && hasProof && canRemember) {
-            PhoneRememberRequest(
-                opened = requireNotNull(opened),
-                identity = requireNotNull(opened).identity,
-                account = requireNotNull(account),
-                material = requireNotNull(material),
-                accountSnapshot = requireNotNull(snapshot),
-                credentialPermit = requireNotNull(permit),
-                token = generation,
-                lockRevision = state.lockRevision,
-            )
-        } else {
-            null
-        }
-    }
-
-    private fun isPhoneRememberOfferReady(state: VaultRouteState): Boolean {
-        val visibleOffer = state.phoneRememberOffer && state.mode == VaultRouteMode.CONTENTS
-        return routeActive && visibleOffer && !state.loading
-    }
-
-    @Suppress("SwallowedException", "TooGenericExceptionCaught") // Sanitize provider/storage failures.
-    private suspend fun runPhoneRemember(request: PhoneRememberRequest) {
-        try {
-            persistPhoneRemember(request)
-            showPhoneRememberSuccess(request)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (unknown: VaultRememberCommitUnknownException) {
-            showUnknownPhoneRememberOutcome(request, unknown)
-        } catch (changed: VaultIdentityChangedException) {
-            showChangedPhoneRememberIdentity(request)
-        } catch (_: VaultRememberRevocationException) {
-            showPhoneRememberRevocationFailure(request)
-        } catch (_: VaultDeviceRememberException) {
-            showPhoneRememberFailure(request)
-        } catch (_: Exception) {
-            showPhoneRememberFailure(request)
-        } finally {
-            request.material.fill(0)
-        }
-    }
-
-    private suspend fun persistPhoneRemember(request: PhoneRememberRequest) {
-        val identity = request.identity
-        if (explicitDeviceForgetIdentity == identity) explicitDeviceForgetJob?.join()
-        requirePriorPhoneForgetResolved(identity)
-        val binding = validatePhoneRememberOwner(request)
-        val admission = withContext(ioDispatcher) { adapters.deviceRemember.begin(identity, binding) }
-        val permit = {
-            isCurrentPhoneRememberOffer(request) && runCatching(request.credentialPermit).getOrDefault(false)
-        }
-        requirePhoneRememberAdmission(admission, permit)
-        val saved = rememberPhoneMaterial(request, binding, admission, permit)
-        requirePhoneRememberSaved(saved)
-        verifyPhoneRememberOwner(request, binding, permit)
-    }
-
-    private suspend fun requirePriorPhoneForgetResolved(identity: VaultIdentity) {
-        if (VaultDeviceRememberRevocations.await(identity) == false && !retryFailedDeviceForget(identity)) {
-            throw VaultRememberRevocationException()
-        }
-    }
-
-    private fun requirePhoneRememberAdmission(
-        admission: VaultDeviceRememberAccess.Admission?,
-        permit: () -> Boolean,
-    ) {
-        if (admission == null || !permit()) throw VaultDeviceRememberException()
-    }
-
-    private fun requirePhoneRememberSaved(saved: Boolean) {
-        if (!saved) throw VaultDeviceRememberException()
-    }
-
-    private suspend fun validatePhoneRememberOwner(request: PhoneRememberRequest): VaultRememberBinding {
-        val snapshot = withContext(ioDispatcher) { repository.unlockAccountSnapshot(request.account) }
-        val binding = withContext(ioDispatcher) { repository.rememberBinding(request.account) }
-        if (snapshot != request.accountSnapshot || binding == null || !isCurrentPhoneRememberOffer(request)) {
-            throw VaultIdentityChangedException()
-        }
-        if (!runCatching(request.credentialPermit).getOrDefault(false)) throw VaultIdentityChangedException()
-        return binding
-    }
-
-    private suspend fun rememberPhoneMaterial(
-        request: PhoneRememberRequest,
-        binding: VaultRememberBinding,
-        admission: VaultDeviceRememberAccess.Admission?,
-        permit: () -> Boolean,
-    ): Boolean =
-        withContext(NonCancellable + ioDispatcher) {
-            try {
-                adapters.deviceRemember.remember(admission, request.identity, binding, request.material, permit)
-            } catch (_: VaultDeviceRememberOutcomeUnknownException) {
-                val safelyCleared = runCatching { adapters.deviceRemember.forget(request.identity) }.isSuccess
-                if (!safelyCleared) VaultDeviceRememberRevocations.block(request.identity)
-                throw VaultRememberCommitUnknownException(safelyCleared)
-            }
-        }
-
-    private suspend fun verifyPhoneRememberOwner(
-        request: PhoneRememberRequest,
-        binding: VaultRememberBinding,
-        permit: () -> Boolean,
-    ) {
-        val afterSnapshot = withContext(ioDispatcher) { repository.unlockAccountSnapshot(request.account) }
-        val afterBinding = withContext(ioDispatcher) { repository.rememberBinding(request.account) }
-        if (!permit() || afterSnapshot != request.accountSnapshot || afterBinding != binding) {
-            throw VaultIdentityChangedException()
-        }
-    }
-
-    private fun showPhoneRememberSuccess(request: PhoneRememberRequest) {
-        if (!isCurrentPhoneRememberOffer(request)) return
-        clearVerifiedKeyMaterial()
-        mutableState.value =
-            mutableState.value.copy(
-                loading = false,
-                error = null,
-                biometricOfferPending = false,
-                phoneRememberOffer = false,
-                canEnrollBiometric = false,
-                phoneSessionIssueCode = null,
-            )
-        maybeOpenRootActions()
-    }
-
-    private fun showUnknownPhoneRememberOutcome(
-        request: PhoneRememberRequest,
-        failure: VaultRememberCommitUnknownException,
-    ) {
-        if (failure.safelyCleared) {
-            if (isCurrentPhoneRememberOffer(request)) {
-                mutableState.value =
-                    mutableState.value.copy(
-                        loading = false,
-                        error = VaultRouteError.PHONE_REMEMBER_FAILED,
-                        biometricOfferPending = true,
-                        phoneRememberOffer = true,
-                        canEnrollBiometric = false,
-                    )
-            }
-        } else {
-            VaultDeviceRememberRevocations.block(request.identity)
-            clearVerifiedKeyMaterial()
-            if (routeActive && session === request.opened && currentTargetIdentity == request.identity) {
-                mutableState.value =
-                    mutableState.value.copy(
-                        loading = false,
-                        lockingRememberedAccess = false,
-                        allowAutomaticBiometric = false,
-                        error = VaultRouteError.PHONE_LOCK_FAILED,
-                        biometricOfferPending = false,
-                        phoneRememberOffer = false,
-                        canEnrollBiometric = false,
-                    )
-            }
-        }
-    }
-
-    private fun showChangedPhoneRememberIdentity(request: PhoneRememberRequest) {
-        if (!isCurrentPhoneRememberOffer(request)) return
-        closeRouteSession()
-        mutableState.value = mutableState.value.copy(error = VaultRouteError.VAULT_CHANGED)
-    }
-
-    private fun showPhoneRememberFailure(request: PhoneRememberRequest) {
-        if (!isCurrentPhoneRememberOffer(request)) return
-        mutableState.value =
-            mutableState.value.copy(
-                loading = false,
-                error = VaultRouteError.PHONE_REMEMBER_FAILED,
-                biometricOfferPending = true,
-                phoneRememberOffer = true,
-                canEnrollBiometric = false,
-            )
-    }
-
-    private fun showPhoneRememberRevocationFailure(request: PhoneRememberRequest) {
-        if (!isCurrentPhoneRememberOffer(request)) return
-        clearVerifiedKeyMaterial()
-        mutableState.value =
-            mutableState.value.copy(
-                loading = false,
-                lockingRememberedAccess = false,
-                allowAutomaticBiometric = false,
-                error = VaultRouteError.PHONE_LOCK_FAILED,
-                biometricOfferPending = false,
-                phoneRememberOffer = false,
-                canEnrollBiometric = false,
-            )
-    }
-
-    private fun isCurrentPhoneRememberOffer(request: PhoneRememberRequest) =
-        isCurrentPhoneRememberOffer(
-            request.opened,
-            request.identity,
-            request.account,
-            request.token,
-            request.lockRevision,
-        )
-
-    private fun declinePhoneRememberOffer(
-        identity: VaultIdentity,
-        currentState: VaultRouteState,
-    ) {
-        val opened = session ?: return
-        val account = accountId ?: return
-        val token = generation
-        val lockRevision = currentState.lockRevision
-        mutableState.value = currentState.copy(loading = true, error = null)
-        operationJob =
-            viewModelScope.launch {
-                try {
-                    withContext(ioDispatcher) { adapters.deviceRemember.decline(identity) }
-                    if (isCurrentPhoneRememberOffer(opened, identity, account, token, lockRevision)) {
-                        clearVerifiedKeyMaterial()
-                        mutableState.value =
-                            mutableState.value.copy(
-                                loading = false,
-                                error = null,
-                                biometricOfferPending = false,
-                                phoneRememberOffer = false,
-                                canEnrollBiometric = false,
-                            )
-                        maybeOpenRootActions()
-                    }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    if (isCurrentPhoneRememberOffer(opened, identity, account, token, lockRevision)) {
-                        mutableState.value = mutableState.value.copy(loading = false, error = VaultRouteError.BIOMETRIC)
-                    }
-                }
-            }
-    }
-
-    private fun isCurrentPhoneRememberOffer(
-        opened: VaultRouteSession,
-        identity: VaultIdentity,
-        account: String,
-        token: Long,
-        lockRevision: Long,
-    ): Boolean {
-        val current = mutableState.value
-        return routeActive &&
-            generation == token &&
-            accountId == account &&
-            session === opened &&
-            opened.identity == identity &&
-            currentTargetIdentity == identity &&
-            current.lockRevision == lockRevision &&
-            current.mode == VaultRouteMode.CONTENTS &&
-            current.phoneRememberOffer
-    }
-
-    @Suppress("TooGenericExceptionCaught") // Provider errors become sanitized categories, never raw text.
-    fun completeBiometricEnrollment(cipher: Cipher?) {
-        val identity = pendingEnrollmentIdentity
-        val material = verifiedKeyMaterial
-        pendingEnrollmentIdentity = null
-        if (!isCurrentBiometricEnrollment(identity, cipher, material)) {
-            identity?.let { runCatching { biometricStore.cancelEnrollment(it) } }
-            clearVerifiedKeyMaterial()
-            if (routeActive) mutableState.value = mutableState.value.copy(canEnrollBiometric = false)
-            return
-        }
-        checkNotNull(identity)
-        checkNotNull(cipher)
-        checkNotNull(material)
-        var enrolled = false
-        try {
-            biometricStore.completeEnrollment(identity, cipher, material)
-            enrolled = true
-        } catch (failure: Exception) {
-            runCatching { biometricStore.cancelEnrollment(identity) }
-            mutableState.value =
-                mutableState.value.copy(
-                    error = VaultRouteError.BIOMETRIC_SETUP,
-                    biometricDiagnostic = enrollmentDiagnostic(failure),
-                    canEnrollBiometric = false,
-                )
-        } finally {
-            material.fill(0)
-            verifiedKeyMaterial = null
-        }
-        if (enrolled) {
-            runCatching {
-                biometricPreferences.remember(identity, mutableState.value.selectedTitle.orEmpty(), targetKind())
-            }
-            mutableState.value =
-                mutableState.value.copy(
-                    biometricEnrolled = true,
-                    biometricNeedsForget = false,
-                    canEnrollBiometric = false,
-                    biometricOfferPending = false,
-                    phoneRememberOffer = false,
-                    error = null,
-                )
-        }
-    }
-
-    fun cancelBiometricEnrollment() {
-        val identity = pendingEnrollmentIdentity
-        pendingEnrollmentIdentity = null
-        if (identity != null) runCatching { biometricStore.cancelEnrollment(identity) }
-        clearVerifiedKeyMaterial()
-        mutableState.value = mutableState.value.copy(canEnrollBiometric = false)
-    }
-
-    fun forgetBiometric(expectedLockRevision: Long) {
-        val currentState = mutableState.value
-        val identity =
-            if (routeActive && currentState.lockRevision == expectedLockRevision) {
-                currentTargetIdentity ?: target?.expectedIdentity()
-            } else {
-                null
-            } ?: return
-        try {
-            biometricStore.forget(identity)
-            biometricPreferences.remove(identity)
-        } catch (_: Exception) {
-            mutableState.value = mutableState.value.copy(error = VaultRouteError.BIOMETRIC)
-            return
-        }
-        clearVerifiedKeyMaterial()
-        mutableState.value =
-            mutableState.value.copy(
-                biometricEnrolled = false,
-                biometricNeedsForget = false,
-                canEnrollBiometric = false,
-                biometricOfferPending = false,
-                phoneRememberOffer = false,
-                error = null,
-            )
-    }
-
-    private fun isCurrentBiometricUnlock(
-        identity: VaultIdentity?,
-        selected: VaultTarget?,
-        account: String?,
-        cipher: Cipher?,
-    ): Boolean {
-        val hasAuthenticationContext = account != null && cipher != null
-        if (identity == null || selected == null || !hasAuthenticationContext) return false
-        return routeActive && accountId == account && identity == selected.expectedIdentity()
-    }
-
-    private fun isCurrentBiometricEnrollment(
-        identity: VaultIdentity?,
-        cipher: Cipher?,
-        material: ByteArray?,
-    ): Boolean {
-        if (identity == null || cipher == null || material == null) return false
-        return routeActive && identity == session?.identity
     }
 
     private fun reportFailure(
@@ -3255,112 +1965,62 @@ class VaultViewModel internal constructor(
         return MessageDigest.getInstance("SHA-256").digest(value.toByteArray(StandardCharsets.UTF_8)).toHex()
     }
 
-    private fun enrollmentStatus(identity: VaultIdentity): Pair<Boolean, Boolean> =
-        try {
-            biometricStore.hasEnrollment(identity) to false
-        } catch (_: Exception) {
-            true to true
-        }
+    private fun clearPreview() = previewContent.clear()
 
-    private fun preferenceStatus(identity: VaultIdentity): VaultPreferenceStatus? =
-        runCatching { biometricPreferences.status(identity) }.getOrNull()
+    fun unlock(password: CharArray) = lifecycle.unlock(password)
 
-    private fun targetKind(): VaultPreferenceTargetKind =
-        if (target?.location?.kind == VaultLocationKind.SPACE_VAULT) {
-            VaultPreferenceTargetKind.SPACE
-        } else {
-            VaultPreferenceTargetKind.FOLDER
-        }
+    fun lock() = lifecycle.lock()
 
-    private fun VaultTarget.expectedIdentity() =
-        VaultIdentity(
-            accountId = location.accountId,
-            canonicalServer = location.canonicalServer,
-            driveId = location.driveId,
-            remoteVaultId = remoteVaultId,
-        )
+    fun onDeviceLocked() = lifecycle.onDeviceLocked()
+
+    fun prepareBiometricUnlock(): Cipher? = lifecycle.prepareBiometricUnlock()
+
+    fun completeBiometricUnlock(cipher: Cipher?) = lifecycle.completeBiometricUnlock(cipher)
+
+    fun cancelBiometricUnlock() = lifecycle.cancelBiometricUnlock()
+
+    fun prepareBiometricEnrollment(): Cipher? = lifecycle.prepareBiometricEnrollment()
+
+    fun acceptBiometricOffer() = lifecycle.acceptBiometricOffer()
+
+    fun declineBiometricOffer() = lifecycle.declineBiometricOffer()
+
+    fun rememberOnPhone() = lifecycle.rememberOnPhone()
+
+    fun completeBiometricEnrollment(cipher: Cipher?) = lifecycle.completeBiometricEnrollment(cipher)
+
+    fun cancelBiometricEnrollment() = lifecycle.cancelBiometricEnrollment()
+
+    fun forgetBiometric(expectedLockRevision: Long) = lifecycle.forgetBiometric(expectedLockRevision)
+
+    private fun showPasswordUnlock(selected: VaultSessionTarget) = lifecycle.showPasswordUnlock(selected)
+
+    private fun closeRouteSession() = lifecycle.closeRouteSession()
+
+    private fun closeSession() = lifecycle.closeSession()
+
+    private fun clearVerifiedKeyMaterial() = lifecycle.clearVerifiedKeyMaterial()
+
+    private fun clearSensitiveState() = lifecycle.clearSensitiveState()
+
+    private fun nextGeneration(): Long = lifecycle.nextGeneration()
+
+    private fun invalidateRequests() = lifecycle.invalidateRequests()
 
     private fun isCurrent(
         token: Long,
         account: String,
-    ): Boolean = routeActive && accountId == account && generation == token
-
-    private fun nextGeneration(): Long {
-        generation += 1
-        operationJob?.cancel()
-        operationJob = null
-        pendingBiometricIdentity?.let { runCatching { biometricStore.cancelUnlock(it) } }
-        pendingBiometricIdentity = null
-        pendingEnrollmentIdentity?.let { runCatching { biometricStore.cancelEnrollment(it) } }
-        pendingEnrollmentIdentity = null
-        return generation
-    }
-
-    private fun invalidateRequests() {
-        generation += 1
-        catalogJob?.cancel()
-        catalogJob = null
-        operationJob?.cancel()
-        operationJob = null
-        pendingBiometricIdentity?.let { runCatching { biometricStore.cancelUnlock(it) } }
-        pendingBiometricIdentity = null
-        pendingEnrollmentIdentity?.let { runCatching { biometricStore.cancelEnrollment(it) } }
-        pendingEnrollmentIdentity = null
-    }
-
-    private fun closeSession() {
-        closeDirectory()
-        offlineCompletionJob?.cancel()
-        offlineCompletionJob = null
-        clearDestinationPicker()
-        pickerTimeout?.cancel()
-        pickerTimeout = null
-        pickerLease.clear()
-        pickerSuspended = false
-        session?.close()
-        session = null
-    }
-
-    private fun clearPreview() = previewContent.clear()
-
-    private fun clearVerifiedKeyMaterial() {
-        verifiedKeyMaterial?.fill(0)
-        verifiedKeyMaterial = null
-        provenAccountSnapshot = null
-        provenCredentialPermit = null
-    }
-
-    private fun clearSensitiveState() {
-        pendingTransferSource = null
-        mutableState.value = mutableState.value.copy(transferConflict = null)
-        closeSession()
-        clearPreview()
-        clearVerifiedKeyMaterial()
-        presentedEntries.clear()
-    }
+    ): Boolean = lifecycle.isCurrent(token, account)
 
     override fun onCleared() {
         leaveRoute()
         super.onCleared()
     }
-
-    private data class VaultTarget(
-        val location: VaultLocation,
-        val vaultPath: String,
-        val title: String,
-        val remoteVaultId: String,
-    )
 }
 
 const val VAULT_DIRECTORY_PAGE_SIZE = 128
 
 private fun ByteArray.toHex(): String = joinToString(separator = "") { byte -> "%02x".format(byte) }
-
-private class VaultRememberCommitUnknownException(
-    val safelyCleared: Boolean,
-) : IllegalStateException("Device remember enrollment outcome was unknown.")
-
-private class VaultRememberRevocationException : IllegalStateException("The previous phone key could not be revoked.")
 
 internal fun classifyVaultFailure(
     failure: Throwable,
@@ -3414,7 +2074,7 @@ private val VAULT_NETWORK_ERRORS =
 
 private class VaultSourceChangedException : IllegalStateException("The selected source changed.")
 
-private class VaultIdentityChangedException : IllegalStateException("Vault identity changed during unlock.")
+internal class VaultIdentityChangedException : IllegalStateException("Vault identity changed during unlock.")
 
 private fun VaultRouteError.requiresVaultRelock(): Boolean =
     this == VaultRouteError.AUTHENTICATION ||
@@ -3427,68 +2087,14 @@ private data class VaultContentsRequest(
     val account: String,
 )
 
-private data class VaultFailureContext(
+internal data class VaultFailureContext(
     val token: Long,
     val account: String,
     val lockOnRevocation: Boolean = false,
     val classifyVaultIdentity: Boolean = true,
 )
 
-private sealed class PendingVaultTransfer(
-    open val identity: VaultIdentity,
-    open val uri: Uri?,
-) {
-    data class Upload(
-        override val identity: VaultIdentity,
-        val encryptedParentPath: String,
-        override val uri: Uri? = null,
-    ) : PendingVaultTransfer(identity, uri)
-
-    data class Export(
-        override val identity: VaultIdentity,
-        val encryptedParentPath: String,
-        val id: String,
-        val encryptedPath: String,
-        val strongETag: String?,
-        val observedSize: Long,
-        override val uri: Uri? = null,
-    ) : PendingVaultTransfer(identity, uri)
-
-    fun withUri(value: Uri): PendingVaultTransfer =
-        when (this) {
-            is Upload -> copy(uri = value)
-            is Export -> copy(uri = value)
-        }
-}
-
-private data class VaultDocumentMetadata(
-    val name: String,
-    val size: Long?,
-    val mimeType: String?,
-)
-
 private fun String?.isStrongVaultETag(): Boolean = this != null && length >= 2 && startsWith('"') && endsWith('"')
-
-private fun readDocumentMetadata(
-    resolver: ContentResolver,
-    uri: Uri,
-): VaultDocumentMetadata {
-    var name: String? = null
-    var size: Long? = null
-    resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-        if (cursor.moveToFirst()) {
-            val nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (nameColumn >= 0) name = cursor.getString(nameColumn)
-            val sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE)
-            if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) size = cursor.getLong(sizeColumn)
-        }
-    }
-    return VaultDocumentMetadata(
-        name = name?.takeIf(String::isNotBlank) ?: "upload",
-        size = size,
-        mimeType = resolver.getType(uri),
-    )
-}
 
 /** Process-local callback lease: no scanner destination or key is serialized. */
 internal class VaultScanLease(

@@ -9,7 +9,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
-/** Route identity is captured before suspension; only the ViewModel owns sessions and keys. */
+/** Route identity is captured before suspension; only the route lifecycle owns sessions and keys. */
 internal data class VaultDestinationOwnerSnapshot(
     val opened: VaultRouteSession,
     val account: String,

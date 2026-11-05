@@ -101,6 +101,42 @@ class VaultViewModelTransferTest {
             source.delete()
         }
 
+    @Test fun cancellingResumedPickerTransferDoesNotCloseAdoptedSession() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val context = ApplicationProvider.getApplicationContext<Application>()
+            val source = File(context.cacheDir, "vault-adopted-session-upload.txt").apply { writeText("staged") }
+            registerUploadProvider(source)
+            val ready = CompletableDeferred<Unit>()
+            val initial = TestSession(identity)
+            val reopened = TestSession(identity).apply { queueUploadBlock = { ready.await() } }
+            val repository = TestRepository(mutableListOf(initial, reopened))
+            val model = newViewModel(context, repository)
+            try {
+                enterAndUnlock(model)
+                model.prepareUpload {}
+                advanceUntilIdle()
+                model.lock()
+                model.acceptUploadUri(Uri.parse("content://$AUTHORITY/source"))
+                model.unlock("password".toCharArray())
+                runCurrent()
+                assertEquals(VaultRouteMode.CONTENTS, model.state.value.mode)
+                assertTrue(model.state.value.preparingUpload)
+                assertEquals(0, reopened.closeCount)
+
+                // A new directory request cancels the still-suspended post-adoption transfer.
+                model.setShowHidden(true)
+                advanceUntilIdle()
+                assertEquals(0, reopened.closeCount)
+                assertEquals(VaultRouteMode.CONTENTS, model.state.value.mode)
+                assertEquals(0, repository.queuedUploadCalls)
+            } finally {
+                model.leaveRoute()
+                source.delete()
+            }
+            assertEquals(1, reopened.closeCount)
+        }
+
     @Test fun concurrentPreparationLaunchesOnlyOnePicker() =
         runTest {
             Dispatchers.setMain(StandardTestDispatcher(testScheduler))
@@ -1507,7 +1543,11 @@ class VaultViewModelTransferTest {
             return downloadBlock?.invoke(entry, sink, maxPlaintextBytes) ?: 0L
         }
 
-        override fun close() = Unit
+        var closeCount = 0
+
+        override fun close() {
+            closeCount++
+        }
     }
 
     private class TestBiometricStore : VaultBiometricKeyStore {

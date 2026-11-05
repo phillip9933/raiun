@@ -5,6 +5,7 @@ import eu.opencloud.android.next.core.database.ResourceCollectionOptions
 import eu.opencloud.android.next.core.database.ResourceCollectionPage
 import eu.opencloud.android.next.core.database.ResourceCollectionRoot
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal data class CachedCollectionRequest(
     val account: String,
@@ -36,13 +38,17 @@ internal data class CachedCollectionState(
     val error: Throwable? = null,
 )
 
-/** One replaceable window. Cancellation and account/options checks fence every asynchronous result. */
+/**
+ * One replaceable window. Synchronous account/options transitions run on Main;
+ * asynchronous admission and byte-memo publication use the same dispatcher.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal class CachedCollectionPager(
     scope: CoroutineScope,
     private val invalidations: (String) -> Flow<Int>,
     private val load: suspend (CachedCollectionRequest) -> ResourceCollectionPage,
     private val bytes: suspend (CachedCollectionRequest) -> Long = { 0 },
+    private val publicationDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
 ) {
     private var revision = 0L
     private val request = MutableStateFlow<CachedCollectionRequest?>(null)
@@ -91,8 +97,11 @@ internal class CachedCollectionPager(
         }
     }
 
-    fun account(account: String) {
-        if (request.value?.account == account) return
+    fun isCurrent(candidate: CachedCollectionRequest): Boolean = request.value == candidate
+
+    fun account(account: String): CachedCollectionRequest {
+        val current = request.value
+        if (current?.account == account) return current
         val next =
             CachedCollectionRequest(
                 account,
@@ -102,6 +111,7 @@ internal class CachedCollectionPager(
             )
         mutableState.value = CachedCollectionState(request = next)
         request.value = next
+        return next
     }
 
     fun options(options: ResourceCollectionOptions) {
@@ -147,16 +157,25 @@ internal class CachedCollectionPager(
             val result = load(current)
             currentCoroutineContext().ensureActive()
             val key = ByteCacheKey(current.account, current.accountRevision, current.options.roots, databaseRevision)
-            val size = verifiedBytes?.takeIf { it.first == key }?.second ?: bytes(current)
+            val cachedBytes =
+                withContext(publicationDispatcher) {
+                    verifiedBytes?.takeIf { it.first == key }?.second
+                }
+            val size = cachedBytes ?: bytes(current)
             currentCoroutineContext().ensureActive()
-            if (request.value == current) {
-                verifiedBytes = key to size
-                mutableState.value = CachedCollectionState(current, result, size)
+            withContext(publicationDispatcher) {
+                currentCoroutineContext().ensureActive()
+                if (request.value == current) {
+                    verifiedBytes = key to size
+                    mutableState.value = CachedCollectionState(current, result, size)
+                }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
-            if (request.value == current) mutableState.update { it.copy(error = failure) }
+            withContext(publicationDispatcher) {
+                if (request.value == current) mutableState.update { it.copy(request = current, error = failure) }
+            }
         }
     }
 }

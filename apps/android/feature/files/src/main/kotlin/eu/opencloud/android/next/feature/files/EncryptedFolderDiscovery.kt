@@ -11,6 +11,7 @@ import eu.opencloud.android.next.core.sync.VaultOfflineStore
 import eu.opencloud.android.next.core.sync.VaultRepository
 import eu.opencloud.android.next.core.sync.VaultRootCatalog
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,10 +19,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Transient discovery state: encrypted entries never enter the ordinary resource database. */
+@Suppress("LongParameterList")
 internal class EncryptedFolderDiscovery(
     private val context: Context,
     private val store: FileBrowserStore,
     private val scope: CoroutineScope,
+    private val reads: EncryptedFolderRootReads? = null,
+    private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val update: (List<VaultLocation>, String?) -> Unit,
 ) {
     private val vaults = VaultRepository(context, store)
@@ -31,49 +35,77 @@ internal class EncryptedFolderDiscovery(
     private var job: Job? = null
     private var generation = 0L
 
+    /** Called on Main for every real account load, including accounts with no available Space. */
+    fun invalidate() {
+        generation = Math.incrementExact(generation)
+        job?.cancel()
+        job = null
+        update(emptyList(), null)
+    }
+
     @Suppress("TooGenericExceptionCaught") // UI boundary preserves cancellation and exposes safe errors.
     fun refresh(
         accountId: String,
         spaceId: String,
         folderId: String?,
     ) {
-        job?.cancel()
-        val token = ++generation
-        update(emptyList(), null)
+        invalidate()
+        val token = generation
         job =
             scope.launch {
                 try {
                     val roots =
                         withContext(Dispatchers.IO) {
-                            val path =
-                                folderId
-                                    ?.let { requireNotNull(store.resource(accountId, spaceId, it)).path.trim('/') }
-                                    .orEmpty()
-                            discoverEncryptedFolderRoots(
-                                accountId = accountId,
-                                driveId = spaceId,
-                                parentPath = path,
-                                loadOffline = { offlineVaults.locations(accountId) },
-                                loadRemembered = { rootCatalog.folderRoots(accountId, spaceId, path) },
-                                loadOnline = { vaults.encryptedFolders(accountId, spaceId, path) },
-                                rememberOnline = { online ->
-                                    rootCatalog.replaceFolderRoots(accountId, spaceId, path, online)
-                                },
-                                onCached = { cached ->
-                                    withContext(Dispatchers.Main.immediate) {
-                                        if (generation == token) update(cached, null)
-                                    }
-                                },
-                            )
+                            if (reads != null) {
+                                reads.load(accountId, spaceId, folderId) { cached -> publish(token, cached, null) }
+                            } else {
+                                val path =
+                                    folderId
+                                        ?.let { requireNotNull(store.resource(accountId, spaceId, it)).path.trim('/') }
+                                        .orEmpty()
+                                discoverEncryptedFolderRoots(
+                                    accountId = accountId,
+                                    driveId = spaceId,
+                                    parentPath = path,
+                                    loadOffline = { offlineVaults.locations(accountId) },
+                                    loadRemembered = { rootCatalog.folderRoots(accountId, spaceId, path) },
+                                    loadOnline = { vaults.encryptedFolders(accountId, spaceId, path) },
+                                    rememberOnline = { online ->
+                                        rootCatalog.replaceFolderRoots(accountId, spaceId, path, online)
+                                    },
+                                    onCached = { cached ->
+                                        publish(token, cached, null)
+                                    },
+                                )
+                            }
                         }
-                    if (generation == token) update(roots, null)
+                    publish(token, roots, null)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: Exception) {
-                    if (generation == token) update(emptyList(), failure.toOpenCloudError().safeMessage(context))
+                    publish(token, emptyList(), failure.toOpenCloudError().safeMessage(context))
                 }
             }
     }
+
+    private suspend fun publish(
+        token: Long,
+        roots: List<VaultLocation>,
+        error: String?,
+    ) {
+        withContext(mainDispatcher) {
+            if (generation == token) update(roots, error)
+        }
+    }
+}
+
+internal fun interface EncryptedFolderRootReads {
+    suspend fun load(
+        account: String,
+        space: String,
+        folder: String?,
+        cached: suspend (List<VaultLocation>) -> Unit,
+    ): List<VaultLocation>
 }
 
 /** Uses saved roots only when live discovery is unavailable; online absence remains authoritative. */

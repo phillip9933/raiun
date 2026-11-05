@@ -5,26 +5,30 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.core.sync.VaultRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** One in-flight creation at a time. A failed write is never retried because its outcome can be ambiguous. */
+@Suppress("LongParameterList") // Keep admission callbacks and backend/dispatcher independently testable.
 internal class EncryptedLocationCreation(
     context: Context,
     private val store: FileBrowserStore,
     private val scope: CoroutineScope,
     private val onBusy: (Boolean) -> Unit,
-    private val onCreated: (VaultLocation, CreationParent?) -> Unit,
-    private val onUncertain: (String) -> Unit,
+    private val onCreated: (BrowserAccountBinding, VaultLocation, CreationParent?) -> Unit,
+    private val onUncertain: (BrowserAccountBinding) -> Unit,
+    private val backend: EncryptedCreationBackend? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private val vaults = VaultRepository(context, store)
     private var busy = false
 
     @Suppress("TooGenericExceptionCaught") // The UI must report a possibly completed remote write without retrying.
     fun folder(
-        accountId: String,
+        binding: BrowserAccountBinding,
         driveId: String,
         folderId: String?,
         name: String,
@@ -34,6 +38,7 @@ internal class EncryptedLocationCreation(
             password.fill('\u0000')
             return
         }
+        val accountId = binding.accountId
         val owned = password.copyOf()
         password.fill('\u0000')
         busy = true
@@ -42,7 +47,10 @@ internal class EncryptedLocationCreation(
             scope.launch {
                 try {
                     val created =
-                        withContext(Dispatchers.IO) {
+                        withContext(ioDispatcher) {
+                            if (backend != null) {
+                                return@withContext backend.folder(accountId, driveId, folderId, name, owned)
+                            }
                             val path =
                                 folderId
                                     ?.let {
@@ -52,11 +60,11 @@ internal class EncryptedLocationCreation(
                                     }.orEmpty()
                             vaults.createFolderVault(accountId, driveId, path.trim('/'), name, owned)
                         }
-                    onCreated(created, CreationParent(accountId, driveId, folderId))
+                    onCreated(binding, created, CreationParent(accountId, driveId, folderId))
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
-                    onUncertain(accountId)
+                    onUncertain(binding)
                 } finally {
                     owned.fill('\u0000')
                     busy = false
@@ -68,7 +76,7 @@ internal class EncryptedLocationCreation(
 
     @Suppress("TooGenericExceptionCaught") // The UI must report a possibly completed remote write without retrying.
     fun space(
-        accountId: String,
+        binding: BrowserAccountBinding,
         name: String,
         password: CharArray,
     ) {
@@ -76,6 +84,7 @@ internal class EncryptedLocationCreation(
             password.fill('\u0000')
             return
         }
+        val accountId = binding.accountId
         val owned = password.copyOf()
         password.fill('\u0000')
         busy = true
@@ -83,12 +92,15 @@ internal class EncryptedLocationCreation(
         val operation =
             scope.launch {
                 try {
-                    val created = withContext(Dispatchers.IO) { vaults.createVaultSpace(accountId, name, owned) }
-                    onCreated(created, null)
+                    val created =
+                        withContext(ioDispatcher) {
+                            backend?.space(accountId, name, owned) ?: vaults.createVaultSpace(accountId, name, owned)
+                        }
+                    onCreated(binding, created, null)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
-                    onUncertain(accountId)
+                    onUncertain(binding)
                 } finally {
                     owned.fill('\u0000')
                     busy = false
@@ -104,3 +116,20 @@ internal data class CreationParent(
     val driveId: String,
     val folderId: String?,
 )
+
+/** Optional test backend; production retains the repository's conditional admission. */
+internal interface EncryptedCreationBackend {
+    suspend fun folder(
+        account: String,
+        drive: String,
+        parent: String?,
+        name: String,
+        password: CharArray,
+    ): VaultLocation
+
+    suspend fun space(
+        account: String,
+        name: String,
+        password: CharArray,
+    ): VaultLocation
+}
