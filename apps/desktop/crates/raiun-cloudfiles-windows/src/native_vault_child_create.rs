@@ -644,7 +644,7 @@ impl ConfiguredRootConnection {
         }
         let (tracker, recovery) = self.file_create_guard_context(backend)?;
         if recovery
-            .has_unresolved()
+            .has_unresolved_namespace_for_fresh_create()
             .map_err(|_| refused(S::RecoveryScan))?
         {
             return Err(refused(S::RecoveryPending));

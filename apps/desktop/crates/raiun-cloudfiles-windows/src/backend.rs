@@ -443,6 +443,14 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     /// are treated as unresolved by the native teardown path.
     fn has_unresolved(&self) -> Result<bool, BackendError>;
 
+    /// Namespace admission for a distinct fresh create, never old-record repair.
+    /// Callers must also check authenticated content health independently.
+    /// Unsupported providers retain the conservative combined refusal.
+    #[cfg(windows)]
+    fn has_unresolved_namespace_for_fresh_create(&self) -> Result<bool, BackendError> {
+        self.has_unresolved()
+    }
+
     /// Counts authenticated namespace metadata only at this original account/root.
     /// Unknown or unsupported evidence is unavailable, never an empty summary.
     /// This grants no replay, dispatch, native completion or cleanup authority.

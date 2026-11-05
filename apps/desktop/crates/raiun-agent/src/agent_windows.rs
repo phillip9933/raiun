@@ -1533,6 +1533,7 @@ impl ProviderManager {
                                     "directory_unresolved": summary.directory_unresolved,
                                     "file_records": summary.file_records,
                                     "file_unresolved": summary.file_unresolved,
+                                    "file_acknowledged_join_gaps": summary.file_acknowledged_join_gaps,
                                     "delete_records": summary.delete_records,
                                     "delete_unresolved": summary.delete_unresolved,
                                 }));
@@ -5075,8 +5076,14 @@ impl WindowsAgent {
             }
             let fresh = outcome
                 == raiun_cloudfiles_windows::FileCreateContinuationOutcome::LocallyCompleted;
-            return Ok(json!({"remote_verified":fresh,
-                "local_completion":if fresh {"completed"} else {"historical_link_completed"},
+            let state = match outcome {
+                raiun_cloudfiles_windows::FileCreateContinuationOutcome::LocallyCompleted => "verified_applied",
+                raiun_cloudfiles_windows::FileCreateContinuationOutcome::HistoricalLinkCompleted => "historical_link_completed",
+                raiun_cloudfiles_windows::FileCreateContinuationOutcome::HistoricalReviewRequired => "review_required",
+            };
+            return Ok(json!({"state":state,
+                "retained":true,"remote_verified":fresh,
+                "local_completion":if fresh {"completed"} else {"unavailable"},
                 "continued_create":true,"original_snapshot_retained":true,
                 "profile_id":self.profile_scope.as_str(),"auth_generation":agent_generation,
                 "recovery_scope_token":recovery_scope_token}));

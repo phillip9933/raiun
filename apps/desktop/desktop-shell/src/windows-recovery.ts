@@ -215,17 +215,35 @@ export function validateWindowsRecoveryPage(
   };
 }
 
-export type WindowsRecoveryRetryResult = {
+type WindowsRecoveryRetryContext = {
   profile_id: string;
   auth_generation: number;
   recovery_scope_token: string;
-  state: 'verified_applied' | 'conflict' | 'outcome_unknown' | 'not_completed';
   retained: true;
+};
+
+export type WindowsRecoveryRetryResult = WindowsRecoveryRetryContext & ({
+  state: 'verified_applied' | 'conflict' | 'outcome_unknown' | 'not_completed';
   remote_verified: boolean;
   local_completion: 'completed' | 'uncertain' | 'unavailable';
   attempts?: number;
   reason?: string;
-};
+  continued_create?: never;
+  original_snapshot_retained?: never;
+} | ({
+  continued_create: true;
+  original_snapshot_retained: true;
+  attempts?: never;
+  reason?: never;
+} & ({
+  state: 'verified_applied';
+  remote_verified: true;
+  local_completion: 'completed';
+} | {
+  state: 'historical_link_completed' | 'review_required';
+  remote_verified: false;
+  local_completion: 'unavailable';
+})));
 
 const RETRY_REASONS = new Set([
   'invalid_record', 'scope_mismatch', 'missing_baseline', 'remote_missing',
@@ -235,6 +253,24 @@ const RETRY_REASONS = new Set([
 export function validateWindowsRecoveryRetryResult(
   value: unknown, expectation: WindowsRecoveryPageExpectation
 ): WindowsRecoveryRetryResult {
+  // Continued creates have an explicit schema with no legacy retry attempts.
+  // A historical link is never a fresh cloud verification or native completion.
+  if (isRecord(value) && value.continued_create === true) {
+    const keys = ['profile_id', 'auth_generation', 'recovery_scope_token', 'state',
+      'retained', 'remote_verified', 'local_completion', 'continued_create', 'original_snapshot_retained'];
+    if (!hasExactKeys(value, keys.sort()) ||
+        !validWindowsProfileId(expectation.profileId) || !safePositiveInteger(expectation.authGeneration) ||
+        !validRecoveryScopeToken(expectation.recoveryScopeToken) ||
+        value.profile_id !== expectation.profileId || value.auth_generation !== expectation.authGeneration ||
+        value.recovery_scope_token !== expectation.recoveryScopeToken || value.retained !== true ||
+        value.original_snapshot_retained !== true ||
+        !((value.state === 'verified_applied' && value.remote_verified === true && value.local_completion === 'completed') ||
+          (value.state === 'historical_link_completed' && value.remote_verified === false && value.local_completion === 'unavailable') ||
+          (value.state === 'review_required' && value.remote_verified === false && value.local_completion === 'unavailable'))) {
+      throw new Error('The agent returned an invalid or stale saved-edit retry result.');
+    }
+    return { ...value } as WindowsRecoveryRetryResult;
+  }
   const keys = ['profile_id', 'auth_generation', 'recovery_scope_token', 'state',
     'retained', 'remote_verified', 'local_completion'];
   if (isRecord(value) && value.state === 'verified_applied') keys.push('attempts');
@@ -257,6 +293,12 @@ export function validateWindowsRecoveryRetryResult(
 }
 
 export function windowsRecoveryRetryMessage(result: WindowsRecoveryRetryResult): string {
+  if (result.state === 'review_required') {
+    return 'This saved file was acknowledged earlier. Its recovery history needs review; nothing was uploaded.';
+  }
+  if (result.state === 'historical_link_completed') {
+    return 'Recovery history reconciled. The saved copy is retained; this did not upload or freshly verify the file.';
+  }
   if (result.state === 'verified_applied' && result.remote_verified) {
     return result.local_completion === 'completed'
       ? 'Cloud save verified and local completion confirmed. The original recovery record is retained.'

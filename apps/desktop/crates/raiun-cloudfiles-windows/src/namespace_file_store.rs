@@ -147,7 +147,6 @@ impl StoredFileJoin {
 struct Loaded {
     record: StoredFileJoin,
     checked: NamespaceIntentProgress,
-    #[cfg(windows)]
     remote: Option<crate::namespace_intent::NamespaceDestinationReport>,
 }
 /// Complete local byte authentication only. This is not server/native evidence.
@@ -203,6 +202,41 @@ pub struct FileCreateStore {
     base: Arc<SnapshotStore>,
 }
 impl FileCreateStore {
+    /// Existing-only authenticated join scopes, including scopes whose
+    /// referenced snapshot catalog must still be checked by the caller.
+    #[cfg(windows)]
+    pub(crate) fn discover_state_scopes_bounded(
+        state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+        budget: &mut DiscoveryBudget,
+    ) -> Result<Vec<EditJournalScope>, StoreError> {
+        budget.within_policy(policy, |budget| {
+            policy.validate()?;
+            let Some(root) = windows::existing_root(Arc::clone(&state), V2_STORE_ROOT)? else {
+                return Ok(Vec::new());
+            };
+            root.verify()?;
+            let names = root.entries(budget.remaining_entries())?;
+            budget.entries(names.len())?;
+            validate_root_catalog_scope_union(&*root, &*protector, &names, budget)?;
+            let scopes = if names.iter().any(|name| name == ROOT) {
+                let joins = root.child(ROOT, false)?;
+                let scopes = catalogs(&*joins, &*protector, budget)?
+                    .into_iter()
+                    .map(|(_, scope)| scope)
+                    .collect();
+                joins.verify()?;
+                scopes
+            } else {
+                Vec::new()
+            };
+            root.verify()?;
+            state.verify_path().map_err(io_error)?;
+            Ok(scopes)
+        })
+    }
+
     /// Reuse the exact admitted snapshot-store Arc. No default state/DPAPI open.
     pub fn new(base: Arc<SnapshotStore>) -> Result<Arc<Self>, StoreError> {
         base.root.verify()?;
@@ -378,22 +412,37 @@ impl FileCreateStore {
     }
     /// Authenticated metadata/reference discovery; no body bytes read.
     pub fn discover(&self) -> Result<Vec<StoredFileJoin>, StoreError> {
-        Ok(self
-            .discover_all()?
-            .into_iter()
-            .filter(|r| r.key.scope == self.base.scope)
-            .collect())
+        self.discover_bounded(&mut Budget::new(self.base.policy))
+    }
+    /// Share the caller's remaining allowance with snapshot and join discovery.
+    /// References retain the same authentication and existing-body checks.
+    pub(crate) fn discover_bounded(
+        &self,
+        budget: &mut DiscoveryBudget,
+    ) -> Result<Vec<StoredFileJoin>, StoreError> {
+        budget.within_policy(self.base.policy, |budget| {
+            Ok(self
+                .discover_all_bounded(budget)?
+                .into_iter()
+                .filter(|r| r.key.scope == self.base.scope)
+                .collect())
+        })
     }
     fn discover_all(&self) -> Result<Vec<StoredFileJoin>, StoreError> {
-        let mut budget = Budget::new(self.base.policy);
+        self.discover_all_bounded(&mut Budget::new(self.base.policy))
+    }
+    fn discover_all_bounded(
+        &self,
+        budget: &mut DiscoveryBudget,
+    ) -> Result<Vec<StoredFileJoin>, StoreError> {
         let names = self.base.root.entries(budget.remaining_entries())?;
         budget.entries(names.len())?;
-        self.base.validate_root_catalogs(&names, &mut budget)?;
+        self.base.validate_root_catalogs(&names, budget)?;
         if !names.contains(&ROOT.to_owned()) {
             return Ok(Vec::new());
         }
         let root = self.base.root.child(ROOT, false)?;
-        let catalogs = catalogs(&*root, &*self.base.protector, &mut budget)?;
+        let catalogs = catalogs(&*root, &*self.base.protector, budget)?;
         let mut result = Vec::new();
         for (key, scope) in catalogs {
             let directory = root.child(&key, false)?;
@@ -419,7 +468,7 @@ impl FileCreateStore {
             }
             for id in ids {
                 result.push(
-                    self.load_names(&*directory, &id, &scope, &names, &mut budget)?
+                    self.load_names(&*directory, &id, &scope, &names, budget)?
                         .record,
                 );
             }
@@ -617,7 +666,6 @@ impl FileCreateStore {
         } else {
             self.reference_manifest_metadata(&joined, scope, budget)?;
         }
-        #[cfg(windows)]
         let mut remote = None;
         #[cfg(windows)]
         let mut continued_edit = None;
@@ -652,7 +700,6 @@ impl FileCreateStore {
             checked
                 .record(&event)
                 .map_err(|_| StoreError::CorruptEvidence)?;
-            #[cfg(windows)]
             if let NamespaceEventKind::RemoteVerified { report } = &event.event {
                 remote = Some(report.clone());
             }
@@ -708,9 +755,53 @@ impl FileCreateStore {
                 commitment,
             },
             checked,
-            #[cfg(windows)]
             remote,
         })
+    }
+
+    /// Historical metadata only. This cannot prove current native completion
+    /// or authorize any replay, mutation, acknowledgement or cleanup.
+    fn acknowledged_original(
+        &self,
+        loaded: &Loaded,
+        budget: &mut DiscoveryBudget,
+    ) -> Result<bool, StoreError> {
+        let progress = loaded.record.progress;
+        if progress.remote != NamespacePhase::Verified
+            || progress.attention.is_some()
+            || progress.continued
+            || progress.local_completed
+            || progress.recorded_complete
+        {
+            return Ok(false);
+        }
+        let report = loaded
+            .remote
+            .as_ref()
+            .ok_or(StoreError::IncompleteEvidence)?;
+        let NamespaceOperation::CreateFile {
+            destination,
+            content,
+        } = &loaded.record.joined.intent.operation
+        else {
+            return Err(StoreError::CorruptEvidence);
+        };
+        // The event chain already validated this report. Keep the selected
+        // original join/report correspondence explicit before checking its ACK.
+        if report.destination != *destination
+            || report.content.as_ref() != Some(content)
+            || report.remote.byte_len != content.byte_len
+            || loaded.record.key.scope != self.base.scope
+        {
+            return Err(StoreError::CorruptEvidence);
+        }
+        let (manifest, directory) = self.reference_manifest_metadata(
+            &loaded.record.joined,
+            &loaded.record.key.scope,
+            budget,
+        )?;
+        self.base
+            .create_acknowledged_metadata(&manifest, &*directory, budget)
     }
     #[cfg(windows)]
     fn validate_continued_edit(
@@ -802,6 +893,14 @@ pub struct FileCreateLease {
     poisoned: bool,
 }
 impl FileCreateLease {
+    /// Read-only classification of the exact selected historical join. A true
+    /// result grants no current native authority and must not replay its create.
+    #[cfg(windows)]
+    pub(crate) fn has_acknowledged_original(&self) -> Result<bool, StoreError> {
+        self.store
+            .acknowledged_original(&self.loaded, &mut Budget::new(self.store.base.policy))
+    }
+
     #[cfg(windows)]
     pub(crate) fn record_remote_verified(
         &mut self,
@@ -1298,6 +1397,7 @@ pub(super) fn validated_catalog_scope_keys(
 /// lease and cumulative budget. No body open, directory creation, lock or
 /// writable capability escapes. Completed joins require their exact authenticated
 /// snapshot zero-attempt ACK under this same lock and cumulative budget.
+#[cfg(test)]
 pub(super) fn history_counts_existing(
     root: Arc<dyn Directory>,
     protector: Arc<dyn EditRecordProtector>,
@@ -1307,10 +1407,28 @@ pub(super) fn history_counts_existing(
     budget: &mut Budget,
     remaining: usize,
 ) -> Result<(usize, usize), StoreError> {
+    history_counts_with_acknowledged_gaps_existing(
+        root, protector, policy, provider, physical, budget, remaining,
+    )
+    .map(|(records, unresolved, _)| (records, unresolved))
+}
+
+/// Same retained-history scan and allowance, with a separate count of exact
+/// zero-attempt ACK gaps. Strict unresolved counts remain unchanged.
+pub(super) fn history_counts_with_acknowledged_gaps_existing(
+    root: Arc<dyn Directory>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+) -> Result<(usize, usize, usize), StoreError> {
     let files = root.child(ROOT, false)?;
     let scopes = catalogs(&*files, &*protector, budget)?;
     let mut records = 0usize;
     let mut unresolved = 0usize;
+    let mut acknowledged_join_gaps = 0usize;
     for (key, scope) in scopes {
         let directory = files.child(&key, false)?;
         let names = directory.entries(budget.remaining_entries())?;
@@ -1360,13 +1478,15 @@ pub(super) fn history_counts_existing(
                 let loaded =
                     decoder.load_names_checked(&*directory, &id, &scope, &names, budget, false)?;
                 unresolved += usize::from(!loaded.record.progress.recorded_complete);
+                acknowledged_join_gaps +=
+                    usize::from(decoder.acknowledged_original(&loaded, budget)?);
             }
         }
         directory.verify()?;
     }
     files.verify()?;
     root.verify()?;
-    Ok((records, unresolved))
+    Ok((records, unresolved, acknowledged_join_gaps))
 }
 
 pub(super) fn accounted_usage(

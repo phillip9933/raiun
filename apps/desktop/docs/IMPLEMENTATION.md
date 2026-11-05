@@ -73,6 +73,22 @@ bounded metadata reader; it reads no file bodies and grants no recovery action.
 Unsupported, corrupt, incomplete or unconfigured history is explicitly unavailable,
 not an empty result. Namespace counts do not describe legacy content recovery.
 
+An acknowledged original snapshot remains selectable while its file-create join
+is incomplete. Snapshot and join discovery share one bounded metadata allowance
+and authenticate the same scope, generation and manifest commitment; missing
+references remain errors. Fresh-create admission alone can distinguish an exact
+historical native ACK0/0 with an attention-free verified original join from an
+unfinished upload. Generic recovery counts, cleanup and legacy mutation barriers
+still treat the join as unresolved; no history is changed or old file replayed.
+Every fresh create retains its own current content-health, native, account/root,
+opaque-parent and conditional-create checks. Other pending or uncertain history
+still blocks admission.
+
+Explicit continuation of an already acknowledged original stops before capture,
+staging or PUT and returns a retained review result. GUI and CLI validate the
+same continued-create response and distinguish fresh completion, historical link
+closure and review without inventing attempt counts or current verification.
+
 ## Current candidate — 3 November 2026
 
 The canonical Linux/Windows GUI and headless CLI source is consolidated in the

@@ -235,6 +235,8 @@ pub use native::native_namespace_directory::{
 pub enum FileCreateContinuationOutcome {
     LocallyCompleted,
     HistoricalLinkCompleted,
+    /// Original native ACK is historical evidence, not a permit for another PUT.
+    HistoricalReviewRequired,
 }
 
 /// Fixed, data-free phase of an explicitly selected file-create recovery.
@@ -317,6 +319,9 @@ pub struct NamespaceRecoverySummary {
     pub directory_unresolved: usize,
     pub file_records: usize,
     pub file_unresolved: usize,
+    /// Historical original native ACK0/0, with the join event still incomplete.
+    /// This is not current-content verification or cleanup/recovery authority.
+    pub file_acknowledged_join_gaps: usize,
     pub delete_records: usize,
     pub delete_unresolved: usize,
 }

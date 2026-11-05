@@ -451,6 +451,24 @@ fn write_drive_result(
 }
 
 fn edit_retry_exit_status(response: &Value) -> Result<(), String> {
+    if response["continued_create"] == true
+        && response["original_snapshot_retained"] == true
+        && response["retained"] == true
+        && response["state"] == "review_required"
+        && response["remote_verified"] == false
+        && response["local_completion"] == "unavailable"
+    {
+        return Err("This saved file was acknowledged earlier. Its recovery history needs review; nothing was uploaded.".into());
+    }
+    if response["continued_create"] == true
+        && response["original_snapshot_retained"] == true
+        && response["retained"] == true
+        && response["state"] == "historical_link_completed"
+        && response["remote_verified"] == false
+        && response["local_completion"] == "unavailable"
+    {
+        return Err("Recovery history reconciled. The saved copy is retained; this did not upload or freshly verify the file.".into());
+    }
     if response["remote_verified"] == true && response["local_completion"] == "completed" {
         Ok(())
     } else {
@@ -869,6 +887,44 @@ fn validate_edit_response(
             }
         }
         EditCommand::Retry { .. } => {
+            if response.get("continued_create").is_some()
+                || response.get("original_snapshot_retained").is_some()
+            {
+                const KEYS: [&str; 9] = [
+                    "profile_id",
+                    "auth_generation",
+                    "recovery_scope_token",
+                    "state",
+                    "retained",
+                    "remote_verified",
+                    "local_completion",
+                    "continued_create",
+                    "original_snapshot_retained",
+                ];
+                let object = response.as_object().ok_or_else(invalid)?;
+                let freshly_completed = response["state"] == "verified_applied"
+                    && response["remote_verified"] == true
+                    && response["local_completion"] == "completed";
+                let historically_linked = response["state"] == "historical_link_completed"
+                    && response["remote_verified"] == false
+                    && response["local_completion"] == "unavailable";
+                let review_required = response["state"] == "review_required"
+                    && response["remote_verified"] == false
+                    && response["local_completion"] == "unavailable";
+                if object.len() != KEYS.len()
+                    || !KEYS.iter().all(|key| object.contains_key(*key))
+                    || response["profile_id"] != profile
+                    || response["auth_generation"].as_u64() != Some(generation)
+                    || response["recovery_scope_token"] != scope
+                    || response["retained"] != true
+                    || response["continued_create"] != true
+                    || response["original_snapshot_retained"] != true
+                    || !(freshly_completed || historically_linked || review_required)
+                {
+                    return Err(invalid());
+                }
+                return Ok(());
+            }
             let state = response
                 .get("state")
                 .and_then(Value::as_str)

@@ -592,7 +592,7 @@ impl FileCreateTask {
                 let result = (|| {
                     prep.job.check()?;
                     if !(prep.current)(self.key.authorization)
-                        || prep.recovery.has_unresolved()?
+                        || prep.recovery.has_unresolved_namespace_for_fresh_create()?
                         || prep
                             .recovery
                             .has_unresolved_content_authenticated_legacy()?
@@ -609,7 +609,7 @@ impl FileCreateTask {
                         prep.current.clone(),
                     )?;
                     admission.check(&self.backend)?;
-                    if prep.recovery.has_unresolved()?
+                    if prep.recovery.has_unresolved_namespace_for_fresh_create()?
                         || prep
                             .recovery
                             .has_unresolved_content_authenticated_legacy()?

@@ -224,6 +224,15 @@ impl ConfiguredRootConnection {
             if local.volume_serial != physical.volume_serial || local.file_index == 0 {
                 return Err(no());
             }
+            // An original zero-PUT native acknowledgement cannot be superseded
+            // by this conditional-successor path. Refuse before any capture,
+            // staging or PUT; retain the historical join for explicit review.
+            if initial_lease
+                .has_acknowledged_original()
+                .map_err(|_| no())?
+            {
+                return Ok(crate::FileCreateContinuationOutcome::HistoricalReviewRequired);
+            }
             let (parent, parent_snapshot, ancestors) =
                 native_namespace_directory::pin_namespace_parent(
                     root,

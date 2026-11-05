@@ -729,7 +729,7 @@ impl DirectoryCreateTask {
             } => {
                 let result = (|| {
                     job.check()?;
-                    if recovery.has_unresolved()?
+                    if recovery.has_unresolved_namespace_for_fresh_create()?
                         || recovery.has_unresolved_content_authenticated_legacy()?
                     {
                         return Err(BackendError::Unavailable);
@@ -747,7 +747,7 @@ impl DirectoryCreateTask {
                         .directory_intent_store(&session.captured.scope, self.key.authorization)?
                         .ok_or(BackendError::Unavailable)?;
                     session.check()?;
-                    if recovery.has_unresolved()?
+                    if recovery.has_unresolved_namespace_for_fresh_create()?
                         || recovery.has_unresolved_content_authenticated_legacy()?
                     {
                         return Err(BackendError::Unavailable);

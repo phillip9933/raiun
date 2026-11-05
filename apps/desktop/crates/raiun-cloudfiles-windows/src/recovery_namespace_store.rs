@@ -28,6 +28,21 @@ pub(super) fn has_unresolved_namespace(
 }
 
 /// Same bounded authenticated metadata query; no body or mutation authority.
+pub(super) fn has_unresolved_for_fresh_create(
+    namespace: Option<&NamespaceRenameStoreContext>,
+    streamed: Option<&StreamedRecoveryContext>,
+    catalog: &ScopeCatalog,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+) -> Result<bool, BackendError> {
+    let summary = namespace_history_summary(namespace, streamed, catalog, provider, physical_root)?;
+    crate::streamed_store::namespace_rename_store::history_unresolved_for_fresh_create(
+        &summary,
+        namespace.is_some(),
+    )
+}
+
+/// Same bounded authenticated metadata query; no body or mutation authority.
 pub(super) fn namespace_history_summary(
     namespace: Option<&NamespaceRenameStoreContext>,
     streamed: Option<&StreamedRecoveryContext>,

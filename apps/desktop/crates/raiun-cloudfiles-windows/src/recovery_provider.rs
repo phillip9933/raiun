@@ -1365,13 +1365,29 @@ fn streamed_unresolved_metadata(
         .max_metadata_bytes_per_scan
         .min(64 * 1024 * 1024);
     let mut budget = crate::streamed_store::DiscoveryBudget::new(scan_policy);
-    let scopes = crate::streamed_store::SnapshotStore::discover_state_scopes_bounded(
+    let mut scopes = crate::streamed_store::SnapshotStore::discover_state_scopes_bounded(
         Arc::clone(&context.state),
         Arc::clone(protector),
         scan_policy,
         &mut budget,
     )
     .map_err(crate::edit_journal::admission_error)?;
+    // A retained join must not disappear from this listing merely because its
+    // snapshot catalog is missing. Include authenticated join-catalog scopes
+    // so the existing snapshot/manifest readers refuse that incomplete state.
+    for joined_scope in
+        crate::streamed_store::namespace_file_store::FileCreateStore::discover_state_scopes_bounded(
+            Arc::clone(&context.state),
+            Arc::clone(protector),
+            scan_policy,
+            &mut budget,
+        )
+        .map_err(crate::edit_journal::admission_error)?
+    {
+        if !scopes.contains(&joined_scope) {
+            scopes.push(joined_scope);
+        }
+    }
     if scopes.len() > MAX_DISCOVERY_CATALOG_SCOPES {
         return Err(crate::JournalError::ScanLimit);
     }
@@ -1392,24 +1408,45 @@ fn streamed_unresolved_metadata(
         let records = store
             .discover_records_bounded(&mut budget)
             .map_err(crate::edit_journal::admission_error)?;
-        // A superseded stream alone leaves the namespace commit gap pending.
-        // Keep that original selectable until its paired join is authenticated.
-        let continued = if records.iter().any(|record| {
-            matches!(
-                record.state,
-                crate::streamed_store::StreamedAttemptState::Superseded { .. }
-            )
-        }) {
+        // A snapshot ACK alone cannot close its namespace commit gap. Read the
+        // joins on every scan, sharing the same allowance as record discovery.
+        // These are authenticated metadata/reference reads, never body reads
+        // or permission to replay the original create.
+        let joins =
             crate::streamed_store::namespace_file_store::FileCreateStore::new(store.clone())
-                .and_then(|store| store.discover())
-                .map_err(crate::edit_journal::admission_error)?
-                .into_iter()
-                .filter(|join| join.progress().continued && join.progress().recorded_complete)
-                .map(|join| join.snapshot_id().to_owned())
-                .collect::<std::collections::HashSet<_>>()
-        } else {
-            std::collections::HashSet::new()
-        };
+                .and_then(|store| store.discover_bounded(&mut budget))
+                .map_err(crate::edit_journal::admission_error)?;
+        let mut records_by_key = std::collections::HashMap::new();
+        for record in &records {
+            let key = (record.key.record_id().to_owned(), record.key.generation());
+            if records_by_key.insert(key, record).is_some() {
+                return Err(crate::JournalError::ScanLimit);
+            }
+        }
+        let mut joined = std::collections::HashSet::new();
+        let mut pending = std::collections::HashSet::new();
+        let mut continued = std::collections::HashSet::new();
+        for join in joins {
+            let key = (join.snapshot_id().to_owned(), join.key().generation());
+            if !joined.insert(key.clone()) {
+                return Err(crate::JournalError::CorruptRecord);
+            }
+            let progress = join.progress();
+            if !progress.recorded_complete {
+                let record = records_by_key
+                    .get(&key)
+                    .ok_or(crate::JournalError::CorruptRecord)?;
+                if record.key.scope() != join.key().scope()
+                    || record.key.commitment_sha256() != join.manifest_commitment_sha256()
+                {
+                    return Err(crate::JournalError::CorruptRecord);
+                }
+                pending.insert(key);
+            } else if progress.continued {
+                continued.insert(key);
+            }
+        }
+        drop(records_by_key);
         for record in records {
             scanned_records = scanned_records
                 .checked_add(1)
@@ -1419,13 +1456,15 @@ fn streamed_unresolved_metadata(
             {
                 return Err(crate::JournalError::ScanLimit);
             }
-            let resolved = matches!(
+            let key = (record.key.record_id().to_owned(), record.key.generation());
+            let resolved = (matches!(
                 record.state,
                 crate::streamed_store::StreamedAttemptState::LocallyAcknowledged { .. }
-            ) || (matches!(
-                record.state,
-                crate::streamed_store::StreamedAttemptState::Superseded { .. }
-            ) && continued.contains(record.key.record_id()));
+            ) && !pending.contains(&key))
+                || (matches!(
+                    record.state,
+                    crate::streamed_store::StreamedAttemptState::Superseded { .. }
+                ) && continued.contains(&key));
             if !resolved {
                 output.push(streamed_manifest_metadata(&record.manifest));
             }
@@ -1927,6 +1966,17 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
     }
 
     #[cfg(windows)]
+    fn has_unresolved_namespace_for_fresh_create(&self) -> Result<bool, BackendError> {
+        namespace_storage::has_unresolved_for_fresh_create(
+            self.namespace_rename.as_ref(),
+            self.streamed.as_ref(),
+            &self.catalog,
+            &self.scope,
+            self.root_identity,
+        )
+    }
+
+    #[cfg(windows)]
     fn namespace_recovery_summary(&self) -> Result<crate::NamespaceRecoverySummary, BackendError> {
         let summary = namespace_storage::namespace_history_summary(
             self.namespace_rename.as_ref(),
@@ -1948,6 +1998,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             directory_unresolved: summary.directory_unresolved,
             file_records: summary.file_records,
             file_unresolved: summary.file_unresolved,
+            file_acknowledged_join_gaps: summary.file_acknowledged_join_gaps,
             delete_records: summary.delete_records,
             delete_unresolved: summary.delete_unresolved,
         })

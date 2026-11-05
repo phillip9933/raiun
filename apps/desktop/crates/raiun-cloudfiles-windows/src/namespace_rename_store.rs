@@ -61,6 +61,7 @@ pub(crate) struct NamespaceHistorySummary {
     pub(crate) file_evidence: bool,
     pub(crate) file_records: usize,
     pub(crate) file_unresolved: usize,
+    pub(crate) file_acknowledged_join_gaps: usize,
     pub(crate) delete_evidence: bool,
     pub(crate) delete_records: usize,
     pub(crate) delete_unresolved: usize,
@@ -85,6 +86,31 @@ pub(crate) fn history_unresolved(
     Ok(summary.unresolved != 0
         || summary.directory_unresolved != 0
         || summary.file_unresolved != 0
+        || summary.delete_unresolved != 0)
+}
+
+/// Fresh creation still requires its own live admission. Only an authenticated
+/// zero-attempt ACK gap may be excluded here; generic history remains pending.
+pub(crate) fn history_unresolved_for_fresh_create(
+    summary: &NamespaceHistorySummary,
+    configured: bool,
+) -> Result<bool, crate::BackendError> {
+    // Preserve every unknown-format and unconfigured-history refusal.
+    let _ = history_unresolved(summary, configured)?;
+    if summary.unresolved > summary.records
+        || summary.directory_unresolved > summary.directory_records
+        || summary.file_unresolved > summary.file_records
+        || summary.delete_unresolved > summary.delete_records
+    {
+        return Err(crate::BackendError::Unavailable);
+    }
+    let remaining_files = summary
+        .file_unresolved
+        .checked_sub(summary.file_acknowledged_join_gaps)
+        .ok_or(crate::BackendError::Unavailable)?;
+    Ok(summary.unresolved != 0
+        || summary.directory_unresolved != 0
+        || remaining_files != 0
         || summary.delete_unresolved != 0)
 }
 
@@ -227,17 +253,19 @@ pub(super) fn history_summary_existing(
                     .ok_or(StoreError::ScanLimit)?,
             )
             .ok_or(StoreError::ScanLimit)?;
-        let (records, unresolved) = namespace_file_store::history_counts_existing(
-            Arc::clone(&root),
-            Arc::clone(&protector),
-            policy,
-            provider,
-            physical_root,
-            &mut budget,
-            remaining,
-        )?;
+        let (records, unresolved, acknowledged_join_gaps) =
+            namespace_file_store::history_counts_with_acknowledged_gaps_existing(
+                Arc::clone(&root),
+                Arc::clone(&protector),
+                policy,
+                provider,
+                physical_root,
+                &mut budget,
+                remaining,
+            )?;
         result.file_records += records;
         result.file_unresolved += unresolved;
+        result.file_acknowledged_join_gaps += acknowledged_join_gaps;
     }
     if result.delete_evidence {
         let remaining = MAX_RECORDS
