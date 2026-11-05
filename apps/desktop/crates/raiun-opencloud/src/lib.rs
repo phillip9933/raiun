@@ -5364,11 +5364,17 @@ fn is_vault_path(path: &str) -> bool {
 fn graph_permissions_writable(value: &Value) -> bool {
     fn writable_role(value: &str) -> bool {
         let normalized = value.to_ascii_lowercase();
+        // Graph writability is a hint; ordinary DAV root/parent permission
+        // checks still decide whether an operation can proceed.
         matches!(
             normalized.as_str(),
-            "w" | "c" | "write" | "writer" | "owner" | "editor" | "create" | "update"
-        ) || normalized.contains('w')
-            || normalized.contains('c')
+            "w" | "c" | "write" | "writer" | "owner" | "editor" | "create" | "update" | "manager"
+        ) || (value.bytes().all(|flag| {
+            matches!(
+                flag,
+                b'S' | b'R' | b'M' | b'D' | b'N' | b'V' | b'W' | b'C' | b'K' | b'Z' | b'P' | b'X'
+            )
+        }) && (value.contains('W') || value.contains('C')))
     }
     match value {
         Value::String(value) => writable_role(value),

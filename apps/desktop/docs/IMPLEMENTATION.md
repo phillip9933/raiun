@@ -4623,3 +4623,9 @@ account or resource identifiers, server messages or protected record contents.
 Tracing adds no requests, retries, recovery writes or admission authority. Root,
 parent-version, account, custody and pending-history checks remain authoritative;
 an error does not authorize replay of a retained operation.
+
+Graph permission hints recognize complete supported role names, including
+`manager`, and complete compact DAV flag strings. Letters within arbitrary
+role names or identifiers do not establish writability; `viewer` is read-only.
+Missing Graph permission metadata remains only a discovery hint. Original DAV
+root and parent permission checks still decide whether creation can proceed.
