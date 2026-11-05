@@ -408,6 +408,7 @@ impl OpenCloudClient {
         let verified = Arc::new(AtomicBool::new(false));
         let witness = Arc::clone(&verified);
         let result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             timeout,
             || {
@@ -740,6 +741,7 @@ impl OpenCloudClient {
         let verified = Arc::new(AtomicBool::new(false));
         let witness = Arc::clone(&verified);
         let result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             timeout,
             || {
@@ -981,6 +983,7 @@ impl OpenCloudClient {
             expected_size,
         )?;
         let result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             timeout,
             || {

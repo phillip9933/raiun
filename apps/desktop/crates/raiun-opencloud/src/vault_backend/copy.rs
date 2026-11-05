@@ -962,6 +962,7 @@ impl VaultBackend {
         let client = self.client.clone();
         let body_client = self.client.clone();
         let copied = async_body::run_body_operation_cancellable(
+            &self.client.body_runtime,
             self.client.body_idle_timeout(),
             timeout,
             move || {

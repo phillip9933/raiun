@@ -32,58 +32,6 @@ fn verified_custody(receipt: &OrdinaryCreateReceipt) -> Result<(), CacheError> {
     }
 }
 impl Cache {
-    /// Record the caller's durable receipt acceptance, not cloud completion.
-    /// FUSE must first fsync its exact receipt manifest and retain its original
-    /// spool on failure. Neither dispatch nor retention state is reset here.
-    pub fn acknowledge_ordinary_create_handoff(
-        &self,
-        scope: &CacheScope,
-        receipt: &OrdinaryCreateReceipt,
-    ) -> Result<OrdinaryCreateReceipt, CacheError> {
-        let found = {
-            let db = self.lock_db()?;
-            current(&db, scope, receipt)?
-        };
-        if found.local_handoff_acknowledged {
-            return Ok(found);
-        }
-        if !matches!(
-            found.state,
-            OrdinaryCreateState::Ready
-                | OrdinaryCreateState::Claimed
-                | OrdinaryCreateState::Uncertain
-                | OrdinaryCreateState::Verified
-        ) {
-            return Err(CacheError::Conflict);
-        }
-        // First acknowledgement proves the indexed immutable copy still opens.
-        // Keep the verified reader pinned until the transaction commits.
-        let _reader = self.open_content(scope, &found.write.content)?;
-        let db = self.lock_db()?;
-        let tx =
-            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
-        let found = current(&tx, scope, receipt)?;
-        if found.local_handoff_acknowledged {
-            return Ok(found);
-        }
-        if !matches!(
-            found.state,
-            OrdinaryCreateState::Ready
-                | OrdinaryCreateState::Claimed
-                | OrdinaryCreateState::Uncertain
-                | OrdinaryCreateState::Verified
-        ) {
-            return Err(CacheError::Conflict);
-        }
-        let n=tx.execute("UPDATE ordinary_create_handoffs SET local_handoff_ack=1,updated_at=?3 WHERE scope_key=?1 AND write_id=?2 AND local_handoff_ack=0 AND body_state=0",params![scope.key,found.write.id,now_unix()]).map_err(db_error)?;
-        if n != 1 {
-            return Err(CacheError::Conflict);
-        }
-        let out = load(&tx, scope, found.write.id)?.ok_or(CacheError::Corrupt)?;
-        tx.commit().map_err(db_error)?;
-        Ok(out)
-    }
-
     /// Bounded, exact-scope cleanup. Only fully verified and locally accepted
     /// new creates qualify. Scope-wide offline intent conservatively holds all
     /// candidates. Failure is separate from delivery and never permits resend.
@@ -113,15 +61,21 @@ impl Cache {
         let (candidates, mut used) = {
             let db = self.lock_db()?;
             validate_registered_scope(&db, scope)?;
-            let mut statement=db.prepare("SELECT h.write_id FROM ordinary_create_handoffs h JOIN contents c ON c.content_key=h.content_key AND c.scope_key=h.scope_key WHERE h.scope_key=?1 AND h.state=5 AND h.local_handoff_ack=1 AND h.body_state IN(0,1) AND c.retention=1 AND NOT EXISTS(SELECT 1 FROM writes w WHERE w.content_key=c.content_key AND w.state IN(0,1)) AND NOT EXISTS(SELECT 1 FROM ciphertext_writes w WHERE w.content_key=c.content_key) AND NOT EXISTS(SELECT 1 FROM ciphertext_pin_items p WHERE p.content_key=c.content_key) ORDER BY h.body_state DESC,c.last_accessed,h.write_id LIMIT ?2").map_err(db_error)?;
+            let used = total_content_bytes(&db)?;
+            let mut statement=db.prepare("SELECT h.write_id FROM ordinary_create_handoffs h JOIN contents c ON c.content_key=h.content_key AND c.scope_key=h.scope_key WHERE h.scope_key=?1 AND h.state=5 AND h.local_handoff_ack=1 AND (h.body_state=1 OR (?3=1 AND h.body_state=0)) AND c.retention=1 AND NOT EXISTS(SELECT 1 FROM writes w WHERE w.content_key=c.content_key AND w.state IN(0,1)) AND NOT EXISTS(SELECT 1 FROM ciphertext_writes w WHERE w.content_key=c.content_key) AND NOT EXISTS(SELECT 1 FROM ciphertext_pin_items p WHERE p.content_key=c.content_key) ORDER BY h.body_state DESC,c.last_accessed,h.write_id LIMIT ?2").map_err(db_error)?;
             let ids = statement
-                .query_map(params![scope.key, max_candidates as i64], |r| {
-                    r.get::<_, i64>(0)
-                })
+                .query_map(
+                    params![
+                        scope.key,
+                        max_candidates as i64,
+                        if used > target_quota { 1_i64 } else { 0_i64 }
+                    ],
+                    |r| r.get::<_, i64>(0),
+                )
                 .map_err(db_error)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(db_error)?;
-            (ids, total_content_bytes(&db)?)
+            (ids, used)
         };
         let mut attempted = 0;
         let mut removed = 0u64;
@@ -232,68 +186,100 @@ impl Cache {
         // authority. Only an exact retained clean tombstone plus byte/identity
         // verification may authorize a residual cleanup.
         if attempted < max_candidates {
-            #[cfg(windows)]
-            let names = self.inner.windows_content.clean_retry_names(&lease)?;
-            #[cfg(not(windows))]
-            let names = portable_names(self)?;
-            for name in names {
-                if attempted >= max_candidates {
-                    break;
-                }
-                let Some(key) = name.strip_suffix(".blob") else {
-                    continue;
-                };
-                let receipt = {
-                    let db = self.lock_db()?;
-                    let id:Option<i64>=db.query_row("SELECT write_id FROM ordinary_create_handoffs WHERE scope_key=?1 AND content_key=?2 AND body_state=2 AND state=5 AND local_handoff_ack=1",params![scope.key,key],|r|r.get(0)).optional().map_err(db_error)?;
-                    id.map(|id| load(&db, scope, id)?.ok_or(CacheError::Corrupt))
-                        .transpose()?
-                };
-                let Some(receipt) = receipt else {
-                    continue;
-                };
-                attempted += 1;
-                #[cfg(windows)]
-                let candidate = match self.inner.windows_content.prepare_verified_clean_eviction(
-                    &lease,
-                    &name,
-                    receipt.byte_len,
-                    &receipt.sha256,
-                ) {
-                    Ok(c) => c,
-                    Err(CacheError::Conflict) => continue,
-                    Err(e) => return Err(e),
-                };
-                #[cfg(not(windows))]
-                let candidate = prepare_portable(self, &name, &receipt)?;
+            let residual_tombstones = {
                 let db = self.lock_db()?;
-                let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+                validate_registered_scope(&db, scope)?;
+                let mut statement = db
+                    .prepare(
+                        "SELECT content_key,write_id FROM ordinary_create_handoffs WHERE scope_key=?1 AND state=5 AND local_handoff_ack=1 AND body_state=2 ORDER BY content_key,write_id LIMIT ?2",
+                    )
                     .map_err(db_error)?;
-                let found = current(&tx, scope, &receipt)?;
-                verified_custody(&found)?;
-                if disposition(&tx, scope, receipt.write.id)? != 2 || policy_holds(&tx, scope, key)?
-                {
-                    continue;
+                let rows = statement
+                    .query_map(
+                        params![scope.key, (MAX_JOURNAL_RECORDS + 1) as i64],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .map_err(db_error)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(db_error)?;
+                if rows.len() > MAX_JOURNAL_RECORDS {
+                    return Err(CacheError::LimitExceeded);
                 }
+                let mut by_key = BTreeMap::new();
+                for (key, id) in rows {
+                    if by_key.insert(key, id).is_some() {
+                        return Err(CacheError::Corrupt);
+                    }
+                }
+                by_key
+            };
+            if !residual_tombstones.is_empty() {
                 #[cfg(windows)]
-                let deleted = match candidate {
-                    Some(file) => {
-                        file.delete().map_err(io_error)?;
-                        true
-                    }
-                    None => {
-                        self.inner
-                            .windows_content
-                            .verify_clean_absence(&lease, &name)?;
-                        false
-                    }
-                };
+                let names = self.inner.windows_content.clean_retry_names(&lease)?;
                 #[cfg(not(windows))]
-                let deleted = unlink_portable(self, &name, candidate)?;
-                sync_directory(&self.inner.content_dir)?;
-                tx.commit().map_err(db_error)?;
-                if deleted {
-                    removed = removed.saturating_add(receipt.byte_len);
+                let names = portable_names(self)?;
+                for name in &names {
+                    if attempted >= max_candidates {
+                        break;
+                    }
+                    let Some(key) = name.strip_suffix(".blob") else {
+                        continue;
+                    };
+                    let Some(id) = residual_tombstones.get(key) else {
+                        continue;
+                    };
+                    let receipt = {
+                        let db = self.lock_db()?;
+                        load(&db, scope, *id)?.ok_or(CacheError::Corrupt)?
+                    };
+                    if content_key(scope, &receipt.write.content) != key {
+                        return Err(CacheError::Corrupt);
+                    }
+                    attempted += 1;
+                    #[cfg(windows)]
+                    let candidate =
+                        match self.inner.windows_content.prepare_verified_clean_eviction(
+                            &lease,
+                            &name,
+                            receipt.byte_len,
+                            &receipt.sha256,
+                        ) {
+                            Ok(c) => c,
+                            Err(CacheError::Conflict) => continue,
+                            Err(e) => return Err(e),
+                        };
+                    #[cfg(not(windows))]
+                    let candidate = prepare_portable(self, name, &receipt)?;
+                    let db = self.lock_db()?;
+                    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+                        .map_err(db_error)?;
+                    let found = current(&tx, scope, &receipt)?;
+                    verified_custody(&found)?;
+                    if disposition(&tx, scope, receipt.write.id)? != 2
+                        || policy_holds(&tx, scope, key)?
+                    {
+                        continue;
+                    }
+                    #[cfg(windows)]
+                    let deleted = match candidate {
+                        Some(file) => {
+                            file.delete().map_err(io_error)?;
+                            true
+                        }
+                        None => {
+                            self.inner
+                                .windows_content
+                                .verify_clean_absence(&lease, &name)?;
+                            false
+                        }
+                    };
+                    #[cfg(not(windows))]
+                    let deleted = unlink_portable(self, name, candidate)?;
+                    sync_directory(&self.inner.content_dir)?;
+                    tx.commit().map_err(db_error)?;
+                    if deleted {
+                        removed = removed.saturating_add(receipt.byte_len);
+                    }
                 }
             }
         }
@@ -311,16 +297,19 @@ impl Cache {
     #[cfg(not(windows))]
     fn clean_portable_usage(&self, mut usage: CacheUsage) -> Result<CacheUsage, CacheError> {
         let db = self.lock_db()?;
-        for name in portable_names(self)? {
-            let indexed: bool = db
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM contents WHERE relative_path=?1)",
-                    [&name],
-                    |r| r.get(0),
-                )
-                .map_err(db_error)?;
-            if !indexed {
-                let path = self.inner.content_dir.join(name);
+        let names = portable_names(self)?;
+        let mut statement = db
+            .prepare("SELECT relative_path FROM contents")
+            .map_err(db_error)?;
+        let indexed = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db_error)?
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(db_error)?;
+        drop(statement);
+        for name in names {
+            if !indexed.contains(&name) {
+                let path = self.inner.content_dir.join(&name);
                 let metadata = match fs::symlink_metadata(path) {
                     Ok(m) => m,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => continue,

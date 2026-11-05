@@ -14,6 +14,9 @@ url = "2.5"
 getrandom = "0.4"
 fs2 = "0.4"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.5", features = ["fs"] }
+
 [target.'cfg(windows)'.dependencies]
 raiun-sqlite-windows = { path = "../raiun-sqlite-windows", features = ["trusted-cache-integration"] }
 raiun-control-windows = { path = "../raiun-control-windows" }

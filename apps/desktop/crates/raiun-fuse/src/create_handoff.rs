@@ -40,7 +40,10 @@ impl Intent {
     }
 
     pub fn matches(&self, receipt: &DurableCreateReceipt) -> bool {
-        let r = receipt.storage_receipt();
+        self.matches_storage(receipt.storage_receipt())
+    }
+
+    fn matches_storage(&self, r: &raiun_cache::OrdinaryCreateReceipt) -> bool {
         self.id == r.handoff_id
             && self.parent_id == r.write.parent_resource_id
             && self.len == r.byte_len
@@ -48,7 +51,7 @@ impl Intent {
             && self
                 .receipt
                 .as_ref()
-                .is_none_or(|p| *p == projection(receipt))
+                .is_none_or(|p| *p == storage_projection(r))
     }
 }
 
@@ -58,8 +61,7 @@ fn hex(value: &str, len: usize) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn projection(receipt: &DurableCreateReceipt) -> ReceiptProjection {
-    let r = receipt.storage_receipt();
+fn storage_projection(r: &raiun_cache::OrdinaryCreateReceipt) -> ReceiptProjection {
     ReceiptProjection {
         write_id: r.write.id,
         content_resource_id: r.write.content.resource_id.clone(),
@@ -79,7 +81,14 @@ pub(super) struct WorkingCopy {
     /// Last synced size only; later edits may legitimately change it.
     pub synced_len: u64,
     pub closing: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cancelled: bool,
 }
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 impl WorkingCopy {
     pub fn valid(&self) -> bool {
         hex(&self.id, 32)
@@ -88,6 +97,7 @@ impl WorkingCopy {
             && !self.parent_id.chars().any(char::is_control)
             && self.inode != 0
             && self.synced_len <= MAX_WORKING_BYTES
+            && (!self.cancelled || self.closing)
     }
 }
 
@@ -95,6 +105,7 @@ pub(super) struct NewCreate {
     pub parent: VerifiedCreateParent,
     pub working_id: String,
     pub closing: bool,
+    pub cancelled: bool,
     pub intent: Option<Intent>,
 }
 
@@ -189,6 +200,7 @@ pub(super) fn initialize(
         parent,
         working_id: random_id()?,
         closing: false,
+        cancelled: false,
         intent: None,
     });
     write.file.sync_all().map_err(io_cloud)?;
@@ -205,6 +217,11 @@ fn persist_working(write: &WriteHandle, validate_previous: bool) -> Result<(), C
         let previous = working_marker(write)?;
         if previous.closing && !create.closing {
             return Err(invalid("closed working copy cannot become editable"));
+        }
+        if previous.cancelled != create.cancelled
+            && !(create.cancelled && create.closing && !previous.cancelled && !previous.closing)
+        {
+            return Err(invalid("working copy cancellation state changed"));
         }
     }
     let metadata = pinned_source(write)?;
@@ -226,6 +243,7 @@ fn persist_working(write: &WriteHandle, validate_previous: bool) -> Result<(), C
             inode: metadata.ino(),
             synced_len: metadata.len(),
             closing: create.closing,
+            cancelled: create.cancelled,
         }),
     };
     let bytes =
@@ -255,6 +273,9 @@ pub(super) fn ensure_editable(fs: &RaiunFilesystem, write: &WriteHandle) -> Resu
     if write.create.is_some() {
         current(fs)?;
         let marker = working_marker(write)?;
+        if marker.cancelled != write.create.as_ref().is_some_and(|create| create.cancelled) {
+            return Err(invalid("working copy cancellation state changed"));
+        }
         if marker.closing {
             return Err(invalid("working marker is closed"));
         }
@@ -314,10 +335,43 @@ pub(super) fn truncate(
     Ok(size)
 }
 
+/// Cancel only a live, never-admitted create owned by this exact handle.
+/// The closed V4 working marker/body remain recovery-only across restart.
+/// There is no cloud mutation or durable claim reset here.
+pub(super) fn cancel_before_handoff(
+    fs: &RaiunFilesystem,
+    write: &mut WriteHandle,
+) -> Result<(), CloudError> {
+    current(fs)?;
+    let marker = working_marker(write)?;
+    let create = write
+        .create
+        .as_mut()
+        .ok_or_else(|| invalid("create is missing"))?;
+    if marker.closing || create.closing || create.intent.is_some() {
+        return Err(CloudError::new(
+            ErrorKind::Conflict,
+            "create is already closing or admitted",
+        ));
+    }
+    // Make failure terminal before filesystem I/O: a failed retention sync may
+    // not cause release to admit the cancelled bytes later.
+    create.closing = true;
+    create.cancelled = true;
+    write.cleanup_on_release = false;
+    write.file.sync_all().map_err(io_cloud)?;
+    persist_working(write, true)
+}
+
 pub(super) fn sync_editable(
     fs: &RaiunFilesystem,
     write: &mut WriteHandle,
 ) -> Result<(), CloudError> {
+    if write.create.as_ref().is_some_and(|create| create.cancelled) {
+        // A caller unlinked its own still-open create. Sync retained recovery
+        // bytes, but never convert that cancelled intent into an upload.
+        return write.file.sync_all().map_err(io_cloud);
+    }
     ensure_editable(fs, write)?;
     write.file.flush().map_err(io_cloud)?;
     write.file.sync_all().map_err(io_cloud)?;
@@ -329,6 +383,13 @@ pub(super) fn close_and_commit(
     fs: &RaiunFilesystem,
     write: &mut WriteHandle,
 ) -> Result<(), CloudError> {
+    if write.create.as_ref().is_some_and(|create| create.cancelled) {
+        return write.file.sync_all().map_err(io_cloud);
+    }
+    let marker = working_marker(write)?;
+    if marker.cancelled {
+        return Err(invalid("cancelled working copy cannot be admitted"));
+    }
     let create = write
         .create
         .as_mut()
@@ -495,7 +556,7 @@ pub(super) fn commit(fs: &RaiunFilesystem, write: &mut WriteHandle) -> Result<()
     let receipt =
         match fs
             .engine
-            .create_receipt_for_handoff(&write.scope, &write.path, &intent.id)?
+            .create_handoff_receipt_metadata(&write.scope, &write.path, &intent.id)?
         {
             Some(receipt) => receipt,
             None if intent.receipt.is_some() => {
@@ -504,30 +565,28 @@ pub(super) fn commit(fs: &RaiunFilesystem, write: &mut WriteHandle) -> Result<()
                     "previous handoff receipt disappeared; refusing another admission",
                 ));
             }
-            None => fs.engine.queue_new_plaintext_create_scoped(
-                CreateHandoffRequest {
-                    parent: &create.parent,
-                    source: &write.file,
-                    expected_len: intent.len,
-                    expected_sha256: &intent.sha256,
-                    handoff_id: &intent.id,
-                    max_pending_bytes: capability.max_pending_bytes,
-                },
-                capability.current.as_ref(),
-            )?,
+            None => fs
+                .engine
+                .queue_new_plaintext_create_scoped(
+                    CreateHandoffRequest {
+                        parent: &create.parent,
+                        source: &write.file,
+                        expected_len: intent.len,
+                        expected_sha256: &intent.sha256,
+                        handoff_id: &intent.id,
+                        max_pending_bytes: capability.max_pending_bytes,
+                    },
+                    capability.current.as_ref(),
+                )?
+                .storage_receipt()
+                .clone(),
         };
-    if !intent.matches(&receipt) {
+    if !intent.matches_storage(&receipt) {
         return Err(CloudError::new(
             ErrorKind::Conflict,
             "create handoff receipt does not own these bytes",
         ));
     }
-    let receipt = fs.engine.validate_create_receipt(
-        &write.scope,
-        &write.path,
-        &intent.id,
-        receipt.storage_receipt(),
-    )?;
     write
         .create
         .as_mut()
@@ -535,7 +594,7 @@ pub(super) fn commit(fs: &RaiunFilesystem, write: &mut WriteHandle) -> Result<()
         .intent
         .as_mut()
         .expect("prepared intent")
-        .receipt = Some(projection(&receipt));
+        .receipt = Some(storage_projection(&receipt));
     persist(write)?;
     let intent = write
         .create
@@ -546,7 +605,7 @@ pub(super) fn commit(fs: &RaiunFilesystem, write: &mut WriteHandle) -> Result<()
         &write.scope,
         &write.path,
         &intent.id,
-        receipt.storage_receipt(),
+        &receipt,
         capability.current.as_ref(),
     )?;
     if !intent.matches(&acknowledged) || !acknowledged.storage_receipt().local_handoff_acknowledged
@@ -588,12 +647,8 @@ pub(super) fn cleanup(fs: &RaiunFilesystem, write: &WriteHandle) -> Result<(), C
             "create receipt changed or custody was not acknowledged",
         ));
     }
-    fs.engine.validate_create_receipt(
-        &write.scope,
-        &write.path,
-        &intent.id,
-        receipt.storage_receipt(),
-    )?;
+    // The lookup above already verified the exact cache body (or committed
+    // Verified+ACK tombstone). Retain the independent marker/spool checks below.
     let bytes = recovery::read_manifest_bytes(&write.manifest)
         .map_err(|_| invalid("create marker is unsafe"))?;
     let marker: OrdinaryWriteManifest =

@@ -315,6 +315,7 @@ impl VaultBackend {
         let deadline = r.deadline;
         let result = (|| {
             crate::async_body::run_body_operation_cancellable(
+                &self.client.body_runtime,
                 self.client.body_idle_timeout(),
                 timeout,
                 || {
@@ -428,6 +429,7 @@ impl VaultBackend {
                 .request_async_with_context(Method::GET, &url, Some(context))?;
         let watchdog_cancellation = cancellation.clone();
         let copied = crate::async_body::run_body_operation_cancellable(
+            &self.client.body_runtime,
             self.client.body_idle_timeout(),
             timeout,
             || self.check_child_file_context(r).is_err() || watchdog_cancellation.is_cancelled(),

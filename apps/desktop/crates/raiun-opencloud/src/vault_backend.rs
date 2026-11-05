@@ -7221,6 +7221,7 @@ impl VaultBackend {
         let watchdog_external_generation = external_token_generation.clone();
         let body_external_generation = external_token_generation.clone();
         let response_result = crate::async_body::run_body_operation_cancellable(
+            &self.client.body_runtime,
             self.client.body_idle_timeout(),
             total_timeout,
             || {
@@ -7618,6 +7619,7 @@ impl VaultBackend {
                 .request_async_with_context(Method::GET, &url, request_context)?;
         let expected_etag = before.etag.clone();
         let copied = crate::async_body::run_body_operation_cancellable(
+            &self.client.body_runtime,
             self.client.body_idle_timeout(),
             total_timeout,
             || {

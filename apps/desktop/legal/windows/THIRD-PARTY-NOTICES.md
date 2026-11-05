@@ -112,6 +112,7 @@ The exact target lock hashes, declared license expressions, source references, r
 - `getrandom 0.3.4` — MIT OR Apache-2.0; `legal/windows/rust/getrandom-0.3.4/LICENSE-APACHE`, `legal/windows/rust/getrandom-0.3.4/LICENSE-MIT`
 - `getrandom 0.4.3` — MIT OR Apache-2.0; `legal/windows/rust/getrandom-0.4.3/LICENSE-APACHE`, `legal/windows/rust/getrandom-0.4.3/LICENSE-MIT`
 - `glob 0.3.4` — MIT OR Apache-2.0; `legal/windows/rust/glob-0.3.4/LICENSE-APACHE`, `legal/windows/rust/glob-0.3.4/LICENSE-MIT`
+- `h2 0.4.20` — MIT; `legal/windows/rust/h2-0.4.20/LICENSE`
 - `hashbrown 0.12.3` — MIT OR Apache-2.0; `legal/windows/rust/hashbrown-0.12.3/LICENSE-APACHE`, `legal/windows/rust/hashbrown-0.12.3/LICENSE-MIT`
 - `hashbrown 0.14.5` — MIT OR Apache-2.0; `legal/windows/rust/hashbrown-0.14.5/LICENSE-APACHE`, `legal/windows/rust/hashbrown-0.14.5/LICENSE-MIT`
 - `hashbrown 0.17.1` — MIT OR Apache-2.0; `legal/windows/rust/hashbrown-0.17.1/LICENSE-APACHE`, `legal/windows/rust/hashbrown-0.17.1/LICENSE-MIT`

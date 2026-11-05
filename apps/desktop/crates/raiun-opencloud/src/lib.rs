@@ -42,13 +42,17 @@ mod ordinary_presence_tests;
 
 use std::{
     cell::Cell,
+    collections::HashMap,
     fs::File,
     io::{self, Read, Write},
+    marker::PhantomData,
     path::Path,
+    rc::Rc,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
+    thread::{self, ThreadId},
     time::{Duration, Instant},
 };
 
@@ -56,8 +60,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use percent_encoding::percent_decode_str;
 use quick_xml::{NsReader, events::Event, name::ResolveResult};
 use raiun_core::backend::{
-    CloudBackend, CloudError, CloudSpace, ErrorKind, OperationCancellation, RemoteEntry,
-    WriteCondition,
+    CloudBackend, CloudError, CloudSpace, ErrorKind, OperationCancellation, OrdinaryCreateMetadata,
+    OrdinaryDirectorySnapshot, OrdinaryStatSnapshot, RemoteEntry, WriteCondition,
 };
 use reqwest::{
     Method, Proxy, StatusCode,
@@ -216,6 +220,153 @@ thread_local! {
 
 struct RangeContextGuard(Option<RangeReadContext>);
 
+/// A benign refresh closes admission before waiting for bounded operations.
+/// This is deliberately separate from the token mutex used by every request.
+#[derive(Default)]
+struct BoundedOperationAdmission {
+    state: Mutex<BoundedOperationAdmissionState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct BoundedOperationAdmissionState {
+    active: HashMap<ThreadId, usize>,
+    refreshing: bool,
+}
+
+struct BoundedOperationPermit {
+    admission: Arc<BoundedOperationAdmission>,
+    owner: ThreadId,
+    _same_thread: PhantomData<Rc<()>>,
+}
+
+/// Keeps new bounded metadata/mutation operations out during same-account
+/// token refresh. It grants no authentication or remote mutation authority.
+pub struct BearerRefreshAdmission {
+    admission: Arc<BoundedOperationAdmission>,
+    _same_thread: PhantomData<Rc<()>>,
+}
+
+struct BoundedOperationContext {
+    context: RangeReadContext,
+    // Restore the outer thread-local context before reopening admission.
+    _context: RangeContextGuard,
+    _permit: BoundedOperationPermit,
+}
+
+impl BoundedOperationAdmission {
+    fn wait<'a>(
+        &self,
+        state: MutexGuard<'a, BoundedOperationAdmissionState>,
+        deadline: Instant,
+    ) -> Result<MutexGuard<'a, BoundedOperationAdmissionState>, CloudError> {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                CloudError::new(
+                    ErrorKind::Offline,
+                    "authentication admission deadline elapsed",
+                )
+            })?;
+        self.changed
+            .wait_timeout(state, remaining)
+            .map(|(state, _)| state)
+            .map_err(|_| invalid("authentication admission state unavailable"))
+    }
+
+    fn enter(self: &Arc<Self>, deadline: Instant) -> Result<BoundedOperationPermit, CloudError> {
+        let owner = thread::current().id();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| invalid("authentication admission state unavailable"))?;
+        // Already-admitted synchronous helpers may nest while a refresh is
+        // waiting. Blocking them behind that refresh would deadlock the drain.
+        while state.refreshing && !state.active.contains_key(&owner) {
+            state = self.wait(state, deadline)?;
+        }
+        if Instant::now() >= deadline {
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "authentication admission deadline elapsed",
+            ));
+        }
+        let depth = state.active.entry(owner).or_default();
+        *depth = depth
+            .checked_add(1)
+            .ok_or_else(|| invalid("authentication admission nesting exhausted"))?;
+        Ok(BoundedOperationPermit {
+            admission: Arc::clone(self),
+            owner,
+            _same_thread: PhantomData,
+        })
+    }
+
+    fn refresh(self: &Arc<Self>, deadline: Instant) -> Result<BearerRefreshAdmission, CloudError> {
+        let owner = thread::current().id();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| invalid("authentication admission state unavailable"))?;
+        if state.active.contains_key(&owner) {
+            return Err(invalid(
+                "cannot refresh authentication inside a bounded operation",
+            ));
+        }
+        while state.refreshing {
+            state = self.wait(state, deadline)?;
+        }
+        if Instant::now() >= deadline {
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "authentication admission deadline elapsed",
+            ));
+        }
+        state.refreshing = true;
+        let admission = BearerRefreshAdmission {
+            admission: Arc::clone(self),
+            _same_thread: PhantomData,
+        };
+        while !state.active.is_empty() {
+            // Release the state lock before dropping the admission on errors.
+            state = match self.wait(state, deadline) {
+                Ok(state) => state,
+                Err(error) => {
+                    drop(admission);
+                    return Err(error);
+                }
+            };
+        }
+        drop(state);
+        Ok(admission)
+    }
+}
+
+impl Drop for BoundedOperationPermit {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.admission.state.lock() {
+            if let Some(depth) = state.active.get_mut(&self.owner) {
+                if *depth > 1 {
+                    *depth -= 1;
+                } else {
+                    state.active.remove(&self.owner);
+                }
+            }
+            self.admission.changed.notify_all();
+        }
+    }
+}
+
+impl Drop for BearerRefreshAdmission {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.admission.state.lock() {
+            state.refreshing = false;
+            self.admission.changed.notify_all();
+        }
+    }
+}
+
 impl RangeContextGuard {
     fn enter(context: RangeReadContext) -> Self {
         let previous = ACTIVE_RANGE_CONTEXT.with(|slot| slot.replace(Some(context)));
@@ -335,10 +486,13 @@ pub struct OpenCloudClient {
     http: Client,
     conditional_http: Client,
     async_http: reqwest::Client,
+    // Keep the shared executor alive until this clone's HTTP pool is dropped.
+    body_runtime: Arc<async_body::BodyRuntime>,
     body_idle_timeout: Duration,
     token: Arc<Mutex<String>>,
     authentication: Authentication,
     token_generation: Arc<AtomicU64>,
+    bounded_operation_admission: Arc<BoundedOperationAdmission>,
     initiator_id: String,
     transfer_budget: TransferBudget,
 }
@@ -624,15 +778,18 @@ impl OpenCloudClient {
         let async_http = async_builder.build().map_err(|_| {
             CloudError::new(ErrorKind::Offline, "could not initialize HTTPS body client")
         })?;
+        let body_runtime = async_body::BodyRuntime::new()?;
         Ok(Self {
             server: normalized_server(server),
             http,
             conditional_http,
             async_http,
+            body_runtime,
             body_idle_timeout: async_body::BODY_IDLE_TIMEOUT,
             token: Arc::new(Mutex::new(bearer_token)),
             authentication,
             token_generation: Arc::new(AtomicU64::new(1)),
+            bounded_operation_admission: Arc::new(BoundedOperationAdmission::default()),
             initiator_id: format!("raiun-{}", std::process::id()),
             transfer_budget,
         })
@@ -682,6 +839,25 @@ impl OpenCloudClient {
         *token = bearer_token;
         self.token_generation.store(next, Ordering::Release);
         Ok(())
+    }
+
+    /// Drain only the short ordinary metadata/mutation contexts before a
+    /// benign same-account refresh. Callers must not hold application locks
+    /// needed by those operations while waiting. Immediate security/account
+    /// invalidation continues to use `set_bearer_token` without this admission.
+    pub fn begin_bearer_refresh(&self) -> Result<BearerRefreshAdmission, CloudError> {
+        self.bounded_operation_admission
+            .refresh(Instant::now() + Duration::from_secs(30))
+    }
+
+    /// Compare retained authentication ownership without exposing credentials.
+    pub fn shares_authentication_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.token, &other.token)
+            && Arc::ptr_eq(&self.token_generation, &other.token_generation)
+            && Arc::ptr_eq(
+                &self.bounded_operation_admission,
+                &other.bounded_operation_admission,
+            )
     }
 
     /// Current in-memory bearer generation, captured when a provider lease is
@@ -1013,7 +1189,11 @@ impl OpenCloudClient {
             .map_err(network)?;
         let mut response = checked(response, &[StatusCode::MULTI_STATUS], &token)?;
         let bytes = read_bounded(&mut response, MAX_DAV_RESPONSE as usize)?;
-        parse_multistatus(&bytes, url, logical_path, visit)
+        if depth == "0" {
+            parse_multistatus_with_depth(&bytes, url, logical_path, true, visit)
+        } else {
+            parse_multistatus(&bytes, url, logical_path, visit)
+        }
     }
 
     fn ensure_writable_target(
@@ -1022,6 +1202,16 @@ impl OpenCloudClient {
         target_url: &Url,
         logical_path: &str,
     ) -> Result<RemoteEntry, CloudError> {
+        self.ensure_writable_target_with_root(space, target_url, logical_path)
+            .map(|(target, _)| target)
+    }
+
+    fn ensure_writable_target_with_root(
+        &self,
+        space: &CloudSpace,
+        target_url: &Url,
+        logical_path: &str,
+    ) -> Result<(RemoteEntry, RemoteEntry), CloudError> {
         if space.encrypted {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
@@ -1034,7 +1224,9 @@ impl OpenCloudClient {
                 "OpenCloud Space is read only",
             ));
         }
-        self.ensure_plain_ancestors(space, logical_path, false)?;
+        let context = ACTIVE_RANGE_CONTEXT.with(Cell::get);
+        let (root, parent) =
+            self.ordinary_ancestor_root_and_last_with_context(space, logical_path, false, context)?;
         let mut entry = None;
         let target_result = self.propfind(target_url, "0", logical_path, &mut |value| {
             if entry.is_some() {
@@ -1056,26 +1248,20 @@ impl OpenCloudClient {
         let checked_entry = if let Some(target) = target {
             target
         } else {
+            // This admission just observed the exact ordinary parent while
+            // walking its ancestry. Reuse those facts only inside this call.
+            if let Some(context) = context {
+                self.ensure_context_current(context)?;
+            }
             let parent_path = logical_parent(logical_path);
-            let root_url =
-                Url::parse(&space.dav_url).map_err(|_| invalid("space DAV URL is invalid"))?;
-            let parent_logical = if parent_path == "/" {
-                parent_path.clone()
-            } else {
-                format!("{}/", parent_path)
-            };
-            let parent_url = append_logical_path(&root_url, &parent_logical)?;
-            let mut parent = None;
-            self.propfind(&parent_url, "0", &parent_path, &mut |value| {
-                if parent.is_some() {
-                    return Err(invalid("DAV parent check returned multiple entries"));
-                }
-                parent = Some(value);
-                Ok(())
-            })?;
-            parent.ok_or_else(|| {
-                CloudError::new(ErrorKind::NotFound, "remote parent folder was not found")
-            })?
+            if parent.path.trim_end_matches('/') != parent_path.trim_end_matches('/')
+                || !parent.directory
+                || parent.id.is_empty()
+                || parent.id.chars().any(char::is_control)
+            {
+                return Err(invalid("DAV parent check returned an invalid identity"));
+            }
+            parent
         };
         if checked_entry.encrypted {
             return Err(CloudError::new(
@@ -1089,7 +1275,7 @@ impl OpenCloudClient {
                 "remote folder or item is read only",
             ));
         }
-        Ok(checked_entry)
+        Ok((checked_entry, root))
     }
 
     /// Freshly inspect each ancestor because encryption metadata can appear
@@ -1124,6 +1310,22 @@ impl OpenCloudClient {
         include_self: bool,
         context: Option<RangeReadContext>,
     ) -> Result<RemoteEntry, CloudError> {
+        self.ordinary_ancestor_root_and_last_with_context(
+            space,
+            logical_path,
+            include_self,
+            context,
+        )
+        .map(|(root, _)| root)
+    }
+
+    fn ordinary_ancestor_root_and_last_with_context(
+        &self,
+        space: &CloudSpace,
+        logical_path: &str,
+        include_self: bool,
+        context: Option<RangeReadContext>,
+    ) -> Result<(RemoteEntry, RemoteEntry), CloudError> {
         validate_logical_path(logical_path)?;
         let parts: Vec<_> = logical_path
             .split('/')
@@ -1151,7 +1353,8 @@ impl OpenCloudClient {
             paths.push(prefix.clone());
         }
 
-        let mut root_resource_id = None;
+        let mut root_entry = None;
+        let mut last_entry = None;
         for path in paths {
             let url = append_logical_path(&root_url, &path)?;
             let mut found = None;
@@ -1189,7 +1392,7 @@ impl OpenCloudClient {
                 if entry.id.is_empty() || entry.id.chars().any(char::is_control) {
                     return Err(invalid("Space root identity is invalid"));
                 }
-                root_resource_id = Some(entry.clone());
+                root_entry = Some(entry.clone());
             }
             if !entry.directory {
                 return Err(CloudError::new(
@@ -1197,8 +1400,53 @@ impl OpenCloudClient {
                     "remote path ancestor is not a directory",
                 ));
             }
+            last_entry = Some(entry);
         }
-        root_resource_id.ok_or_else(|| invalid("Space root identity was not checked"))
+        let root = root_entry.ok_or_else(|| invalid("Space root identity was not checked"))?;
+        let last = last_entry.ok_or_else(|| invalid("Space root identity was not checked"))?;
+        Ok((root, last))
+    }
+
+    fn operation_context(&self) -> Result<BoundedOperationContext, CloudError> {
+        // Start the deadline before admission waiting. Preserve an inherited
+        // context's generation even when refresh completes while we wait.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let outer = ACTIVE_RANGE_CONTEXT.with(Cell::get);
+        let deadline = outer.map_or(deadline, |outer| outer.deadline.min(deadline));
+        let permit = self.bounded_operation_admission.enter(deadline)?;
+        let context = outer.map_or_else(
+            || RangeReadContext {
+                deadline,
+                token_generation: self.token_generation(),
+            },
+            |outer| RangeReadContext {
+                deadline: outer.deadline.min(deadline),
+                token_generation: outer.token_generation,
+            },
+        );
+        self.ensure_context_current(context)?;
+        Ok(BoundedOperationContext {
+            context,
+            _context: RangeContextGuard::enter(context),
+            _permit: permit,
+        })
+    }
+
+    fn confirm_operation_root(
+        &self,
+        selected: &CloudSpace,
+        path: &str,
+        expected_root: &str,
+        context: RangeReadContext,
+    ) -> Result<(), CloudError> {
+        self.ensure_context_current(context)?;
+        let root =
+            self.ordinary_ancestor_root_entry_with_context(selected, path, false, Some(context))?;
+        self.ensure_context_current(context)?;
+        if root.id != expected_root {
+            return Err(conflict("Space root identity changed during mutation"));
+        }
+        Ok(())
     }
 
     fn transfer_url(&self, space: &str, path: &str) -> Result<(CloudSpace, Url), CloudError> {
@@ -1454,6 +1702,7 @@ impl OpenCloudClient {
         let expected_size_for_body = expected_size;
         let length_for_body = length;
         let body_result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             transfer_timeout,
             || {
@@ -1815,44 +2064,70 @@ fn ensure_operation_active(operation: Option<&OperationCancellation>) -> Result<
 }
 
 fn transfer_metadata_boundary(error: CloudError, phase: &'static str) -> CloudError {
-    if error.kind == ErrorKind::InvalidResponse
-        && error.message == "DAV response omitted an entity tag"
-    {
+    if let Some(reason) = incomplete_metadata_reason(&error) {
         // Both fragments are local constants. Never include server payloads,
         // request URLs or authentication information in this diagnostic.
-        invalid(&format!("{phase}: DAV response omitted an entity tag"))
+        invalid(&format!("{phase}: {reason}"))
     } else {
         error
+    }
+}
+
+fn incomplete_metadata(error: &CloudError) -> bool {
+    incomplete_metadata_reason(error).is_some()
+}
+
+fn incomplete_metadata_reason(error: &CloudError) -> Option<&'static str> {
+    if error.kind != ErrorKind::InvalidResponse {
+        return None;
+    }
+    match error.message.as_str() {
+        "DAV response omitted an entity tag" => Some("DAV response omitted an entity tag"),
+        "DAV response omitted successful properties" => {
+            Some("DAV response omitted successful properties")
+        }
+        _ => None,
+    }
+}
+
+fn read_metadata_observation<T>(
+    operation: Option<&OperationCancellation>,
+    mut read: impl FnMut() -> Result<T, CloudError>,
+    incomplete: impl Fn(&Result<T, CloudError>) -> Result<bool, CloudError>,
+) -> Result<T, CloudError> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        ensure_operation_active(operation)?;
+        let result = read();
+        ensure_operation_active(operation)?;
+        if !incomplete(&result)? || Instant::now() >= deadline {
+            return result;
+        }
+        // Only metadata observations may be repeated. Their entire scope and
+        // ancestry proof runs again under the caller's original context;
+        // bodies, mutations and journal claims stay outside this loop.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(Duration::from_millis(100)));
+        ensure_operation_active(operation)?;
+        // A caller's original deadline may expire during the delay. Preserve
+        // its completed observation instead of starting a new, failed proof.
+        if !incomplete(&result)? || Instant::now() >= deadline {
+            return result;
+        }
     }
 }
 
 fn read_transfer_metadata(
     operation: Option<&OperationCancellation>,
     phase: &'static str,
-    mut read: impl FnMut() -> Result<RemoteEntry, CloudError>,
+    read: impl FnMut() -> Result<RemoteEntry, CloudError>,
 ) -> Result<RemoteEntry, CloudError> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        ensure_operation_active(operation)?;
-        match read() {
-            Err(error)
-                if error.kind == ErrorKind::InvalidResponse
-                    && error.message == "DAV response omitted an entity tag"
-                    && Instant::now() < deadline =>
-            {
-                // Only metadata reads may be repeated here. All request/root
-                // checks run again; PUT/GET bodies and journal claims remain
-                // outside this loop. Missing or changed validators never pass.
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                std::thread::sleep(remaining.min(Duration::from_millis(100)));
-                ensure_operation_active(operation)?;
-            }
-            result => {
-                ensure_operation_active(operation)?;
-                return result.map_err(|error| transfer_metadata_boundary(error, phase));
-            }
-        }
-    }
+    read_metadata_observation(operation, read, |result| {
+        Ok(result
+            .as_ref()
+            .is_err_and(|error| incomplete_metadata(error)))
+    })
+    .map_err(|error| transfer_metadata_boundary(error, phase))
 }
 
 fn ensure_not_cancelled(is_cancelled: &impl Fn() -> bool) -> Result<(), CloudError> {
@@ -2110,6 +2385,7 @@ impl OpenCloudClient {
         let content_size = content.len() as u64;
         let content = content.to_vec();
         let upload_result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             total_timeout,
             || {
@@ -2210,6 +2486,7 @@ impl OpenCloudClient {
         let expected_etag_owned = expected_etag.to_owned();
         let expected_size = before.size;
         let read_result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             total_timeout,
             || {
@@ -2582,6 +2859,37 @@ impl OpenCloudClient {
                 "Space root changed before transfer; local bytes were preserved",
             ));
         }
+        self.tagged_root_write_condition(selected, &root)
+    }
+
+    fn root_write_condition_after_observation(
+        &self,
+        selected: &CloudSpace,
+        observed_root: &RemoteEntry,
+        expected_root: &str,
+    ) -> Result<String, CloudError> {
+        if observed_root.id != expected_root {
+            return Err(conflict(
+                "Space root changed before transfer; local bytes were preserved",
+            ));
+        }
+        // The ordered ordinary parent chain was just checked in this same
+        // preparation. Refresh only the root for the late tagged condition;
+        // never carry this observation across an operation or into postflight.
+        let root = self.ordinary_ancestor_root_entry_with_context(selected, "/", false, None)?;
+        if root.id != observed_root.id {
+            return Err(conflict(
+                "Space root changed before transfer; local bytes were preserved",
+            ));
+        }
+        self.tagged_root_write_condition(selected, &root)
+    }
+
+    fn tagged_root_write_condition(
+        &self,
+        selected: &CloudSpace,
+        root: &RemoteEntry,
+    ) -> Result<String, CloudError> {
         let etag = root.etag.as_bytes();
         if etag.len() < 2
             || etag.len() > 4096
@@ -2610,6 +2918,113 @@ impl OpenCloudClient {
         // header alone does not establish atomic root/leaf preconditions; the
         // supported server's create-only contract needs separate qualification.
         Ok(format!("<{}> ([{}])", root_url, root.etag))
+    }
+
+    fn mkdir_and_confirm_observation(
+        &self,
+        space: &str,
+        path: &str,
+        preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+        observe_empty: bool,
+    ) -> Result<(RemoteEntry, bool), CloudError> {
+        let operation = self.operation_context()?;
+        let context = operation.context;
+        self.ensure_context_current(context)?;
+        let (selected, url) = self.resolve_dav_with_context(space, path, Some(context))?;
+        self.ensure_context_current(context)?;
+        let (_, root) = self.ensure_writable_target_with_root(&selected, &url, path)?;
+        preflight(&selected, &root)?;
+        self.ensure_context_current(context)?;
+
+        let (request, token) = self.request_with_context(
+            Method::from_bytes(b"MKCOL").expect("static method"),
+            &url,
+            Some(context),
+        )?;
+        let response = request.send().map_err(network)?;
+        checked(response, &[StatusCode::CREATED], &token)?;
+        self.confirm_operation_root(&selected, path, &root.id, context)?;
+
+        // Match the engine's former backend readback plus post-operation stat:
+        // both observations must identify one published directory revision.
+        let first = self.stat_at_dav(&url, path)?;
+        let (verified, observed_empty) = if observe_empty && first.directory && !first.encrypted {
+            self.created_directory_view(&url, path, context)?
+        } else {
+            (self.stat_at_dav(&url, path)?, false)
+        };
+        self.confirm_operation_root(&selected, path, &root.id, context)?;
+        if !first.directory
+            || !verified.directory
+            || first.id.is_empty()
+            || first.id != verified.id
+            || first.etag != verified.etag
+        {
+            return Err(invalid("created directory could not be verified"));
+        }
+        Ok((verified, observed_empty))
+    }
+
+    fn created_directory_view(
+        &self,
+        url: &Url,
+        path: &str,
+        context: RangeReadContext,
+    ) -> Result<(RemoteEntry, bool), CloudError> {
+        let listing = self.ordinary_directory_empty_view(url, path, context);
+        self.ensure_context_current(context)?;
+        match listing {
+            Ok(view) => Ok(view),
+            // The optional view grants no authority. Preserve the former
+            // second exact confirmation if that read-only view is unavailable;
+            // never repeat MKCOL or accept an incomplete empty listing.
+            Err(_) => self.stat_at_dav(url, path).map(|entry| (entry, false)),
+        }
+    }
+
+    fn ordinary_directory_empty_view(
+        &self,
+        url: &Url,
+        path: &str,
+        context: RangeReadContext,
+    ) -> Result<(RemoteEntry, bool), CloudError> {
+        let mut parent = None;
+        let mut has_children = false;
+        let scope = path.trim_end_matches('/');
+        let listing = self
+            .propfind_with_context(
+                url,
+                "1",
+                path,
+                &mut |entry| {
+                    if entry.path.trim_end_matches('/') == scope {
+                        if parent.replace(entry).is_some() {
+                            return Err(invalid(
+                                "ordinary directory view returned multiple self entries",
+                            ));
+                        }
+                    } else if is_direct_child(scope, &entry.path) {
+                        has_children = true;
+                    } else {
+                        return Err(invalid(
+                            "ordinary directory view returned an unrelated entry",
+                        ));
+                    }
+                    Ok(())
+                },
+                Some(context),
+            )
+            .and_then(|()| {
+                parent.ok_or_else(|| invalid("ordinary directory view omitted self metadata"))
+            });
+        self.ensure_context_current(context)?;
+        let entry = listing?;
+        let empty = !has_children
+            && entry.directory
+            && !entry.encrypted
+            && !entry.id.is_empty()
+            && !entry.id.chars().any(char::is_control);
+        Ok((entry, empty))
     }
 
     fn stat_at_dav(&self, url: &Url, path: &str) -> Result<RemoteEntry, CloudError> {
@@ -2704,6 +3119,7 @@ impl OpenCloudClient {
         let total_timeout =
             transfer_timeout_with_budget(&budget, TransferDirection::Download, expected_size);
         let copied = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             total_timeout,
             || {
@@ -2776,6 +3192,146 @@ impl OpenCloudClient {
         Ok(after)
     }
 
+    fn verify_download_with_root_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        expected: &RemoteEntry,
+        expected_sha256: &str,
+        expected_root: &str,
+        operation: &OperationCancellation,
+    ) -> Result<RemoteEntry, CloudError> {
+        if expected.path != path
+            || expected.id.is_empty()
+            || expected.id.len() > MAX_DAV_ENTRY
+            || expected.id.chars().any(char::is_control)
+            || expected.directory
+            || expected.encrypted
+            || !expected.writable
+            || !is_strong_etag(&expected.etag)
+            || HeaderValue::from_str(&expected.etag).is_err()
+            || expected_sha256.len() != 64
+            || !expected_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid("readback expectation is invalid"));
+        }
+        let mut digest = [0u8; 32];
+        for (index, byte) in digest.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&expected_sha256[index * 2..index * 2 + 2], 16)
+                .map_err(|_| invalid("readback digest is invalid"))?;
+        }
+        let budget = self.transfer_budget.clone();
+        let cancellation = budget.cancellation();
+        let total_timeout =
+            transfer_timeout_with_budget(&budget, TransferDirection::Download, expected.size);
+        let context = ACTIVE_RANGE_CONTEXT
+            .with(Cell::get)
+            .unwrap_or(RangeReadContext {
+                deadline: Instant::now() + total_timeout,
+                token_generation: self.token_generation(),
+            });
+        let _guard = RangeContextGuard::enter(context);
+        let active = || {
+            ensure_operation_active(Some(operation))?;
+            self.ensure_context_current(context)?;
+            ensure_not_cancelled(&|| cancellation.is_cancelled() || budget.is_paused())
+        };
+        active()?;
+        let (mut selected, url) = self.transfer_url(space, path)?;
+        active()?;
+        if !selected.writable {
+            return Err(CloudError::new(
+                ErrorKind::Forbidden,
+                "OpenCloud Space is read only",
+            ));
+        }
+        selected.dav_url = self
+            .validate_identity_addressed_root(&selected, expected_root)?
+            .to_string();
+        // Use the ordinary download metadata route: one root/ancestor chain
+        // and one leaf stat per phase, without recovery's repeated discovery.
+        let observe = || {
+            active()?;
+            self.check_transfer_root(&selected, path, Some(expected_root))?;
+            active()?;
+            let entry = self.stat_at_dav(&url, path)?;
+            active()?;
+            validate_range_identity(&entry, &expected.id, &expected.etag, expected.size)?;
+            if entry.path != expected.path || entry.directory || entry.encrypted || !entry.writable
+            {
+                return Err(conflict("readback identity or role changed"));
+            }
+            Ok(entry)
+        };
+        read_transfer_metadata(Some(operation), "Readback initial metadata", observe)?;
+        active()?;
+        let (request, token) = self.request_async(Method::GET, &url)?;
+        let timeout = transfer_timeout_for_context(
+            context,
+            &budget,
+            TransferDirection::Download,
+            expected.size,
+        )?;
+        let body_budget = budget.clone();
+        let body_cancellation = cancellation.clone();
+        let body_operation = operation.clone();
+        let generation = Arc::clone(&self.token_generation);
+        let result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
+            self.body_idle_timeout,
+            timeout,
+            || {
+                operation.is_cancelled()
+                    || cancellation.is_cancelled()
+                    || budget.is_paused()
+                    || self.token_generation() != context.token_generation
+            },
+            move |progress| async move {
+                let response = request
+                    .header(IF_MATCH, &expected.etag)
+                    .header("Cache-Control", "no-cache")
+                    .timeout(timeout)
+                    .send()
+                    .await
+                    .map_err(network)?;
+                let mut response = checked_async(response, &[StatusCode::OK], &token)?;
+                if response.content_length() != Some(expected.size)
+                    || response.headers().contains_key(CONTENT_RANGE)
+                    || response
+                        .headers()
+                        .get(ETAG)
+                        .and_then(|value| value.to_str().ok())
+                        != Some(expected.etag.as_str())
+                {
+                    return Err(conflict("readback length or revision changed"));
+                }
+                let observed = async_body::hash_response_body(
+                    &mut response,
+                    expected.size,
+                    &body_budget,
+                    || {
+                        body_operation.is_cancelled()
+                            || body_cancellation.is_cancelled()
+                            || generation.load(Ordering::Acquire) != context.token_generation
+                    },
+                    &progress,
+                )
+                .await?;
+                if observed != digest {
+                    return Err(conflict("readback content did not match"));
+                }
+                Ok(())
+            },
+        );
+        active()?;
+        result?;
+        let after = read_transfer_metadata(Some(operation), "Readback final metadata", observe)?;
+        active()?;
+        Ok(after)
+    }
+
     fn upload_with_root(
         &self,
         space: &str,
@@ -2797,31 +3353,83 @@ impl OpenCloudClient {
         operation: Option<&OperationCancellation>,
     ) -> Result<RemoteEntry, CloudError> {
         ensure_operation_active(operation)?;
-        let (mut selected, url) = self.transfer_url(space, path)?;
-        ensure_operation_active(operation)?;
-        if let Some(root) = expected_root {
-            selected.dav_url = self
-                .validate_identity_addressed_root(&selected, root)?
-                .to_string();
-        }
-        ensure_operation_active(operation)?;
-        let target = self
-            .ensure_writable_target(&selected, &url, path)
-            .map_err(|error| transfer_metadata_boundary(error, "Upload target metadata"))?;
-        if let WriteCondition::Match(etag) = &condition {
-            if !is_strong_etag(etag) {
-                return Err(invalid("conditional upload requires a strong entity tag"));
+        let (selected, url, root_condition, context) = {
+            let preparation = self.operation_context()?;
+            let context = preparation.context;
+            ensure_operation_active(operation)?;
+            let (mut selected, url) = self.transfer_url(space, path)?;
+            ensure_operation_active(operation)?;
+            if let Some(root) = expected_root {
+                selected.dav_url = self
+                    .validate_identity_addressed_root(&selected, root)?
+                    .to_string();
             }
-            require_directory_mutation_validator(&target, path)?;
-        }
-        ensure_operation_active(operation)?;
-        let root_condition = expected_root
-            .map(|root| self.root_write_condition(&selected, path, root))
-            .transpose()?;
+            ensure_operation_active(operation)?;
+            let (target, observed_root) = self
+                .ensure_writable_target_with_root(&selected, &url, path)
+                .map_err(|error| transfer_metadata_boundary(error, "Upload target metadata"))?;
+            if let WriteCondition::Match(etag) = &condition {
+                if !is_strong_etag(etag) {
+                    return Err(invalid("conditional upload requires a strong entity tag"));
+                }
+                require_directory_mutation_validator(&target, path)?;
+            }
+            ensure_operation_active(operation)?;
+            let root_condition = expected_root
+                .map(|root| {
+                    self.root_write_condition_after_observation(&selected, &observed_root, root)
+                })
+                .transpose()?;
+            self.ensure_context_current(context)?;
+            ensure_operation_active(operation)?;
+            (selected, url, root_condition, context)
+        };
+        self.upload_prepared(
+            space,
+            path,
+            source,
+            condition,
+            expected_root,
+            operation,
+            selected,
+            url,
+            root_condition,
+            context,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upload_prepared(
+        &self,
+        space: &str,
+        path: &str,
+        source: &Path,
+        condition: WriteCondition,
+        expected_root: Option<&str>,
+        operation: Option<&OperationCancellation>,
+        selected: CloudSpace,
+        url: Url,
+        root_condition: Option<String>,
+        preparation_context: RangeReadContext,
+        is_current: Option<&dyn Fn() -> bool>,
+    ) -> Result<RemoteEntry, CloudError> {
+        let current = || {
+            ensure_operation_active(operation)?;
+            if is_current.is_some_and(|check| !check()) {
+                return Err(conflict("create context changed"));
+            }
+            Ok(())
+        };
+        // The short metadata guard has ended. Pin request construction to its
+        // generation/deadline without applying that deadline to the body.
+        self.ensure_context_current(preparation_context)?;
         ensure_operation_active(operation)?;
         let file = File::open(source).map_err(io_error)?;
         let size = file.metadata().map_err(io_error)?.len();
-        let (mut request, token) = self.request_async(Method::PUT, &url)?;
+        current()?;
+        let (mut request, token) =
+            self.request_async_with_context(Method::PUT, &url, Some(preparation_context))?;
         if let Some(condition) = root_condition {
             request = request
                 .header("If", condition)
@@ -2840,15 +3448,29 @@ impl OpenCloudClient {
         let body_operation = operation.cloned();
         let total_timeout = transfer_timeout_with_budget(&budget, TransferDirection::Upload, size);
         let response_token = token.clone();
+        let generation = self.token_generation.clone();
+        self.ensure_context_current(preparation_context)?;
+        current()?;
         async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             total_timeout,
             || {
                 watchdog_cancellation.is_cancelled()
                     || operation.is_some_and(OperationCancellation::is_cancelled)
+                    || self.token_generation() != preparation_context.token_generation
             },
             move |progress| async move {
+                if is_current.is_some_and(|check| !check()) {
+                    return Err(conflict("create context changed"));
+                }
                 ensure_operation_active(body_operation.as_ref())?;
+                if generation.load(Ordering::Acquire) != preparation_context.token_generation {
+                    return Err(CloudError::new(
+                        ErrorKind::Unauthorized,
+                        "authenticated provider generation changed",
+                    ));
+                }
                 let body = async_body::budgeted_upload_stream(
                     tokio::fs::File::from_std(file),
                     size,
@@ -2858,6 +3480,8 @@ impl OpenCloudClient {
                             || body_operation
                                 .as_ref()
                                 .is_some_and(OperationCancellation::is_cancelled)
+                            || generation.load(Ordering::Acquire)
+                                != preparation_context.token_generation
                     },
                     progress,
                 );
@@ -2876,17 +3500,38 @@ impl OpenCloudClient {
             },
         )?;
         ensure_operation_active(operation)?;
+        if self.token_generation() != preparation_context.token_generation {
+            return Err(CloudError::new(
+                ErrorKind::Unauthorized,
+                "authenticated provider generation changed",
+            ));
+        }
+        // Begin a separate bounded metadata phase after the body. Its deadline
+        // must not be the short preparation deadline, but its generation must
+        // still be the one that admitted and sent this upload.
+        let postflight = self.operation_context()?;
+        let post_context = postflight.context;
+        if post_context.token_generation != preparation_context.token_generation {
+            return Err(CloudError::new(
+                ErrorKind::Unauthorized,
+                "authenticated provider generation changed",
+            ));
+        }
         // PUT is never repeated. Some servers publish a new file before its
         // revision metadata; wait briefly for a verifiable revision instead
         // of turning that observation into an uncertain completed upload.
         let entry = read_transfer_metadata(operation, "Upload final metadata", || {
-            if expected_root.is_some() {
+            self.ensure_context_current(post_context)?;
+            let result = if expected_root.is_some() {
                 self.check_transfer_root(&selected, path, expected_root)?;
                 self.stat_at_dav(&url, path)
             } else {
                 self.stat(space, path)
-            }
+            };
+            self.ensure_context_current(post_context)?;
+            result
         })?;
+        self.ensure_context_current(post_context)?;
         ensure_operation_active(operation)?;
         if entry.size != size {
             return Err(invalid("uploaded file failed size verification"));
@@ -2898,6 +3543,10 @@ impl OpenCloudClient {
 impl CloudBackend for OpenCloudClient {
     fn server_origin(&self) -> Option<String> {
         Some(self.server.origin().ascii_serialization())
+    }
+
+    fn read_only_generation(&self) -> Option<u64> {
+        Some(self.token_generation())
     }
 
     fn spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
@@ -2920,13 +3569,398 @@ impl CloudBackend for OpenCloudClient {
         );
         let _guard = RangeContextGuard::enter(context);
         self.ensure_context_current(context)?;
-        let (selected, url) = self.resolve_dav_with_context(space, "/", Some(context))?;
-        // Preserve stat's ordinary-ancestry and exact root response checks;
-        // only its second Graph discovery is removed.
-        self.ensure_plain_ancestors_with_context(&selected, "/", false, Some(context))?;
-        let root = self.stat_at_dav(&url, "/")?;
+        let (selected, _) = self.resolve_dav_with_context(space, "/", Some(context))?;
+        // The ordinary ancestry check returns the exact root entry, so do not
+        // issue a second PROPFIND for the same root URL.
+        let root =
+            self.ordinary_ancestor_root_entry_with_context(&selected, "/", false, Some(context))?;
         self.ensure_context_current(context)?;
         Ok((selected, root))
+    }
+
+    fn ordinary_stat_snapshot(
+        &self,
+        space: &str,
+        path: &str,
+    ) -> Result<OrdinaryStatSnapshot, CloudError> {
+        validate_logical_path(path)?;
+        let operation = self.operation_context()?;
+        let context = operation.context;
+        let result = read_metadata_observation(
+            None,
+            || {
+                self.ensure_context_current(context)?;
+                let result = (|| {
+                    self.ensure_context_current(context)?;
+                    let (selected, url) =
+                        self.resolve_dav_with_context(space, path, Some(context))?;
+                    self.ensure_context_current(context)?;
+                    let root_url = Url::parse(&selected.dav_url)
+                        .map_err(|_| invalid("space DAV URL is invalid"))?;
+                    let root = self.stat_at_dav(&append_logical_path(&root_url, "/")?, "/")?;
+                    if selected.id != space {
+                        return Err(invalid("ordinary Space root identity is invalid"));
+                    }
+                    if selected.encrypted || root.encrypted {
+                        return Err(CloudError::new(
+                            ErrorKind::Unsupported,
+                            "encrypted vault folders are unavailable to ordinary DAV operations",
+                        ));
+                    }
+                    if !root.directory {
+                        return Err(CloudError::new(
+                            ErrorKind::Unsupported,
+                            "remote path ancestor is not a directory",
+                        ));
+                    }
+                    if root.path != "/"
+                        || root.id.is_empty()
+                        || root.id.chars().any(char::is_control)
+                    {
+                        return Err(invalid("ordinary Space root identity is invalid"));
+                    }
+                    self.ensure_context_current(context)?;
+                    if path == "/" {
+                        return Ok(OrdinaryStatSnapshot {
+                            space: selected,
+                            root: root.clone(),
+                            observed_parent: Some(root.clone()),
+                            target: Ok(root.clone()),
+                        });
+                    }
+                    let mut observed_parent = None;
+                    let mut target = {
+                        (|| {
+                            let parts: Vec<_> =
+                                path.split('/').filter(|part| !part.is_empty()).collect();
+                            if parts.len() > MAX_VAULT_GUARD_DEPTH {
+                                return Err(CloudError::new(
+                                    ErrorKind::Unsupported,
+                                    "remote path exceeds the vault metadata guard depth limit",
+                                ));
+                            }
+                            let mut logical_ancestor = String::new();
+                            let mut parent = root.clone();
+                            for part in parts.iter().take(parts.len().saturating_sub(1)) {
+                                logical_ancestor.push('/');
+                                logical_ancestor.push_str(part);
+                                let ancestor_url =
+                                    append_logical_path(&root_url, &logical_ancestor)?;
+                                let ancestor = match self
+                                    .stat_at_dav(&ancestor_url, &logical_ancestor)
+                                {
+                                    Err(error) if error.kind == ErrorKind::NotFound => {
+                                        return Err(CloudError::new(
+                                            ErrorKind::Unsupported,
+                                            "could not confirm that the remote parent is ordinary content",
+                                        ));
+                                    }
+                                    result => result?,
+                                };
+                                if ancestor.path.trim_end_matches('/')
+                                    != logical_ancestor.trim_end_matches('/')
+                                {
+                                    return Err(invalid(
+                                        "vault ancestor check returned an item other than the requested path",
+                                    ));
+                                }
+                                if ancestor.encrypted {
+                                    return Err(CloudError::new(
+                                        ErrorKind::Unsupported,
+                                        "encrypted vault folders are unavailable to ordinary DAV operations",
+                                    ));
+                                }
+                                if !ancestor.directory {
+                                    return Err(CloudError::new(
+                                        ErrorKind::Unsupported,
+                                        "remote path ancestor is not a directory",
+                                    ));
+                                }
+                                parent = ancestor;
+                            }
+                            observed_parent = Some(parent);
+                            self.stat_at_dav(&url, path).and_then(|entry| {
+                                if entry.path.trim_end_matches('/') != path.trim_end_matches('/') {
+                                    Err(invalid(
+                                        "DAV stat returned an item other than the requested path",
+                                    ))
+                                } else {
+                                    Ok(entry)
+                                }
+                            })
+                        })()
+                    };
+                    if let Err(error) = self.ensure_context_current(context) {
+                        if error.kind != ErrorKind::Offline {
+                            return Err(error);
+                        }
+                        if !matches!(&target, Err(existing) if existing.kind != ErrorKind::Offline)
+                        {
+                            target = Err(error);
+                        }
+                    }
+                    Ok(OrdinaryStatSnapshot {
+                        space: selected,
+                        root,
+                        observed_parent,
+                        target,
+                    })
+                })();
+                if self.token_generation() != context.token_generation {
+                    return Err(CloudError::new(
+                        ErrorKind::Unauthorized,
+                        "authenticated provider generation changed or expired",
+                    ));
+                }
+                result
+            },
+            |result| {
+                if self.token_generation() != context.token_generation {
+                    return Err(CloudError::new(
+                        ErrorKind::Unauthorized,
+                        "authenticated provider generation changed or expired",
+                    ));
+                }
+                Ok(context.remaining().is_ok()
+                    && match result {
+                        Err(error) => incomplete_metadata(error),
+                        Ok(snapshot) => snapshot
+                            .target
+                            .as_ref()
+                            .is_err_and(|error| incomplete_metadata(error)),
+                    })
+            },
+        );
+        // Keep fresh-root target errors inside the snapshot: Engine uses this
+        // distinction for its scoped pending and offline-cache overlays.
+        result
+            .map(|mut snapshot| {
+                snapshot.target = snapshot
+                    .target
+                    .map_err(|error| transfer_metadata_boundary(error, "Ordinary point metadata"));
+                snapshot
+            })
+            .map_err(|error| transfer_metadata_boundary(error, "Ordinary point metadata"))
+    }
+
+    fn ordinary_create_metadata(
+        &self,
+        space: &str,
+        path: &str,
+        expected_root: Option<&str>,
+        expected_parent: Option<&str>,
+        observe_target: bool,
+        is_current: &dyn Fn() -> bool,
+    ) -> Result<OrdinaryCreateMetadata, CloudError> {
+        validate_logical_path(path)?;
+        if path == "/" || path.ends_with('/') || is_vault_path(path) {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "ordinary create path is invalid or encrypted",
+            ));
+        }
+        let parts: Vec<_> = path.split('/').filter(|part| !part.is_empty()).collect();
+        if parts.len() > MAX_VAULT_GUARD_DEPTH {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "remote path exceeds the vault metadata guard depth limit",
+            ));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let context = ACTIVE_RANGE_CONTEXT.with(Cell::get).map_or_else(
+            || RangeReadContext {
+                deadline,
+                token_generation: self.token_generation(),
+            },
+            |outer| RangeReadContext {
+                deadline: outer.deadline.min(deadline),
+                token_generation: outer.token_generation,
+            },
+        );
+        let _guard = RangeContextGuard::enter(context);
+        let check_current = || {
+            if !is_current() {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "create context changed",
+                ));
+            }
+            self.ensure_context_current(context)
+        };
+        check_current()?;
+        let (selected, _) = self.resolve_dav_with_context(space, path, Some(context))?;
+        check_current()?;
+        if selected.encrypted {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "encrypted Spaces are unavailable to ordinary DAV operations",
+            ));
+        }
+        if !selected.writable {
+            return Err(CloudError::new(
+                ErrorKind::Forbidden,
+                "OpenCloud Space is read only",
+            ));
+        }
+        let root_url =
+            Url::parse(&selected.dav_url).map_err(|_| invalid("space DAV URL is invalid"))?;
+        if !same_origin(&self.server, &root_url)
+            || root_url.query().is_some()
+            || root_url.fragment().is_some()
+        {
+            return Err(invalid("Space DAV URL is outside the configured origin"));
+        }
+
+        let root = self.stat_at_dav(&append_logical_path(&root_url, "/")?, "/")?;
+        check_current()?;
+        validate_ordinary_create_directory(&root, "/")?;
+        if expected_root.is_some_and(|expected| root.id != expected) {
+            return Err(conflict("Space root identity changed"));
+        }
+
+        let mut ancestors = Vec::with_capacity(parts.len().saturating_sub(1));
+        let mut logical_parent = String::new();
+        for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            check_current()?;
+            logical_parent.push('/');
+            logical_parent.push_str(part);
+            let ancestor = self.stat_at_dav(
+                &append_logical_path(&root_url, &logical_parent)?,
+                &logical_parent,
+            )?;
+            check_current()?;
+            validate_ordinary_create_directory(&ancestor, &logical_parent)?;
+            ancestors.push(ancestor);
+        }
+        let actual_parent_id = ancestors
+            .last()
+            .map(|entry| entry.id.as_str())
+            .unwrap_or(root.id.as_str());
+        if expected_parent.is_some_and(|expected| expected != actual_parent_id) {
+            return Err(conflict("ordinary create parent identity changed"));
+        }
+
+        let target = if observe_target {
+            check_current()?;
+            match self.stat_at_dav(&append_logical_path(&root_url, path)?, path) {
+                Ok(entry) => Some(entry),
+                Err(error) if error.kind == ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        check_current()?;
+        Ok(OrdinaryCreateMetadata {
+            space: selected,
+            root,
+            ancestors,
+            target,
+        })
+    }
+
+    fn directory_snapshot(
+        &self,
+        space: &str,
+        path: &str,
+        expected_parent_id: Option<&str>,
+    ) -> Result<OrdinaryDirectorySnapshot, CloudError> {
+        validate_logical_path(path)?;
+        let operation = self.operation_context()?;
+        let context = operation.context;
+        let result = read_metadata_observation(
+            None,
+            || {
+                self.ensure_context_current(context)?;
+                let result = (|| {
+                    self.ensure_context_current(context)?;
+                    let (selected, url) =
+                        self.resolve_dav_with_context(space, path, Some(context))?;
+                    self.ensure_context_current(context)?;
+                    let (root, parent) = self.ordinary_ancestor_root_and_last_with_context(
+                        &selected,
+                        path,
+                        true,
+                        Some(context),
+                    )?;
+                    if selected.id != space
+                        || selected.encrypted
+                        || root.path != "/"
+                        || !root.directory
+                        || root.encrypted
+                        || !parent.directory
+                        || parent.encrypted
+                        || parent.path.trim_end_matches('/') != path.trim_end_matches('/')
+                        || expected_parent_id.is_some_and(|expected| expected != parent.id)
+                    {
+                        return Err(conflict("ordinary directory identity changed"));
+                    }
+                    self.ensure_context_current(context)?;
+
+                    let scope = path.trim_end_matches('/');
+                    let mut entries = Vec::new();
+                    let mut metadata_bytes = 0usize;
+                    let mut observed_parent = None;
+                    self.propfind_with_context(
+                        &url,
+                        "1",
+                        path,
+                        &mut |entry| {
+                            if entry.path.trim_end_matches('/') == scope {
+                                if observed_parent.is_some() {
+                                    return Err(invalid("DAV listing returned multiple parent entries"));
+                                }
+                                observed_parent = Some(entry);
+                            } else {
+                                if !is_direct_child(scope, &entry.path) {
+                                    return Err(invalid(
+                                        "DAV listing returned an item outside the requested directory",
+                                    ));
+                                }
+                                if entries.len() >= MAX_ENTRIES {
+                                    return Err(invalid("DAV listing exceeds its entry limit"));
+                                }
+                                metadata_bytes = metadata_bytes
+                                    .saturating_add(entry.id.len())
+                                    .saturating_add(entry.etag.len())
+                                    .saturating_add(entry.path.len());
+                                if metadata_bytes > 32 * 1024 * 1024 {
+                                    return Err(invalid("DAV listing metadata exceeds the 32 MiB limit"));
+                                }
+                                entries.push(entry);
+                            }
+                            Ok(())
+                        },
+                        Some(context),
+                    )?;
+                    self.ensure_context_current(context)?;
+                    let listed_parent = observed_parent
+                        .ok_or_else(|| invalid("DAV listing omitted the requested directory"))?;
+                    if !listed_parent.directory
+                        || listed_parent.encrypted
+                        || listed_parent.path.trim_end_matches('/') != scope
+                        || listed_parent.id != parent.id
+                    {
+                        return Err(conflict("ordinary directory changed during listing"));
+                    }
+                    Ok(OrdinaryDirectorySnapshot {
+                        space: selected,
+                        root,
+                        parent,
+                        entries,
+                    })
+                })();
+                self.ensure_context_current(context)?;
+                result
+            },
+            |result| {
+                Ok(result
+                    .as_ref()
+                    .is_err_and(|error| incomplete_metadata(error)))
+            },
+        );
+        result.map_err(|error| transfer_metadata_boundary(error, "Ordinary directory metadata"))
     }
 
     fn list(
@@ -3051,6 +4085,94 @@ impl CloudBackend for OpenCloudClient {
             Some(cancellation),
         )
     }
+    #[allow(clippy::too_many_arguments)]
+    fn upload_new_in_root_with_preflight(
+        &self,
+        space: &str,
+        path: &str,
+        source: &Path,
+        expected_root: &str,
+        expected_parent: &str,
+        cancellation: &OperationCancellation,
+        is_current: &dyn Fn() -> bool,
+        claim: &dyn Fn(&OrdinaryCreateMetadata) -> Result<bool, CloudError>,
+    ) -> Result<Option<RemoteEntry>, CloudError> {
+        let current = || {
+            ensure_operation_active(Some(cancellation))?;
+            if !is_current() {
+                return Err(conflict("create context changed"));
+            }
+            Ok(())
+        };
+        current()?;
+        let (selected, url, root_condition, context) = {
+            let preparation = self.operation_context()?;
+            let context = preparation.context;
+            // Only the fresh read observation may repeat. The durable local
+            // claim and conditional PUT remain strictly outside this loop.
+            let (observation, url, root_condition) = read_metadata_observation(
+                Some(cancellation),
+                || {
+                    current()?;
+                    self.ensure_context_current(context)?;
+                    let observation = self.ordinary_create_metadata(
+                        space,
+                        path,
+                        Some(expected_root),
+                        Some(expected_parent),
+                        true,
+                        &|| !cancellation.is_cancelled() && is_current(),
+                    )?;
+                    if observation.target.is_some() {
+                        return Err(conflict("create target already exists"));
+                    }
+                    let root_url =
+                        self.validate_identity_addressed_root(&observation.space, expected_root)?;
+                    let url = append_logical_path(&root_url, path)?;
+                    let root_condition = self.root_write_condition_after_observation(
+                        &observation.space,
+                        &observation.root,
+                        expected_root,
+                    )?;
+                    current()?;
+                    self.ensure_context_current(context)?;
+                    Ok((observation, url, root_condition))
+                },
+                |result| {
+                    current()?;
+                    self.ensure_context_current(context)?;
+                    Ok(result
+                        .as_ref()
+                        .is_err_and(|error| incomplete_metadata(error)))
+                },
+            )
+            .map_err(|error| transfer_metadata_boundary(error, "Upload target metadata"))?;
+            current()?;
+            self.ensure_context_current(context)?;
+            if !claim(&observation)? {
+                return Ok(None);
+            }
+            current()?;
+            self.ensure_context_current(context)?;
+            (observation.space, url, root_condition, context)
+        };
+        current()?;
+        self.upload_prepared(
+            space,
+            path,
+            source,
+            WriteCondition::Absent,
+            Some(expected_root),
+            Some(cancellation),
+            selected,
+            url,
+            Some(root_condition),
+            context,
+            Some(is_current),
+        )
+        .map(Some)
+    }
+
     fn download_in_root_with_cancellation(
         &self,
         space: &str,
@@ -3069,6 +4191,26 @@ impl CloudBackend for OpenCloudClient {
             Some(cancellation),
         )
     }
+    fn verify_download_in_root_with_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        expected: &RemoteEntry,
+        expected_sha256: &str,
+        expected_root: &str,
+        cancellation: &OperationCancellation,
+    ) -> Result<Option<RemoteEntry>, CloudError> {
+        self.verify_download_with_root_cancellation(
+            space,
+            path,
+            expected,
+            expected_sha256,
+            expected_root,
+            cancellation,
+        )
+        .map(Some)
+    }
+
     fn mkdir(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
         let (selected, url) = self.transfer_url(space, path)?;
         self.ensure_writable_target(&selected, &url, path)?;
@@ -3077,6 +4219,29 @@ impl CloudBackend for OpenCloudClient {
         let response = request.send().map_err(network)?;
         checked(response, &[StatusCode::CREATED], &token)?;
         self.stat(space, path)
+    }
+
+    fn mkdir_and_confirm(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
+        self.mkdir_and_confirm_with_preflight(space, path, &|_, _| Ok(()))
+    }
+
+    fn mkdir_and_confirm_with_preflight(
+        &self,
+        space: &str,
+        path: &str,
+        preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+    ) -> Result<RemoteEntry, CloudError> {
+        self.mkdir_and_confirm_observation(space, path, preflight, false)
+            .map(|(entry, _)| entry)
+    }
+
+    fn mkdir_and_confirm_with_preflight_and_view(
+        &self,
+        space: &str,
+        path: &str,
+        preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+    ) -> Result<(RemoteEntry, bool), CloudError> {
+        self.mkdir_and_confirm_observation(space, path, preflight, true)
     }
 
     fn delete(&self, space: &str, path: &str, expected_etag: &str) -> Result<(), CloudError> {
@@ -3101,6 +4266,187 @@ impl CloudBackend for OpenCloudClient {
             .map_err(network)?;
         checked(response, &[StatusCode::NO_CONTENT, StatusCode::OK], &token)?;
         Ok(())
+    }
+
+    fn supports_empty_directory_delete(&self) -> bool {
+        true
+    }
+
+    fn delete_empty_directory_and_confirm_with_preflight(
+        &self,
+        space: &str,
+        path: &str,
+        expected_resource_id: &str,
+        preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+    ) -> Result<(), CloudError> {
+        if path.is_empty() || path.bytes().all(|byte| byte == b'/') {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot delete a cloud Space root",
+            ));
+        }
+        if expected_resource_id.is_empty()
+            || expected_resource_id.len() > MAX_DAV_ENTRY
+            || expected_resource_id.chars().any(char::is_control)
+        {
+            return Err(invalid(
+                "empty-directory deletion requires exact resource identity",
+            ));
+        }
+        let operation = self.operation_context()?;
+        let context = operation.context;
+        // Metadata re-observation stays wholly before preflight and DELETE.
+        // Every attempt repeats the complete fresh proof in this one context.
+        // A directory's revision changes with child operations. Rmdir binds
+        // its conditional send to this fresh self observation, not an old
+        // provider metadata revision; exact resource identity remains pinned.
+        let (selected, url, root, fresh_etag) = read_metadata_observation(
+            None,
+            || {
+                self.ensure_context_current(context)?;
+                let observed = (|| {
+                    let (selected, url) =
+                        self.resolve_dav_with_context(space, path, Some(context))?;
+                    if selected.id != space {
+                        return Err(invalid("ordinary directory Space identity changed"));
+                    }
+                    if selected.encrypted {
+                        return Err(CloudError::new(
+                            ErrorKind::Unsupported,
+                            "encrypted Spaces are unavailable to ordinary directory deletion",
+                        ));
+                    }
+                    if !selected.writable {
+                        return Err(CloudError::new(
+                            ErrorKind::Forbidden,
+                            "OpenCloud Space is read only",
+                        ));
+                    }
+                    let (root, target) = self.ordinary_ancestor_root_and_last_with_context(
+                        &selected,
+                        path,
+                        true,
+                        Some(context),
+                    )?;
+                    if target.path.trim_end_matches('/') != path.trim_end_matches('/')
+                        || target.id != expected_resource_id
+                        || !target.directory
+                        || target.encrypted
+                    {
+                        return Err(conflict("ordinary directory identity changed"));
+                    }
+                    if !target.writable {
+                        return Err(CloudError::new(
+                            ErrorKind::Forbidden,
+                            "remote folder or item is read only",
+                        ));
+                    }
+                    require_directory_mutation_validator(&target, path)?;
+                    let (listed, empty) =
+                        self.ordinary_directory_empty_view(&url, path, context)?;
+                    require_directory_mutation_validator(&listed, path)?;
+                    if listed.id != target.id
+                        || listed.etag != target.etag
+                        || listed.path.trim_end_matches('/') != path.trim_end_matches('/')
+                        || !listed.directory
+                        || listed.encrypted
+                    {
+                        return Err(conflict("ordinary directory changed during empty check"));
+                    }
+                    if !listed.writable {
+                        return Err(CloudError::new(
+                            ErrorKind::Forbidden,
+                            "remote folder or item is read only",
+                        ));
+                    }
+                    if !empty {
+                        return Err(conflict("directory is not empty"));
+                    }
+                    Ok((selected, url, root, target.etag))
+                })();
+                self.ensure_context_current(context)?;
+                observed
+            },
+            |result| {
+                Ok(result
+                    .as_ref()
+                    .is_err_and(|error| incomplete_metadata(error)))
+            },
+        )
+        .map_err(|error| transfer_metadata_boundary(error, "Empty directory delete metadata"))?;
+        preflight(&selected, &root)?;
+        self.ensure_context_current(context)?;
+        let (request, token) = self.request_with_context(Method::DELETE, &url, Some(context))?;
+        let response = request
+            .header(IF_MATCH, fresh_etag)
+            .send()
+            .map_err(network)?;
+        checked(response, &[StatusCode::NO_CONTENT, StatusCode::OK], &token)?;
+        self.confirm_operation_root(&selected, path, &root.id, context)?;
+        match self.stat_at_dav(&url, path) {
+            Err(error) if error.kind == ErrorKind::NotFound => {
+                self.ensure_context_current(context)?;
+                Ok(())
+            }
+            Ok(_) => Err(invalid("deleted item is still present")),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn delete_and_confirm(
+        &self,
+        space: &str,
+        path: &str,
+        expected_etag: &str,
+    ) -> Result<(), CloudError> {
+        self.delete_and_confirm_with_preflight(space, path, expected_etag, &|_, _| Ok(()))
+    }
+
+    fn delete_and_confirm_with_preflight(
+        &self,
+        space: &str,
+        path: &str,
+        expected_etag: &str,
+        preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+    ) -> Result<(), CloudError> {
+        if path.is_empty() || path.bytes().all(|byte| byte == b'/') {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot delete a cloud Space root",
+            ));
+        }
+        if !is_strong_etag(expected_etag) {
+            return Err(invalid("conditional delete requires a strong entity tag"));
+        }
+        let operation = self.operation_context()?;
+        let context = operation.context;
+        self.ensure_context_current(context)?;
+        let (selected, url) = self.resolve_dav_with_context(space, path, Some(context))?;
+        self.ensure_context_current(context)?;
+        let (target, root) = self.ensure_writable_target_with_root(&selected, &url, path)?;
+        require_directory_mutation_validator(&target, path)?;
+        preflight(&selected, &root)?;
+        self.ensure_context_current(context)?;
+
+        let (request, token) = self.request_with_context(Method::DELETE, &url, Some(context))?;
+        let response = request
+            .header(IF_MATCH, expected_etag)
+            .send()
+            .map_err(network)?;
+        checked(response, &[StatusCode::NO_CONTENT, StatusCode::OK], &token)?;
+
+        self.confirm_operation_root(&selected, path, &root.id, context)?;
+        match self.stat_at_dav(&url, path) {
+            Err(error) if error.kind == ErrorKind::NotFound => {
+                self.ensure_context_current(context)?;
+                Ok(())
+            }
+            Ok(_) => Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "deleted item is still present",
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     fn rename(
@@ -3196,6 +4542,7 @@ fn append_logical_path(root: &Url, path: &str) -> Result<Url, CloudError> {
             segments.push("");
         }
     }
+
     Ok(out)
 }
 
@@ -3212,9 +4559,47 @@ fn validate_logical_path(path: &str) -> Result<(), CloudError> {
     Ok(())
 }
 
+fn validate_ordinary_create_directory(entry: &RemoteEntry, path: &str) -> Result<(), CloudError> {
+    if entry.path != path {
+        return Err(invalid(
+            "DAV stat returned an item other than the requested path",
+        ));
+    }
+    if entry.id.is_empty()
+        || entry.id.len() > MAX_DAV_ENTRY
+        || entry.id.chars().any(char::is_control)
+    {
+        return Err(invalid("ordinary create ancestor identity is invalid"));
+    }
+    if entry.encrypted {
+        return Err(CloudError::new(
+            ErrorKind::Unsupported,
+            "encrypted vault folders are unavailable to ordinary DAV operations",
+        ));
+    }
+    if !entry.directory {
+        return Err(CloudError::new(
+            ErrorKind::Unsupported,
+            "remote path ancestor is not a directory",
+        ));
+    }
+    if !entry.writable {
+        return Err(CloudError::new(
+            ErrorKind::Forbidden,
+            "remote folder or item is read only",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Default, Debug)]
 struct DavItem {
     href: String,
+    href_count: usize,
+    response_status: Option<u16>,
+    response_status_count: usize,
+    response_payload: bool,
+    successful_propstats: usize,
     directory: bool,
     size: Option<u64>,
     invalid_size: bool,
@@ -3244,6 +4629,16 @@ fn parse_multistatus(
     logical_path: &str,
     visit: &mut dyn FnMut(RemoteEntry) -> Result<(), CloudError>,
 ) -> Result<(), CloudError> {
+    parse_multistatus_with_depth(bytes, requested, logical_path, false, visit)
+}
+
+fn parse_multistatus_with_depth(
+    bytes: &[u8],
+    requested: &Url,
+    logical_path: &str,
+    depth_zero: bool,
+    visit: &mut dyn FnMut(RemoteEntry) -> Result<(), CloudError>,
+) -> Result<(), CloudError> {
     let mut reader = NsReader::from_reader(bytes);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -3256,14 +4651,22 @@ fn parse_multistatus(
     let mut in_prop = false;
     let mut propstat_ok = false;
     let mut saw_root = false;
+    let mut responses = 0usize;
+    let mut missing = false;
+    let mut xml_depth = 0usize;
+    let mut root_complete = false;
     loop {
         match reader.read_resolved_event_into(&mut buf) {
             Ok((namespace, Event::Start(e))) => {
+                xml_depth += 1;
                 let name = local_name(e.local_name().as_ref()).to_ascii_lowercase();
+                if xml_depth == 1 && name != "multistatus" {
+                    return Err(invalid("DAV response has an invalid root element"));
+                }
                 let namespace_ok = expected_namespace(&name)
                     .is_some_and(|expected| namespace_is(&namespace, expected));
                 if name == "multistatus" {
-                    if saw_root || !namespace_is(&namespace, b"DAV:") {
+                    if saw_root || xml_depth != 1 || !namespace_is(&namespace, b"DAV:") {
                         return Err(invalid("DAV response has an invalid root element"));
                     }
                     saw_root = true;
@@ -3273,11 +4676,22 @@ fn parse_multistatus(
                 }
                 depth += 1;
                 if name == "response" {
-                    if item.is_some() {
+                    if item.is_some() || xml_depth != 2 || !saw_root || root_complete {
                         return Err(invalid("nested DAV response"));
                     }
                     item = Some(DavItem::default());
                     depth = 1;
+                }
+                if let Some(current) = item.as_mut() {
+                    if depth == 2 {
+                        if namespace_is(&namespace, b"DAV:") && name == "href" {
+                            current.href_count += 1;
+                        } else if namespace_is(&namespace, b"DAV:") && name == "status" {
+                            current.response_status_count += 1;
+                        } else {
+                            current.response_payload = true;
+                        }
+                    }
                 }
                 if namespace_is(&namespace, b"DAV:") && name == "propstat" {
                     propstat_ok = false;
@@ -3309,7 +4723,26 @@ fn parse_multistatus(
             }
             Ok((namespace, Event::Empty(e))) => {
                 let name = local_name(e.local_name().as_ref()).to_ascii_lowercase();
+                if xml_depth == 0 {
+                    return Err(invalid("DAV response has an invalid root element"));
+                }
+                if name == "response" {
+                    if item.is_some()
+                        || xml_depth != 1
+                        || !saw_root
+                        || root_complete
+                        || !namespace_is(&namespace, b"DAV:")
+                    {
+                        return Err(invalid("DAV response structure is invalid"));
+                    }
+                    return Err(invalid("DAV response omitted an href"));
+                }
                 if item.is_some() {
+                    // Empty direct children cannot establish a valid sole
+                    // href/status absence response, nor supply file metadata.
+                    if depth == 1 {
+                        item.as_mut().expect("DAV item exists").response_payload = true;
+                    }
                     if namespace_is(&namespace, b"DAV:") && in_prop && name == "collection" {
                         prop_values.directory = true;
                     }
@@ -3325,11 +4758,17 @@ fn parse_multistatus(
                 let text = e
                     .decode()
                     .map_err(|_| invalid("DAV response contains invalid text"))?;
+                if item.is_none() && !text.trim().is_empty() {
+                    return Err(invalid("DAV response contains unexpected text"));
+                }
                 if item.is_some() && !field.is_empty() {
                     append_dav_property_text(&mut field_text, &text)?;
                 }
             }
             Ok((_, Event::CData(e))) => {
+                if item.is_none() {
+                    return Err(invalid("DAV response contains unexpected text"));
+                }
                 let text = e
                     .decode()
                     .map_err(|_| invalid("DAV response contains invalid text"))?;
@@ -3338,6 +4777,9 @@ fn parse_multistatus(
                 }
             }
             Ok((_, Event::GeneralRef(reference))) => {
+                if item.is_none() {
+                    return Err(invalid("DAV response contains an unexpected reference"));
+                }
                 let name = reference
                     .decode()
                     .map_err(|_| invalid("DAV response contains an invalid reference"))?;
@@ -3402,6 +4844,20 @@ fn parse_multistatus(
                         "getcontenttype" if in_prop => {
                             prop_values.content_type = Some(value.to_owned())
                         }
+                        "status" if depth == 2 => {
+                            let mut status = value.split_whitespace();
+                            if !matches!(status.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
+                                return Err(invalid("DAV response status is invalid"));
+                            }
+                            current.response_status = Some(
+                                status
+                                    .next()
+                                    .filter(|code| code.len() == 3)
+                                    .and_then(|code| code.parse::<u16>().ok())
+                                    .filter(|code| (100..=599).contains(code))
+                                    .ok_or_else(|| invalid("DAV response status is invalid"))?,
+                            );
+                        }
                         "status" if value.split_whitespace().nth(1) == Some("200") => {
                             propstat_ok = true
                         }
@@ -3413,6 +4869,7 @@ fn parse_multistatus(
                 }
                 if dav_element && name == "propstat" && propstat_ok {
                     if let Some(ref mut current) = item {
+                        current.successful_propstats += 1;
                         current.directory |= prop_values.directory;
                         current.encrypted |= prop_values.encrypted;
                         current.invalid_size |= prop_values.invalid_size;
@@ -3436,7 +4893,37 @@ fn parse_multistatus(
                     let finished = item
                         .take()
                         .ok_or_else(|| invalid("DAV response structure is invalid"))?;
-                    if !finished.href.is_empty() {
+                    if finished.href.is_empty() {
+                        return Err(invalid("DAV response omitted an href"));
+                    }
+                    responses += 1;
+                    if responses > MAX_ENTRIES {
+                        return Err(invalid("DAV response exceeds the entry limit"));
+                    }
+                    if finished.response_status_count > 1 {
+                        return Err(invalid("DAV response contains conflicting statuses"));
+                    }
+                    if let Some(status) = finished.response_status
+                        && !(200..300).contains(&status)
+                    {
+                        let (_, path, _) =
+                            dav_item_location(&finished.href, requested, logical_path)?;
+                        if !depth_zero
+                            || status != 404
+                            || finished.href_count != 1
+                            || finished.response_status_count != 1
+                            || finished.response_payload
+                            || path.trim_end_matches('/') != logical_path.trim_end_matches('/')
+                        {
+                            return Err(invalid(
+                                "DAV response-level failure has no exact absence proof",
+                            ));
+                        }
+                        missing = true;
+                    } else if !finished.href.is_empty() {
+                        if finished.successful_propstats == 0 {
+                            return Err(invalid("DAV response omitted successful properties"));
+                        }
                         visit(to_remote_entry(finished, requested, logical_path)?)?;
                         entries += 1;
                         if entries > MAX_ENTRIES {
@@ -3449,6 +4936,10 @@ fn parse_multistatus(
                 }
                 field.clear();
                 field_text.clear();
+                if dav_element && name == "multistatus" && xml_depth == 1 {
+                    root_complete = true;
+                }
+                xml_depth = xml_depth.saturating_sub(1);
             }
             Ok((_, Event::DocType(_))) => {
                 return Err(invalid("DAV response contains a document type declaration"));
@@ -3459,19 +4950,31 @@ fn parse_multistatus(
         }
         buf.clear();
     }
-    if !saw_root || item.is_some() {
+    if !saw_root || !root_complete || xml_depth != 0 || item.is_some() {
         return Err(invalid("DAV response ended inside an entry"));
+    }
+    if missing {
+        if responses != 1 || !root_complete || xml_depth != 0 {
+            return Err(invalid("DAV absence response contains multiple entries"));
+        }
+        return Err(CloudError::new(
+            ErrorKind::NotFound,
+            "remote item was not found",
+        ));
+    }
+    if depth_zero && (responses != 1 || entries != 1 || !root_complete || xml_depth != 0) {
+        return Err(invalid("DAV stat omitted a complete single response"));
     }
     Ok(())
 }
 
-fn to_remote_entry(
-    item: DavItem,
+fn dav_item_location(
+    href: &str,
     requested: &Url,
     logical_path: &str,
-) -> Result<RemoteEntry, CloudError> {
+) -> Result<(Url, String, String), CloudError> {
     let actual = requested
-        .join(&item.href)
+        .join(href)
         .map_err(|_| invalid("DAV response contains an invalid href"))?;
     if !same_origin(requested, &actual) || actual.query().is_some() || actual.fragment().is_some() {
         return Err(invalid("DAV response href leaves the requested origin"));
@@ -3520,6 +5023,15 @@ fn to_remote_entry(
         .first()
         .cloned()
         .unwrap_or_else(|| "root".to_owned());
+    Ok((actual, path, name))
+}
+
+fn to_remote_entry(
+    item: DavItem,
+    requested: &Url,
+    logical_path: &str,
+) -> Result<RemoteEntry, CloudError> {
+    let (actual, path, name) = dav_item_location(&item.href, requested, logical_path)?;
     let etag = item.etag.trim().to_owned();
     // Collections can advertise getetag in a 404 propstat. Their identity and
     // ordinary-ancestry metadata remain useful, but an absent validator grants
@@ -3856,8 +5368,21 @@ fn safe_diagnostic_value(value: &str, max_len: usize, secret: Option<&str>) -> O
     Some(value.to_owned())
 }
 
-fn network(_: reqwest::Error) -> CloudError {
-    CloudError::new(ErrorKind::Offline, "OpenCloud server could not be reached")
+fn network(error: reqwest::Error) -> CloudError {
+    let category = if error.is_timeout() {
+        "timed out"
+    } else if error.is_connect() {
+        "connection failed"
+    } else if error.is_request() {
+        "request failed"
+    } else if error.is_body() {
+        "body transfer failed"
+    } else if error.is_decode() {
+        "response decoding failed"
+    } else {
+        "transport failed"
+    };
+    CloudError::new(ErrorKind::Offline, format!("OpenCloud server {category}"))
 }
 fn response_body_error(_: io::Error) -> CloudError {
     CloudError::new(ErrorKind::Offline, "OpenCloud response ended unexpectedly")
@@ -4960,7 +6485,6 @@ mod tests {
             ("207 Multi-Status", source),
             ("207 Multi-Status", root.clone()),
             ("404 Not Found", String::new()),
-            ("207 Multi-Status", root.clone()),
             ("201 Created", String::new()),
             ("200 OK", GRAPH.to_owned()),
             ("207 Multi-Status", root),
@@ -5242,7 +6766,6 @@ mod tests {
             ),
             ("207 Multi-Status", root.clone()),
             ("404 Not Found", String::new()),
-            ("207 Multi-Status", root.clone()),
             ("207 Multi-Status", root),
             ("412 Precondition Failed", String::new()),
         ]);
@@ -5285,7 +6808,6 @@ mod tests {
             ),
             ("207 Multi-Status", root("drive-1!expected-root")),
             ("404 Not Found", String::new()),
-            ("207 Multi-Status", root("drive-1!expected-root")),
             ("207 Multi-Status", root("drive-1!replacement-root")),
         ]);
         let source = tempfile::NamedTempFile::new().unwrap();
@@ -5349,9 +6871,8 @@ mod tests {
         let writable_root = r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/personal/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getcontentlength>0</d:getcontentlength><d:getetag>"root"</d:getetag><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#.to_owned();
         let (server, worker) = fixture(vec![
             ("200 OK", GRAPH.to_owned()),
-            ("207 Multi-Status", writable_root.clone()),
-            ("404 Not Found", String::new()),
             ("207 Multi-Status", writable_root),
+            ("404 Not Found", String::new()),
             ("201 Created", String::new()),
             ("200 OK", GRAPH.to_owned()),
             ("207 Multi-Status", r#"<d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/personal/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getetag>root</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#.to_owned()),
@@ -5371,13 +6892,13 @@ mod tests {
             .unwrap();
         assert_eq!(entry.size, payload.len() as u64);
         let requests = worker.join().unwrap();
-        assert!(requests[4].starts_with("PUT /dav/personal/upload.bin"));
+        assert!(requests[3].starts_with("PUT /dav/personal/upload.bin"));
         assert!(
-            requests[4]
+            requests[3]
                 .to_ascii_lowercase()
                 .contains("content-length: 524288")
         );
-        assert!(requests[4].contains("BODY_BYTES=524288"));
+        assert!(requests[3].contains("BODY_BYTES=524288"));
     }
 
     #[test]
@@ -5421,9 +6942,8 @@ mod tests {
         let writable_root = r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/personal/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getcontentlength>0</d:getcontentlength><d:getetag>\"root\"</d:getetag><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#.to_owned();
         let (server, worker) = fixture(vec![
             ("200 OK", GRAPH.to_owned()),
-            ("207 Multi-Status", writable_root.clone()),
-            ("404 Not Found", String::new()),
             ("207 Multi-Status", writable_root),
+            ("404 Not Found", String::new()),
             ("STALL", String::new()),
         ]);
         let budget = TransferBudget::new();
@@ -5461,9 +6981,9 @@ mod tests {
             "stalled response was not bounded: {elapsed:?}"
         );
         let requests = worker.join().unwrap();
-        assert_eq!(requests.len(), 5);
-        assert!(requests[4].starts_with("PUT /dav/personal/slow.bin "));
-        assert!(requests[4].contains("BODY_BYTES=2"));
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3].starts_with("PUT /dav/personal/slow.bin "));
+        assert!(requests[3].contains("BODY_BYTES=2"));
     }
 
     #[test]

@@ -299,6 +299,7 @@ fn create_handoff_mount_owner_stop_cancels_joins_without_unmount_and_closes_admi
     let mut mount = MountHandle {
         session: None,
         create_upload_owner: Some(owner),
+        diagnostics: diagnostics::MountDiagnostics::new(),
         root: temp.path().to_owned(),
         source: "fixture-no-mount".into(),
     };

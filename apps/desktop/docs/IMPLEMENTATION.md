@@ -3860,3 +3860,587 @@ offline gaps remain explicit limitations. Do not hold package production for
 further optional additions, broader suites or the laptop's fresh-profile browser
 problem. Packaging does not claim full parity, grant publication authority or
 turn compiled behavior into native acceptance.
+
+### Ordinary transfer metadata efficiency — 4 November 2026
+
+Ordinary Linux create admission now asks the backend for one read-only metadata
+observation per proof. OpenCloud resolves the Space once, checks the exact root,
+walks each parent once, and observes the target only when absence is required.
+The engine independently checks the full account/origin/Space/root scope,
+ordered ancestor paths, writability, encryption and expected parent identity.
+No metadata observation is cached across operations or reused as upload authority.
+The general Space-root observation also avoids fetching the same root twice.
+
+The close/admission, pre-claim and post-upload phases keep their separate fresh
+proofs. Conditional uploads, immutable recovery custody, two-worker dispatch,
+full readback/hash verification and uncertain-outcome retention are unchanged.
+The first local candidate targets repeated metadata work; it does not establish
+a measured speedup or change the encrypted-write protocol. The shared backend
+interface permits later platform adoption without duplicating these checks.
+
+### Transfer reliability, visibility and deletion follow-up — 4 November 2026
+
+The Linux-first follow-up keeps a change ledger and platform validation matrix
+in `outputs/desktop-transfer-efficiency-20261104/CHANGE-MANIFEST.json` outside
+Git. That ledger binds each candidate to its source inventory, affected files,
+checks actually completed and platform work still pending. Public PR/release
+summaries should describe user-visible results; execution details remain in the
+local evidence.
+
+The shared Engine's verified delete no longer synchronously republishes the
+entire remaining parent directory after each child unlink. Conditional DELETE,
+root/create/recovery guards and a fresh NotFound verification remain required.
+The parent listing stays invalidated until a normal complete online directory
+read republishes it. Cached bodies are retained. Offline metadata may therefore
+remain unavailable until that refresh; stale listings are never restored.
+FUSE directory removal still requires emptiness and never becomes a recursive
+server delete. A pending-create file is explicitly busy, with its local copy
+preserved and a failed-delete activity record explaining the refusal.
+
+Ordinary Unix upload workers reserve each receipt in memory before preparing
+its immutable body and recheck Ready state before doing that work. This avoids
+both workers copying/hashing and proving the same receipt. There are still two
+workers; the durable one-use claim remains the only send authority, and an
+in-memory reservation can never reset or retry an uncertain claim.
+
+Transfer insertion and its connection-local row ID now share one database lock.
+Previously concurrent workers could attach an outcome to a different inserted
+history row; old rows are preserved rather than guessed or rewritten. Optional
+`created_ms`/`finished_ms` columns add elapsed operation timing without inventing
+precision for older rows. The API retains `direction` and adds `operation`,
+optional `duration_ms`, and nonfailure `message`. History and current saved-write
+state are distinct: recent failures are past attempts, not proof that a file is
+still unresolved. The UI labels folder creation, deletion, rename and cloud
+verification separately, discloses the recent-record limit, and does not infer
+progress from missing byte totals.
+
+`cache_saved_upload_check` is an explicitly requested, cloud-read-only Unix
+operation. Its request carries the saved write ID, exact Space/root identity,
+account-scope tag and original authentication generation. The engine validates
+retained local bytes, observes the exact root and file revision, downloads with
+that revision as a condition, compares the full byte hash/length and metadata,
+and reproves the expected parent before atomically confirming the unchanged
+stopped journal receipt. Only a matching copy can become Verified; local ACK and
+body retention are not cleared by the check. Missing, different, unreachable or
+stale-account results retain custody and grant no upload, deletion or retry
+permission. No PUT, DELETE, automatic resend or generic record-clearing command
+is introduced. The UI shows this action only when the runtime explicitly reports
+`saved_upload_check_supported=true` and suppresses stale account/root responses.
+
+Platform follow-through is bounded:
+
+- Linux GUI: build the combined candidate, preserve existing accounts/recovery,
+  start normally, inspect the existing saved-upload errors and use the agreed
+  normal file workflow. The medium folder remains the performance comparison;
+  source request counts are not elapsed-time speedups.
+- Linux CLI: rebuild the same agent/engine payload, check existing help/version
+  and explicit state/profile routing. No saved-upload CLI command is invented;
+  the new operation is an agent API until a deliberate CLI entry is added.
+- Windows GUI and CLI: affected source compilation is distinct from packaging
+  and native execution. Check actual call sites before assuming the native
+  provider uses Engine::delete or the Unix worker. The Unix recovery handler is
+  not enabled on Windows; keep its capability absent until the Windows runtime
+  implements equivalent generation/account/root and custody checks. Reuse the
+  established isolated state/SID/DPAPI and normal lifecycle policies, with only
+  basic install/startup/file/preservation checks on an exact package.
+- Other clients: carry the measured findings and invariants across explicitly.
+  Android's independent dirty source, credentials and release remain untouched.
+
+No full suites, expanded fault matrices, new account/toolchain setup or repeated
+large folder copies are required for this follow-up. Candidate documentation
+must keep source checked, packaged, installed, running and exercised status
+separate, including any unverified or unimplemented platform behavior.
+
+### File-manager copy follow-up — 4 November 2026
+
+The owner's next Dolphin folder copy exposed repeated "Could not write" dialogs
+and was cancelled. Completed upload records alone do not prove the whole folder
+copy succeeded: the received local body can be verified even when the caller
+cancelled before supplying all source bytes. Keep that run failed/incomplete;
+do not describe the modal as fixed or as a harmless timestamp warning. The
+installed KIO source treats timestamp-preservation errors as warnings, and the
+small native-copy checks did not reproduce the modal. Per-operation diagnostics
+are needed to distinguish a failed write, flush, close, open or rename.
+
+Exclusive ordinary handoff creation now omits its preliminary standalone target
+stat. Its existing fresh root/parent/absence proof already performs that target
+observation before a local working file is admitted. Nonexclusive O_CREAT keeps
+the existing-file stat/open path. Failed proofs no longer publish a synthetic
+inode before authorization and recovery exclusions. Fresh close/admission,
+worker pre-claim and post-upload checks remain separate and unchanged.
+
+Engine mkdir and delete use combined backend mutation/confirmation operations.
+The OpenCloud implementation resolves the Space once for that operation and
+retains the selected origin, auth generation and deadline through confirmation.
+Root/ancestor checks, MKCOL identity/ETag readbacks, conditional DELETE and the
+post-delete NotFound proof remain. Other backends default to the previous
+separate calls. This removes two repeated Space discovery passes per mkdir and
+one per delete; source request reduction is not measured elapsed-time gain.
+
+Unlink of an exact still-open, never-admitted ordinary create cancels that local
+intent before final close can enqueue it. The original handle, Space/path/inode,
+private parent proof and V4 working-marker ownership must match; closing or
+admitted intents remain protected. Partial bytes and a terminal working marker
+stay in recovery. Flush/release only sync that cancelled recovery and cannot
+send it. No existing cloud item is deleted, and no cache claim or unresolved
+upload is reset. A namespace race fails conservatively with bytes retained.
+
+Explicit cancellation is persisted as an optional V4 working-marker flag
+(`cancelled` implies `closing`, omitted when false). Old V4 records retain their
+existing meaning. Older readers reject the new true flag conservatively rather
+than adopting or sending its bytes. Recovery classifies a cancelled copy only
+after validating the scoped marker, spool-name binding and exact safe data-file
+identity. Only that sole valid cancellation annotation is exempt from the local
+ancestor-overlap guard: its retained bytes do not block a later requested empty
+cloud-directory deletion. Missing, unsafe, malformed or mixed-warning records
+remain protected, and Engine pending-write and conditional mutation checks are
+unchanged. The UI distinguishes a saved cancelled copy from an unresolved upload.
+
+Online file opens can reuse an exact verified local body after fresh online
+Space/root and file metadata. The resource ID, strong ETag, length and full cache
+scope must match; retained ordinary-create bodies additionally require a valid
+Verified ledger receipt and non-evicted body. Opening verifies the complete local
+hash, then the current file revision, ordinary ancestors and account/root scope
+are checked again. Weak ETags are not reused. Cache miss or clean eviction
+falls back to the existing conditional download; ambiguous or corrupt records
+fail closed. No orphan body is adopted and upload server readback is unchanged.
+Local snapshot reads are recorded as `cache_read` and labelled Local file read,
+so they are not presented as network downloads.
+
+Linux mounts expose bounded in-memory diagnostics through Unix Agent status as
+`provider_diagnostics`. Counts, cumulative/max elapsed milliseconds and errno
+counts cover lookup, getattr, directory open/read, file create/open/write,
+flush/fsync/release, mkdir, unlink/rmdir, rename and setattr. The most recent 32
+critical failures contain stage, errno, inode and time. Unexpected lookup,
+directory-open/read and attribute-read failures
+also retain the error kind and a SHA256 message fingerprint, never the raw message;
+ordinary ENOENT/ENOTDIR probes stay outside that failure ring. Unsupported metadata
+rejections have a separate count. No document names/paths, account identifiers,
+file contents or arbitrary provider messages are collected, and no disk write
+or network call is added per callback. Counters reset with the mount. Read,
+releasedir, statfs and optional lock/xattr callbacks are not covered; absent
+events do not establish success in an uncovered path.
+Local filesystem failures also retain their numeric OS error code instead of
+flattening every cause to generic I/O; the diagnostic record includes that code
+without collecting an arbitrary error string. Expected probes can return errors,
+so callback-error counts are not a count of failed transfers.
+
+An uncached child lookup inside an ordinary remote directory first stats the exact
+logical child through Engine. A freshly verified NotFound can answer that name
+without rebuilding a whole sibling listing. Positive results continue through the
+existing listing and pending/vault overlays, and other errors propagate unchanged.
+The optimization excludes root, Space, vault, recovery and synthetic parents and
+recovery aliases. It adds no negative cache or authorization TTL; root/ancestor and
+pending-write checks remain in Engine, and create admission still obtains its own
+fresh parent/absence proof. This removes an unrelated-sibling failure dependency
+from missing-name probes, without asserting the cause of any earlier lookup error.
+
+These changes target Linux first. Shared backend behavior must be checked at
+actual Windows provider call sites; FUSE cancellation/diagnostics require an
+equivalent native design before any Windows claim. CLI packages share the
+agent/engine changes without adding new commands. The internal change ledger
+and owner-run evidence remain outside Git under the existing efficiency output
+directory; public descriptions must omit internal execution details.
+
+Directory enumeration now has a backend snapshot operation that returns the
+selected Space, root, parent and direct children together. OpenCloud resolves
+routing once within a captured authentication generation/deadline and retains
+fresh root and ordinary-ancestor checks. The listing must contain the same
+ordinary parent identity; child count and metadata-byte limits apply during
+collection. Engine derives the existing account/root-scoped cache binding from
+these observations, checks the expected parent before publication and retains
+pending overlays and guarded offline fallback. These observations are confined
+to one operation, not reused as cross-operation authorization.
+
+Ordinary nested-directory opens validate the current directory identity and
+ordinary-content access before allocating a bounded handle, but defer listing
+children until the first directory read. Opening and closing a directory without
+reading it therefore does not enumerate its siblings. Root, Space, vault and
+recovery handles retain their existing eager snapshot behavior. A handle-local
+initializer serializes the first read without holding the global namespace lock
+over network work. Publication rechecks the same registered handle and bound
+parent identity, acquires the existing vault-route guards and publishes a complete
+immutable snapshot for subsequent offsets. Closing during initialization prevents
+publication; error cleanup wakes waiters exactly once per initialization attempt.
+Directory errors retain their original failure semantics rather than returning
+an invented empty listing.
+
+Network failures expose fixed timeout, connection, request, body-transfer or
+decode categories where available. Arbitrary request details and URLs are not
+included. Historical generic failures cannot be retrospectively assigned a
+specific category.
+
+Ordinary cached file metadata reads combine selected-Space, root and target
+observations within one backend operation. OpenCloud resolves routing once and
+freshly checks the root and each ordinary ancestor. A target transport error
+retains the observed scope for the existing offline fallback; a missing or
+unverifiable ancestor must not become proof that the target is absent. Pending
+write overlays remain part of Engine stat. The default backend contract keeps
+independent observations for providers without this optimization. This adds no
+cross-operation authority cache or negative authorization lifetime.
+
+Successful mkdir invalidates affected cache listings and returns the confirmed
+directory without eagerly downloading the complete parent listing again. Native
+callers publish that returned entry immediately. A later normal online listing
+repopulates the exact snapshot and pending overlays. Until then, an invalidated
+offline parent listing remains unavailable rather than exposing stale contents.
+Conditional mutation and post-creation confirmation remain unchanged.
+
+Ordinary background-upload failures identify the local phase: preparation,
+sending, uploaded-file verification, or destination confirmation. An upload
+history failure can therefore represent a failed verification after the server
+accepted bytes; it does not by itself establish that a file is missing. Existing
+uncertain custody and explicit read-only saved-upload verification are retained.
+
+
+### Transfer preparation batch 1 — 4 November 2026
+
+The async HTTP pool now shares one continuously driven runtime across client
+clones and body operations. This prevents pooled connection tasks from being
+owned by a runtime destroyed at the end of an earlier transfer. Synchronous body
+futures remain directly owned by their caller, with existing cancellation,
+inactivity, total-deadline and rate-budget checks. Final runtime shutdown joins
+its driver and already-started blocking work; it is not a hard-bounded shutdown.
+
+Initial ordinary FUSE creates derive their exact scope from the same fresh
+root/ancestor/absence proof used for admission. The opaque proof supplies spool
+setup, removing two separate scope observations. Existing edits and recovery
+reopens retain their original scope discovery, and release/preclaim/completion
+continue to make separate fresh pinned proofs. No cross-operation authorization
+cache or negative-check TTL is introduced.
+
+Unix upload preparation copies an exact Ready receipt body once into a private
+disposable snapshot while computing its length and SHA-256. No-follow file
+handles, private ownership/mode checks, publication protection and pre/post
+receipt/policy checks retain source integrity. The original synced body and
+journal remain durable custody. The disposable send snapshot no longer needs
+its own fsync or multiple complete hashing passes. This API is unavailable on
+Windows, whose protected content must continue through its protected store.
+
+Upload workers use their notification generation as the wait predicate and
+drain actionable work without a fixed delay. Exact scope/write deferrals are
+bounded by the watched scopes and two-row discovery window; real admission
+wakes or the one-second fallback reopen discovery. Lease-release notifications
+cannot create a repeated preclaim refusal loop. Durable claims and uncertain
+outcomes are never reset by this scheduling optimization.
+
+Combined Linux affected all-target compilation and workspace formatting pass.
+No tests were added or executed for this batch. These are implementation results;
+new owner-copy timings and native Windows acceptance remain unmeasured.
+
+
+### Overnight transfer efficiency — 5 November 2026
+
+Cached ordinary mkdir/delete share the backend operation's freshly verified
+Space/root facts with Engine overlap admission and cache invalidation. This
+removes two separate Engine discovery/root observations. The backend still
+checks current context, writable ordinary ancestors/target, conditional deletion
+and the original root during confirmation. Default backends retain independent
+observations. No cross-operation authorization cache is introduced.
+
+Cache custody acknowledgement now performs the one complete cache-body
+verification, including retained-body retries. FUSE prepares its durable marker
+from bound metadata and acknowledges custody before releasing its spool. Exact
+receipt identity, original spool digest/fsync and conditional remote readback
+remain. Optional cleanup after ACK and after remote verification is deferred;
+pre-stage quota/headroom cleanup and admission accounting remain unchanged.
+
+Portable cleanup inventory snapshots indexed filenames once rather than issuing
+a database lookup for every physical filename. Residual cleanup and fresh final
+physical-byte accounting remain distinct so unknown bytes are still charged.
+
+These source changes apply to shared backend/Engine/cache consumers; the FUSE
+ACK optimization remains Linux-specific. No Windows native acceptance follows.
+
+
+### Streaming verification and bounded upload concurrency — 5 November 2026
+
+Ordinary OpenCloud upload verification consumes a complete conditional GET
+directly into bounded SHA-256 accounting. Success requires HTTP 200, exact
+Content-Length, matching strong ETag, no Content-Range, exact bytes through EOF,
+matching expected digest and unchanged ordinary leaf/root/ancestor identity and
+role before and after the body. Existing transfer budget, watchdog, token/pause
+and cancellation checks remain. This removes the disposable verification file,
+its fsync and an additional local hash pass. Backends without the new method
+return Ok(None); only that explicit sentinel permits the existing file-based
+verification fallback. All actual errors propagate.
+
+Unix ordinary creates use four workers and a four-row Ready discovery window.
+The existing exact scope/write preparation lease and durable one-use claim
+still arbitrate sends. Each worker retains at most four deferred Ready IDs per
+watched scope (256 scopes); shared stop/join, pause/current-owner and one shared
+rate budget remain. This is bounded concurrency, without new retry authority.
+
+Affected Linux compilation and formatting pass. Full content verification is
+retained; new performance measurements and Windows native execution are separate.
+
+
+### Stream cancellation lock correction and cached-read admission — 5 November 2026
+
+The first synthetic batch3 exposed a deterministic recursive mutex acquisition:
+the stream budget acquisition invokes its cancellation callback while holding
+the budget state mutex; that callback also queried pause through the same
+mutex. The nested pause lookup is removed. Budget acquisition itself and the
+outer watchdog/pre/post fences continue enforcing pause, while the nested
+callback now uses only cancellation/generation atomics. The failed batch3
+fixture and local recovery data remain preserved; no failed-run speed or
+completion claim is made.
+
+Cached file snapshot admission now uses one fresh ordinary root/target
+observation rather than separate root discovery and target stat. Pending-write
+overlays are evaluated before target errors. Root failures and scoped target
+Offline outcomes retain their separate existing fallback behavior; other
+errors remain errors. This introduces no cross-operation authority cache.
+
+
+### Budget callback discipline and cached read confirmation — 5 November 2026
+
+Both synchronous and asynchronous bandwidth acquisition now invoke external
+cancellation predicates outside the internal budget mutex. Pause and refill/
+debit decisions remain under the mutex. Cancellation after a grant releases
+the reservation outside that lock, refunding unused tokens; the synchronous
+condition-variable wait retains its locked handoff, and asynchronous waits
+retain no guard across await. This prevents the demonstrated recursive-lock
+class, while the minimal stream callback correction remains in place.
+
+After hashing a cache hit, file confirmation now pairs fresh root and target
+metadata in one operation. All existing target path/id/revision/size/encryption
+and exact account/root comparisons remain. Scoped target errors propagate;
+missing-root/Space outer NotFound retains the legacy error-only fallback.
+Successful cache hits avoid one extra discovery/root observation. No read
+authorization is cached across operations.
+
+Affected Linux and existing-toolchain Windows GNU/LLVM source checks pass.
+Windows was not executed natively. These changes have not been live-exercised
+while the earlier stalled owner test process awaits explicit recovery approval.
+
+
+### Optional negotiated HTTP/2 transport — 5 November 2026
+
+The OpenCloud reqwest dependency enables its standard HTTP/2 feature. Existing
+client builders retain ordinary TLS ALPN negotiation and HTTP/1.1 fallback;
+HTTP/2 prior knowledge, redirects, root/origin guards, conditional mutation
+headers, budgets and no-retry policies for conditional/body clients are
+unchanged. The existing server negotiated h2 in one verified, unauthenticated
+TLS handshake; this sent no HTTP request and establishes capability only.
+
+Cargo added only h2 0.4.20, with its checksum pinned in Cargo.lock; all earlier
+package versions/checksums remain. Linux/headless and both Windows-target
+notice inventories include the retained MIT license and current lock hashes.
+Affected Linux and Windows Agent/CLI source checks pass; no native Windows
+execution or live HTTP/2 performance improvement is claimed. Corrected prior
+packages and stalled-run recovery data are preserved separately.
+
+
+### Ordinary directory-open preparation — 5 November 2026
+
+Linux FUSE ordinary non-root directory open now creates its bound lazy handle
+without an unused network stat. The first actual directory read and every
+child operation retain their independent fresh identity, encryption, pending
+custody and mutation checks. Remote errors may therefore surface on first use
+instead of handle creation. Root, vault and synthetic routes are unchanged.
+Linux GUI and headless mounts share this path; Windows Cloud Files does not.
+
+### Bounded metadata lookup recovery and admission timings — 5 November 2026
+
+Ordinary point and directory metadata observations briefly repeat a read when
+successful DAV properties omit the required entity tag. Each attempt repeats
+the fresh routing/root/ancestor proof under the original deadline and account
+generation. Persistent incomplete metadata, invalid scope, cancellation and
+revocation still fail; no upload, delete or journal claim is replayed.
+
+A Depth-0 multistatus response represents absence only when the complete parsed
+response contains one exact validated requested href, an explicit 404, and no
+property payload or contradictory entries. Depth-1 failed entries cannot become
+partial listings. Empty envelopes and zero successful property sets are invalid.
+The historical owner response body was unavailable, so this parser correction
+is not asserted to establish the original missing-entity-tag response's cause.
+
+Aggregate Engine admission counters separate staging, execution wait/hold,
+fresh proof, cache publication wait and local Ready publication. Unix Agent
+status exposes count, total and maximum durations without paths or account
+identifiers. These diagnostics confer no authority. Windows shares SDK parsing
+and Engine source, but its callback/range APIs differ; automatic coverage and
+native performance must be established on the actual consumer path.
+
+
+### Directory observation and cache publication — 5 November 2026
+
+Directory snapshot requests no longer retain the Engine metadata publication
+mutex during network I/O. A brief initial epoch observation is checked again
+under the same mutex before publishing a listing or using an offline listing.
+Every existing serialized mutation and eligible listing publication advances
+that epoch without wrapping. A busy or changed epoch permits only the current
+online result, with existing pending overlays; it permits neither cache
+publication nor fallback to a saved remote listing. Local publication retains
+the guard through overlays. Mutation guard scopes, fresh proofs, conditional
+writes, immutable bodies and the offline-only/pending-only policies are unchanged.
+
+
+### Fresh parent reuse and bounded cleanup scans — 5 November 2026
+
+The ordinary write preflight retains both the root and last parent from its
+fresh ancestor walk. If its exact target is absent, it reuses that same-call
+parent for permission checks instead of making a duplicate parent PROPFIND.
+The reused parent must match the exact logical path and have a valid directory
+identity. Encryption, writability, token context, target errors, root revisions,
+conditional sends and all post-operation confirmations remain. No observation
+is cached or reused between lookup, create, release, pre-claim or body phases.
+This removes one metadata request per absent helper target, including new
+folders and ordinary uploads. The separate pre-send ancestor recheck remains.
+
+New-create cache cleanup computes accounted usage before selecting candidates.
+When under its target quota it selects only already-retired bodies that still
+need cleanup; it does not repeatedly load up to 64 healthy verified receipts.
+Residual cleanup builds one bounded, exact-scope tombstone selector for the
+current call, replacing a database lookup for every physical cache filename.
+Names and this selector confer no deletion authority: receipt/content binding,
+verified custody, policy, hash, pinned identity, final transaction and directory
+sync checks still authorize each deletion. Dirty, pinned, other-scope and
+unindexed content retain their existing protection. No durable schema changed.
+The SDK and cache changes are shared by GUI/headless Engine consumers; actual
+Windows callback-path coverage and native speed remain separately unverified.
+
+
+### Bounded filesystem lookup visibility — 5 November 2026
+
+A scoped synthetic KIO trace identified repeated synchronous missing-name
+lookups immediately before exclusive creation. Kernel negative-entry TTL alone
+cannot remove this path: Linux revalidates negative dentries for exclusive
+creates. The Linux adapter now deduplicates one immediate lookup response for
+the same caller, parent inode/identity and name, for at most 250 milliseconds.
+Only a fresh point observation with an exact validated parent and explicit
+missing target, no pending state, and a matching account/backend generation can
+mint the opaque hint. Root failures, incomplete metadata, offline fallback,
+unknown parent provenance and unsupported backends cannot do so.
+
+The provider's new-folder confirmation can also capture a complete empty view.
+It retains both post-MKCOL root/ancestor fences and two matching self metadata
+observations; the second self observation requests Depth 1 and validates a
+complete self-and-children response. A failed optional view falls back only to
+an exact read-only confirmation and supplies no empty hint. MKCOL is never
+repeated. The hint expires one second after operation start, requires the exact
+new directory/account/root/generation, and is not inferred from directory size
+or assumed from a successful create. RFC 4918 section 9.3 recommends empty
+collections after bodyless MKCOL; it does not guarantee that state.
+
+Both views are memory-only, caller-bound and capped at 256 entries per kind.
+Existing local positive, pending, recovery and vault state takes priority;
+lookup rechecks its local namespace after Engine validation, without holding the
+provider mutex during cache access. Local namespace changes and vault lifecycle
+purges invalidate relevant views. A remote arrival may briefly be invisible to
+a point lookup until the fixed expiry or an actual listing discovers it.
+Directory listing, file data access and every create, mkdir, write, rename,
+delete, release, pre-claim and transfer still perform their independent fresh
+authority and conditional checks. Neither hint is mutation authority, a cached
+negative encryption check, nor evidence that an upload completed.
+
+Aggregate per-mount hit counters expose which read-only shortcuts actually ran
+without recording names or credentials. Linux GUI and headless FUSE consumers
+share the behavior; Windows consumers share the supporting Engine/SDK model,
+not the Linux hint adapter. Windows native behavior is not inferred from source
+compilation. Source references: RFC 4918 section 9.3 and Linux fs/fuse/dir.c.
+
+
+### Incomplete-property recovery and bounded deletion/discovery efficiency — 5 November 2026
+
+The owner211-file follow-up verified all264,136,641 bytes, but a point lookup
+failed with the distinct static reason `DAV response omitted successful
+properties`. The existing incomplete-metadata allowlist covered only missing
+entity tags. Both explicit InvalidResponse categories now use the same bounded
+two-second whole-observation recheck, under the original account generation and
+deadline. Only a later fully valid root/ancestor/target observation can succeed;
+failed properties never become authoritative absence or write permission.
+Forbidden error kinds and unrelated structural failures remain errors. Phase
+diagnostics retain the actual allowlisted constant reason. No body, mutation or
+journal claim is retried, and persistent incomplete observations still fail.
+
+Ordinary FUSE empty-directory removal can opt into a combined Engine/SDK
+operation. It verifies the current Space, root and ancestors, exact target ID
+and strong matching revision, ordinary directory type and write permission,
+then a complete fresh Depth-1 empty view with matching self metadata. The Engine
+retains execution/publication and cache guards and additionally excludes all
+unresolved legacy or create-handoff writes overlapping the subtree. FUSE
+retains local active vault-route overlays and frozen-spool/recovery exclusions.
+Only then is one conditional DELETE sent; root confirmation and exact target
+absence remain. No recursive deletion shortcut or cached emptiness authority
+is introduced. Unsupported backends retain the former fresh listing/delete
+path, and an optimized-path error never triggers a second delete. This removes
+a duplicate discovery/ancestry sequence for eligible empty rmdir operations;
+file unlink and the normal mkdir authority path remain unchanged.
+
+The four ordinary-create workers now keep their original bounded four-ID Ready
+window while avoiding full receipt hydration for IDs already being prepared
+by another worker in the exact same scope. Preparation ownership is sampled
+without holding its lock across SQL. The unchanged lease acquisition handles
+races, and the winner still freshly reloads and compares immutable receipts,
+validates/copies/hashes bytes, obtains the durable one-use claim and performs
+all remote proofs and full verification. Deferred bookkeeping retains all
+original window IDs; filtering never refills the window. No schema, worker
+count, hash, durability or recovery policy changes. Actual query-skip frequency
+and wall-time gain are not inferred from source alone.
+
+Linux GUI and headless FUSE users share the adapter and Engine. Common SDK/cache
+code also supports Windows consumers, but Windows native callbacks are not
+automatically wired to the FUSE rmdir operation, and compilation is not native
+acceptance. No additional normal-path mkdir speedup is claimed by this batch;
+its previous bounded lookup visibility improvement remains. An unsafe direct
+positive-entry refresh and a callback-only readdirplus change were reviewed
+and deferred because they did not establish equivalent overlay semantics or
+a meaningful provider-work reduction.
+
+For this rmdir-only operation, the caller pins the resource ID, while the
+conditional ETag is captured freshly inside the complete empty-directory
+observation. Cached folder revisions change after our own child deletions and
+are not a valid input to this new operation. The fresh Depth-0 target and
+Depth-1 self must agree on the same strong revision, which is then sent with
+If-Match. Ordinary file deletion retains its original caller revision contract.
+The initial native small workflow exposed the stale-folder-revision conflict;
+its six verified uploads/readbacks are retained as evidence, and the correction
+is validated by completing only that fixture’s remaining directory cleanup.
+
+
+### Composed upload preparation and exact point lookup — 5 November 2026
+
+Ordinary create delivery can compose its worker pre-claim proof with the SDK's
+upload preparation. A fresh observation includes the selected Space, root,
+ordered ordinary writable parent chain and exact target absence. The Engine
+independently validates those facts against the receipt's captured account,
+origin, root and immediate-parent identity before one exact Ready-to-Claimed
+CAS. The callback is outside metadata reobservation loops, is one-use, and a
+refused claim sends no PUT. Every failure after a successful claim retains the
+existing Uncertain outcome; claims are never reset for automatic replay.
+Unsupported backends retain independent proof and transfer validation through
+the conservative default implementation.
+
+The SDK also avoids walking the same parent chain again just to construct the
+root condition. A separate late root-only observation still must match the
+already observed and receipt-bound root, have ordinary directory metadata and
+a strong revision, and supplies the tagged conditional header. Conditional
+create-only PUT, body cancellation, original generation binding, complete
+post-upload checks, full conditional SHA-256 readback, fresh completion parent
+proof and durable completion CAS remain. The short preparation deadline ends
+before the body; postflight has a new bounded metadata deadline pinned to the
+original generation. Recovery-stream proof behavior is unchanged.
+
+For a target at component depth d and G Graph discovery requests, normal create
+preparation previously made 2G+3d+2 metadata requests across worker and SDK
+proofs. The composed path makes G+d+2: for depth four with one discovery request,
+16 becomes 7. These are source-derived normal-path counts, excluding retries,
+body transfer and all verification; they are not measured elapsed-time gains.
+
+The Linux provider can use a fresh exact positive point observation in place of
+a second whole-parent listing. Only an ordinary target with matching immediate
+parent identity, current account/root/generation binding and no pending target
+or parent edit can obtain the opaque short-lived Engine hint. Native route,
+recovery, spool, reservation and node-map guards remain adapter requirements.
+The result is a metadata lookup, never a complete directory snapshot, cached
+write permission or authority to read bytes. Actual listings and all mutations
+retain their independent proofs. The aggregate `lookup_point_hits` counter
+increments only after successful publication, without recording file names. Linux GUI and headless consumers share this
+adapter. Windows shares the SDK preparation change and the new Core contract;
+the composed durable-create claim is wired in the Unix worker, so Windows
+native claim and point-lookup adapters need separate integration. No new
+benchmark, workload or test is required or claimed for this implementation
+iteration; measured performance remains the
+previous owner run until normal use supplies new evidence.

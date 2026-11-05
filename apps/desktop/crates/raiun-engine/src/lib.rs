@@ -5,9 +5,9 @@
 //! The first implementation serializes mutations through one engine mutex.
 
 use raiun_cache::{
-    AvailabilityPolicy, Cache, CacheScope, CacheUsage, CachedEntry, ConditionalWriteRequest,
-    ContentProtection, ContentVersion, PinInfo, PinManifestEntry, PinState, QueuedWrite, Retention,
-    ScopeProtection, TargetState, WriteState,
+    AvailabilityPolicy, Cache, CacheError, CacheScope, CacheUsage, CachedEntry,
+    ConditionalWriteRequest, ContentProtection, ContentVersion, PinInfo, PinManifestEntry,
+    PinState, QueuedWrite, Retention, ScopeProtection, TargetState, WriteState,
 };
 use raiun_core::backend::{
     CloudBackend, CloudError, CloudSpace, ErrorKind, RemoteEntry, WriteCondition,
@@ -26,13 +26,13 @@ use std::sync::{
     Arc, Mutex, MutexGuard, RwLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::{Builder as TempBuilder, NamedTempFile};
 
 mod ordinary_create;
 pub use ordinary_create::{
     CreateHandoffRequest, CreateUploadHooks, DurableCreateReceipt, PendingCreateView,
-    VerifiedCreateParent,
+    SavedCreateCheck, VerifiedCreateParent,
 };
 #[cfg(unix)]
 pub use ordinary_create::{CreateUploadHandle, CreateUploadOwner};
@@ -58,6 +58,142 @@ pub struct Engine {
     offline_cache: Option<Arc<OfflineCache>>,
     account_scope: Option<AccountScope>,
     offline_namespace: Arc<OfflineNamespace>,
+}
+
+/// A short read-only namespace visibility hint, never create/write authority.
+/// Its private binding cannot be constructed or extended by provider adapters.
+#[derive(Clone)]
+struct LookupVisibilityBinding {
+    binding_token: Arc<()>,
+    scope: CacheScope,
+    generation: u64,
+    expires_at: Instant,
+}
+
+#[derive(Clone)]
+pub struct LookupAbsenceHint {
+    binding: LookupVisibilityBinding,
+    path: String,
+    parent_resource_id: String,
+}
+
+/// One ordinary point observation for provider metadata lookup only. Pending
+/// writes and native route/recovery overlays must still take precedence.
+#[derive(Clone)]
+pub struct LookupEntryHint {
+    binding: LookupVisibilityBinding,
+    parent_resource_id: String,
+    entry: RemoteEntry,
+}
+
+/// A confirmed new empty directory's bounded read-only birth view.
+#[derive(Clone)]
+pub struct LookupEmptyDirectoryHint {
+    binding: LookupVisibilityBinding,
+    path: String,
+    resource_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateAdmissionStageSnapshot {
+    pub count: u64,
+    pub total_ns: u64,
+    pub max_ns: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateAdmissionDiagnosticsSnapshot {
+    pub total_admission: CreateAdmissionStageSnapshot,
+    pub body_staging: CreateAdmissionStageSnapshot,
+    pub execution_wait: CreateAdmissionStageSnapshot,
+    pub execution_hold: CreateAdmissionStageSnapshot,
+    pub fresh_namespace_proof: CreateAdmissionStageSnapshot,
+    pub metadata_publication_wait: CreateAdmissionStageSnapshot,
+    pub local_ready_publish: CreateAdmissionStageSnapshot,
+}
+
+#[derive(Default)]
+pub(crate) struct CreateAdmissionStageMetrics {
+    count: AtomicU64,
+    total_ns: AtomicU64,
+    max_ns: AtomicU64,
+}
+
+impl CreateAdmissionStageMetrics {
+    fn add_saturating(counter: &AtomicU64, amount: u64) {
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            match counter.compare_exchange_weak(
+                current,
+                current.saturating_add(amount),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn record(&self, elapsed: std::time::Duration) {
+        let nanos = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        Self::add_saturating(&self.count, 1);
+        Self::add_saturating(&self.total_ns, nanos);
+        self.max_ns.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> CreateAdmissionStageSnapshot {
+        CreateAdmissionStageSnapshot {
+            count: self.count.load(Ordering::Relaxed),
+            total_ns: self.total_ns.load(Ordering::Relaxed),
+            max_ns: self.max_ns.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CreateAdmissionMetrics {
+    pub(crate) total_admission: CreateAdmissionStageMetrics,
+    pub(crate) body_staging: CreateAdmissionStageMetrics,
+    pub(crate) execution_wait: CreateAdmissionStageMetrics,
+    pub(crate) execution_hold: CreateAdmissionStageMetrics,
+    pub(crate) fresh_namespace_proof: CreateAdmissionStageMetrics,
+    pub(crate) metadata_publication_wait: CreateAdmissionStageMetrics,
+    pub(crate) local_ready_publish: CreateAdmissionStageMetrics,
+}
+
+impl CreateAdmissionMetrics {
+    fn snapshot(&self) -> CreateAdmissionDiagnosticsSnapshot {
+        CreateAdmissionDiagnosticsSnapshot {
+            total_admission: self.total_admission.snapshot(),
+            body_staging: self.body_staging.snapshot(),
+            execution_wait: self.execution_wait.snapshot(),
+            execution_hold: self.execution_hold.snapshot(),
+            fresh_namespace_proof: self.fresh_namespace_proof.snapshot(),
+            metadata_publication_wait: self.metadata_publication_wait.snapshot(),
+            local_ready_publish: self.local_ready_publish.snapshot(),
+        }
+    }
+}
+
+pub(crate) struct CreateAdmissionStageTimer<'a> {
+    metrics: &'a CreateAdmissionStageMetrics,
+    started: Instant,
+}
+
+impl<'a> CreateAdmissionStageTimer<'a> {
+    pub(crate) fn start(metrics: &'a CreateAdmissionStageMetrics) -> Self {
+        Self {
+            metrics,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for CreateAdmissionStageTimer<'_> {
+    fn drop(&mut self) {
+        self.metrics.record(self.started.elapsed());
+    }
 }
 
 /// A one-way cancellation handle that can cross a worker boundary without
@@ -221,8 +357,9 @@ struct Inner {
     /// pair ID and prevents a stale scheduler snapshot from reactivating it.
     /// Access is serialized by `execution` with every sync dispatch.
     pair_policies: Mutex<BTreeMap<String, Option<PairSyncPolicy>>>,
-    metadata_gate: Mutex<()>,
+    metadata_gate: Mutex<u64>,
     sync_paused: Arc<AtomicBool>,
+    create_admission_diagnostics: CreateAdmissionMetrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +427,12 @@ pub struct TransferRecord {
     pub space_id: String,
     pub path: String,
     pub direction: String,
+    #[serde(default)]
+    pub operation: String,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub message: Option<String>,
     pub state: String,
     pub bytes_total: u64,
     pub bytes_done: u64,
@@ -584,12 +727,13 @@ impl Engine {
              PRAGMA user_version=2;",
         )
         .map_err(db_error)?;
+        ensure_transfer_timing_columns(&db)?;
         ensure_media_job_revision_column(&db)?;
         ensure_media_attempt_destination_root_column(&db)?;
         // An operation that was still running at process death has an unknown
         // remote outcome. Keep it visible as failed; a later reconciliation
         // must inspect the destination before attempting another mutation.
-        db.execute("UPDATE transfers SET status='failed',message='engine stopped while operation was running',finished_unix=?1 WHERE status='running'", [now_unix()]).map_err(db_error)?;
+        db.execute("UPDATE transfers SET status='failed',message='engine stopped while operation was running',finished_unix=?1,finished_ms=?2 WHERE status='running'", params![now_unix(), now_unix_millis()]).map_err(db_error)?;
         db.execute("UPDATE media_upload_attempts SET state='uncertain',message='engine stopped while media upload was in flight',updated_unix=?1 WHERE state='running'", [now_unix()]).map_err(db_error)?;
         db.execute("UPDATE media_candidates SET state='attention',message='engine stopped while media upload was in flight',last_seen_unix=?1 WHERE state='uploading'", [now_unix()]).map_err(db_error)?;
         db.execute("UPDATE media_job_runs SET state='interrupted',last_error='engine stopped while media job was running',updated_unix=?1 WHERE state='running'", [now_unix()]).map_err(db_error)?;
@@ -605,10 +749,16 @@ impl Engine {
                 db: Mutex::new(db),
                 execution: Mutex::new(()),
                 pair_policies: Mutex::new(BTreeMap::new()),
-                metadata_gate: Mutex::new(()),
+                metadata_gate: Mutex::new(0),
                 sync_paused: Arc::new(AtomicBool::new(false)),
+                create_admission_diagnostics: CreateAdmissionMetrics::default(),
             }),
         })
+    }
+
+    /// Return aggregate timing buckets for ordinary create admission.
+    pub fn create_admission_diagnostics(&self) -> CreateAdmissionDiagnosticsSnapshot {
+        self.inner.create_admission_diagnostics.snapshot()
     }
 
     /// Bind a backend to one encrypted collection while retaining this account's
@@ -1191,7 +1341,7 @@ impl Engine {
     }
 
     pub fn list(&self, space: &str, path: &str) -> Result<Vec<RemoteEntry>, CloudError> {
-        self.list_inner(space, path, None)
+        self.list_inner(space, path, None, None)
     }
 
     /// Read-only provider view; this does not authorize a create or a write.
@@ -1205,7 +1355,7 @@ impl Engine {
             return Err(unsupported_encrypted_cache());
         }
         let mut view = OrdinaryDirectoryView::default();
-        match self.list_inner(space, path, Some(&mut view)) {
+        match self.list_inner(space, path, Some(&mut view), expected_parent_id) {
             Ok(entries) => view.entries = entries,
             Err(error) if error.kind == ErrorKind::Offline => {
                 // Match the provider's existing pending-only offline overlay.
@@ -1257,12 +1407,13 @@ impl Engine {
         space: &str,
         path: &str,
         capture: Option<&mut OrdinaryDirectoryView>,
+        expected_parent_id: Option<&str>,
     ) -> Result<Vec<RemoteEntry>, CloudError> {
         if self.namespace_transport_unavailable() {
             return self.cached_list_without_probe(space, path, capture);
         }
         if self.offline_cache.is_some() {
-            return self.cached_list(space, path, capture);
+            return self.cached_list(space, path, capture, expected_parent_id);
         }
         let mut entries = Vec::new();
         let mut metadata_bytes = 0usize;
@@ -1331,51 +1482,342 @@ impl Engine {
     }
 
     pub fn stat(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
-        let Some(context) = &self.offline_cache else {
-            return self.backend.stat(space, path);
-        };
-        match self.online_plaintext_scope(space) {
-            Ok((scope, root)) => {
-                if path == "/" {
-                    return Ok(root);
-                }
-                match self.backend.stat(space, path) {
-                    Ok(entry) if entry.encrypted => Err(unsupported_encrypted_cache()),
-                    Ok(entry) => self.overlay_pending_stat(&scope, path, entry),
-                    Err(error) if error.kind == ErrorKind::NotFound => {
-                        match self.pending_create(&scope, path)? {
-                            Some(pending) => Ok(pending.entry),
-                            None => Err(error),
-                        }
+        self.stat_for_lookup_observation(space, path, None).0
+    }
+
+    /// Preserve stat's result while optionally identifying one proven ordinary
+    /// absence. The hint is only for a bounded provider visibility memo.
+    pub fn provider_stat_for_lookup(
+        &self,
+        space: &str,
+        path: &str,
+        expected_parent_id: &str,
+    ) -> (Result<RemoteEntry, CloudError>, Option<LookupAbsenceHint>) {
+        let (result, absence, _) =
+            self.stat_for_lookup_observation(space, path, Some(expected_parent_id));
+        (result, absence)
+    }
+
+    /// An exact point lookup may avoid a second full directory observation.
+    /// The adapter must validate the hint and its own local overlays before
+    /// publishing the entry. This never grants create, write or read authority.
+    pub fn provider_stat_for_lookup_view(
+        &self,
+        space: &str,
+        path: &str,
+        expected_parent_id: &str,
+    ) -> (
+        Result<RemoteEntry, CloudError>,
+        Option<LookupAbsenceHint>,
+        Option<LookupEntryHint>,
+    ) {
+        self.stat_for_lookup_observation(space, path, Some(expected_parent_id))
+    }
+
+    fn stat_for_lookup_observation(
+        &self,
+        space: &str,
+        path: &str,
+        expected_parent_id: Option<&str>,
+    ) -> (
+        Result<RemoteEntry, CloudError>,
+        Option<LookupAbsenceHint>,
+        Option<LookupEntryHint>,
+    ) {
+        let generation = expected_parent_id.and_then(|_| self.backend.read_only_generation());
+        let mut absence_hint = None;
+        let mut entry_hint = None;
+        let result = (|| {
+            let Some(context) = &self.offline_cache else {
+                return self.backend.stat(space, path);
+            };
+            match self.backend.ordinary_stat_snapshot(space, path) {
+                Ok(snapshot) => {
+                    let scope = self.plaintext_scope_from_observation(
+                        space,
+                        &snapshot.space,
+                        &snapshot.root,
+                    )?;
+                    if path == "/" {
+                        return Ok(snapshot.root);
                     }
-                    Err(error) if error.kind == ErrorKind::Offline => {
-                        if let Some(write) = context
-                            .cache
-                            .pending_write_for_path(&scope, path)
-                            .map_err(cache_cloud_error)?
-                        {
-                            return self.remote_entry_for_pending(space, &write);
+                    match snapshot.target {
+                        Ok(entry) if entry.encrypted => Err(unsupported_encrypted_cache()),
+                        Ok(entry) => {
+                            let observed = entry.clone();
+                            let overlaid = self.overlay_pending_stat(&scope, path, entry)?;
+                            if overlaid == observed
+                                && let (Some(expected), Some(generation), Some(parent)) = (
+                                    expected_parent_id,
+                                    generation,
+                                    snapshot.observed_parent.as_ref(),
+                                )
+                            {
+                                entry_hint = self.lookup_entry_hint(
+                                    &scope, path, expected, parent, &observed, generation,
+                                );
+                            }
+                            Ok(overlaid)
                         }
-                        self.cached_entry_or_error(context, &scope, path, error)
+                        Err(error) if error.kind == ErrorKind::NotFound => {
+                            match self.pending_create(&scope, path)? {
+                                Some(pending) => Ok(pending.entry),
+                                None => {
+                                    if let (Some(expected), Some(generation), Some(parent)) = (
+                                        expected_parent_id,
+                                        generation,
+                                        snapshot.observed_parent.as_ref(),
+                                    ) {
+                                        absence_hint = self.lookup_absence_hint(
+                                            &scope, path, expected, parent, generation,
+                                        );
+                                    }
+                                    Err(error)
+                                }
+                            }
+                        }
+                        Err(error) if error.kind == ErrorKind::Offline => {
+                            if let Some(write) = context
+                                .cache
+                                .pending_write_for_path(&scope, path)
+                                .map_err(cache_cloud_error)?
+                            {
+                                return self.remote_entry_for_pending(space, &write);
+                            }
+                            self.cached_entry_or_error(context, &scope, path, error)
+                        }
+                        Err(error) => Err(error),
                     }
-                    Err(error) => Err(error),
                 }
-            }
-            Err(error) if error.kind == ErrorKind::Offline => {
-                let scope = self
-                    .cached_scope(space, context)
-                    .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?;
-                if let Some(write) = context
-                    .cache
-                    .pending_write_for_path(&scope, path)
-                    .map_err(cache_cloud_error)?
-                {
-                    return self.remote_entry_for_pending(space, &write);
+                Err(error) if error.kind == ErrorKind::Offline => {
+                    let scope = self
+                        .cached_scope(space, context)
+                        .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?;
+                    if let Some(write) = context
+                        .cache
+                        .pending_write_for_path(&scope, path)
+                        .map_err(cache_cloud_error)?
+                    {
+                        return self.remote_entry_for_pending(space, &write);
+                    }
+                    self.cached_entry_or_error(context, &scope, path, error)
                 }
-                self.cached_entry_or_error(context, &scope, path, error)
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
+        })();
+        (result, absence_hint, entry_hint)
+    }
+
+    fn lookup_entry_hint(
+        &self,
+        scope: &CacheScope,
+        path: &str,
+        expected_parent_id: &str,
+        parent: &RemoteEntry,
+        entry: &RemoteEntry,
+        generation: u64,
+    ) -> Option<LookupEntryHint> {
+        if path == "/"
+            || validate_remote_path(path).is_err()
+            || path.ends_with('/')
+            || entry.path != path
+            || entry.encrypted
+            || entry.id.is_empty()
+            || entry.id.chars().any(char::is_control)
+            || !parent.directory
+            || parent.encrypted
+            || parent.id != expected_parent_id
+            || parent.id.is_empty()
+            || parent.id.chars().any(char::is_control)
+            || parent.path != parent_path(path).ok()?
+        {
+            return None;
         }
+        let hint = LookupEntryHint {
+            binding: LookupVisibilityBinding {
+                binding_token: Arc::clone(&self.offline_namespace.binding_token),
+                scope: scope.clone(),
+                generation,
+                expires_at: Instant::now() + Duration::from_millis(250),
+            },
+            parent_resource_id: parent.id.clone(),
+            entry: entry.clone(),
+        };
+        self.validate_lookup_entry_hint(&hint, scope.space_id(), path, expected_parent_id, entry)
+            .ok()
+            .filter(|valid| *valid)
+            .map(|_| hint)
+    }
+
+    /// Revalidate only local state for a just-returned point observation.
+    /// A positive hint cannot represent a partial directory listing or be used
+    /// for mutation authority, offline publication, or reading file contents.
+    pub fn validate_lookup_entry_hint(
+        &self,
+        hint: &LookupEntryHint,
+        space: &str,
+        path: &str,
+        expected_parent_id: &str,
+        entry: &RemoteEntry,
+    ) -> Result<bool, CloudError> {
+        if hint.entry != *entry
+            || hint.entry.path != path
+            || hint.parent_resource_id != expected_parent_id
+        {
+            return Ok(false);
+        }
+        self.validate_lookup_visibility_binding(&hint.binding, space, path, expected_parent_id)
+    }
+
+    fn lookup_absence_hint(
+        &self,
+        scope: &CacheScope,
+        path: &str,
+        expected_parent_id: &str,
+        parent: &RemoteEntry,
+        generation: u64,
+    ) -> Option<LookupAbsenceHint> {
+        if path == "/"
+            || !parent.directory
+            || parent.encrypted
+            || parent.id != expected_parent_id
+            || parent.id.is_empty()
+            || parent.id.chars().any(char::is_control)
+            || parent.path != parent_path(path).ok()?
+        {
+            return None;
+        }
+        let hint = LookupAbsenceHint {
+            binding: LookupVisibilityBinding {
+                binding_token: Arc::clone(&self.offline_namespace.binding_token),
+                scope: scope.clone(),
+                generation,
+                expires_at: Instant::now() + Duration::from_millis(250),
+            },
+            path: path.to_owned(),
+            parent_resource_id: parent.id.clone(),
+        };
+        self.validate_lookup_absence_hint(&hint, scope.space_id(), path, expected_parent_id)
+            .ok()
+            .filter(|valid| *valid)
+            .map(|_| hint)
+    }
+
+    /// Local-only validation: this cannot authorize a mutation or read bytes.
+    /// A provider must also bound the memo to one use and the original caller.
+    pub fn validate_lookup_absence_hint(
+        &self,
+        hint: &LookupAbsenceHint,
+        space: &str,
+        path: &str,
+        expected_parent_id: &str,
+    ) -> Result<bool, CloudError> {
+        if hint.path != path || hint.parent_resource_id != expected_parent_id {
+            return Ok(false);
+        }
+        self.validate_lookup_visibility_binding(&hint.binding, space, path, expected_parent_id)
+    }
+
+    fn lookup_empty_directory_hint(
+        &self,
+        scope: CacheScope,
+        path: &str,
+        entry: &RemoteEntry,
+        generation: u64,
+        expires_at: Instant,
+    ) -> Option<LookupEmptyDirectoryHint> {
+        if path == "/"
+            || validate_remote_path(path).is_err()
+            || path.ends_with('/')
+            || entry.path != path
+            || !entry.directory
+            || entry.encrypted
+            || entry.id.is_empty()
+            || entry.id.chars().any(char::is_control)
+            || Instant::now() >= expires_at
+            || self.backend.read_only_generation() != Some(generation)
+        {
+            return None;
+        }
+        self.create_cache(&scope).ok()?;
+        Some(LookupEmptyDirectoryHint {
+            binding: LookupVisibilityBinding {
+                binding_token: Arc::clone(&self.offline_namespace.binding_token),
+                scope,
+                generation,
+                expires_at,
+            },
+            path: path.to_owned(),
+            resource_id: entry.id.clone(),
+        })
+    }
+
+    /// Check a direct child's advisory absence from a confirmed new empty
+    /// directory. This performs no HTTP and grants no mutation authority.
+    pub fn validate_lookup_empty_directory_hint(
+        &self,
+        hint: &LookupEmptyDirectoryHint,
+        space: &str,
+        directory_path: &str,
+        directory_id: &str,
+        child_path: &str,
+    ) -> Result<bool, CloudError> {
+        if hint.path != directory_path
+            || hint.resource_id != directory_id
+            || validate_remote_path(child_path).is_err()
+            || child_path.ends_with('/')
+            || parent_path(child_path).ok().as_deref() != Some(directory_path)
+        {
+            return Ok(false);
+        }
+        self.validate_lookup_visibility_binding(&hint.binding, space, child_path, directory_id)
+    }
+
+    fn validate_lookup_visibility_binding(
+        &self,
+        binding: &LookupVisibilityBinding,
+        space: &str,
+        path: &str,
+        expected_parent_id: &str,
+    ) -> Result<bool, CloudError> {
+        if Instant::now() >= binding.expires_at
+            || !Arc::ptr_eq(
+                &binding.binding_token,
+                &self.offline_namespace.binding_token,
+            )
+            || binding.scope.space_id() != space
+            || self.backend.read_only_generation() != Some(binding.generation)
+            || self.namespace_transport_unavailable()
+        {
+            return Ok(false);
+        }
+        let cache = self.create_cache(&binding.scope)?;
+        if cache
+            .find_plaintext_scope(binding.scope.origin(), binding.scope.account_id(), space)
+            .map_err(cache_cloud_error)?
+            .is_some_and(|known| known != binding.scope)
+        {
+            return Ok(false);
+        }
+        let parent = parent_path(path)?;
+        if cache
+            .resource_id_for_path(&binding.scope, &parent)
+            .map_err(cache_cloud_error)?
+            .is_some_and(|known| known != expected_parent_id)
+        {
+            return Ok(false);
+        }
+        for candidate in [path, parent.as_str()] {
+            if cache
+                .pending_write_for_path(&binding.scope, candidate)
+                .map_err(cache_cloud_error)?
+                .is_some()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(Instant::now() < binding.expires_at
+            && self.backend.read_only_generation() == Some(binding.generation))
     }
 
     fn cached_list(
@@ -1383,28 +1825,28 @@ impl Engine {
         space: &str,
         path: &str,
         capture: Option<&mut OrdinaryDirectoryView>,
+        expected_parent_id: Option<&str>,
     ) -> Result<Vec<RemoteEntry>, CloudError> {
-        // A mutation may retain this publication guard through a long PUT
-        // and verification read. Fresh online namespace reads can proceed,
-        // but must neither publish cache metadata nor fall back to old cache
-        // evidence while that serialized publisher is in flight.
-        let metadata = match self.inner.metadata_gate.try_lock() {
-            Ok(guard) => Some(guard),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                return Err(CloudError::new(
-                    ErrorKind::Io,
-                    "engine metadata publication lock was poisoned",
-                ));
-            }
-        };
+        // Admit an observation briefly, never hold publication through HTTP.
+        // A busy or changed epoch allows only the fresh online view: it grants
+        // neither cache publication nor fallback to an older saved listing.
+        let observed_epoch = self.try_metadata_observation()?.map(|guard| *guard);
         let context = self
             .offline_cache
             .as_ref()
             .expect("cached list requires a cache context");
-        let (scope, root) = match self.online_plaintext_scope(space) {
-            Ok(scope_root) => scope_root,
+        let observed = self
+            .backend
+            .directory_snapshot(space, path, expected_parent_id);
+        let mut metadata = self
+            .try_metadata_observation()?
+            .filter(|guard| observed_epoch == Some(**guard));
+        let snapshot = match observed {
+            Ok(snapshot) => snapshot,
             Err(error) if error.kind == ErrorKind::Offline && metadata.is_some() => {
+                // The pending overlay may persist conflict markers. Fence
+                // sibling observations before entering that guarded fallback.
+                Self::advance_metadata_epoch(metadata.as_mut().expect("metadata guard exists"))?;
                 let scope = self
                     .cached_scope(space, context)
                     .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?;
@@ -1412,67 +1854,90 @@ impl Engine {
             }
             Err(error) => return Err(error),
         };
-        let parent_id = if path == "/" {
-            root.id.clone()
-        } else {
-            match self.backend.stat(space, path) {
-                Ok(parent) if parent.encrypted => return Err(unsupported_encrypted_cache()),
-                Ok(parent) if !parent.directory => {
-                    return Err(CloudError::new(
-                        ErrorKind::Unsupported,
-                        "cloud item is not a directory",
-                    ));
-                }
-                Ok(parent) => parent.id,
-                Err(error) if error.kind == ErrorKind::Offline && metadata.is_some() => {
-                    return self.cached_listing(context, &scope, path, error, capture);
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        let result = self.list_live(space, path);
-        match result {
-            Ok(mut entries) => {
-                if metadata.is_some() && !self.create_overlap_live(&scope, path)? {
-                    let cache_entries = entries
-                        .iter()
-                        .filter(|entry| !entry.encrypted)
-                        .cloned()
-                        .map(|entry| CachedEntry {
-                            parent_resource_id: parent_id.clone(),
-                            entry,
-                        })
-                        .collect::<Vec<_>>();
-                    // Cache failures must not turn a successful online listing into
-                    // an error. A later offline read will fail closed if no full
-                    // verified snapshot was committed.
-                    if context
-                        .cache
-                        .publish_listing(&scope, &parent_id, &cache_entries, now_unix())
-                        .is_ok()
-                    {
-                        let _ = context.cache.evict_to_quota();
-                    }
-                }
-                self.overlay_pending_entries(&scope, &parent_id, &mut entries, capture)?;
-                Ok(entries)
-            }
-            Err(error) if error.kind == ErrorKind::Offline && metadata.is_some() => {
-                self.cached_listing(context, &scope, path, error, capture)
-            }
-            Err(error) => Err(error),
+        let scope =
+            self.plaintext_scope_from_observation(space, &snapshot.space, &snapshot.root)?;
+        let parent = snapshot.parent;
+        if parent.path.trim_end_matches('/') != path.trim_end_matches('/')
+            || !parent.directory
+            || parent.encrypted
+            || parent.id.is_empty()
+            || parent.id.chars().any(char::is_control)
+            || expected_parent_id.is_some_and(|expected| expected != parent.id)
+        {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "ordinary directory parent changed",
+            ));
         }
+        let parent_id = parent.id;
+        let mut entries = snapshot.entries;
+        if entries.len() > MAX_LIST_ENTRIES {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "cloud listing exceeds the 100,000-entry limit",
+            ));
+        }
+        let metadata_bytes = entries.iter().fold(0usize, |bytes, entry| {
+            bytes
+                .saturating_add(entry.id.len())
+                .saturating_add(entry.etag.len())
+                .saturating_add(entry.path.len())
+        });
+        if metadata_bytes > MAX_REFRESH_PATH_BYTES {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "cloud listing metadata exceeds the 32 MiB limit",
+            ));
+        }
+        if let Some(guard) = metadata.as_mut() {
+            // Advance before any cache write, including a write that fails,
+            // and keep the guard through the local pending overlay below.
+            Self::advance_metadata_epoch(guard)?;
+        }
+        if metadata.is_some() && !self.create_overlap_live(&scope, path)? {
+            let cache_entries = entries
+                .iter()
+                .filter(|entry| !entry.encrypted)
+                .cloned()
+                .map(|entry| CachedEntry {
+                    parent_resource_id: parent_id.clone(),
+                    entry,
+                })
+                .collect::<Vec<_>>();
+            // Cache failures must not turn a successful online listing into
+            // an error. A later offline read will fail closed if no full
+            // verified snapshot was committed.
+            if context
+                .cache
+                .publish_listing(&scope, &parent_id, &cache_entries, now_unix())
+                .is_ok()
+            {
+                let _ = context.cache.evict_to_quota();
+            }
+        }
+        self.overlay_pending_entries(&scope, &parent_id, &mut entries, capture)?;
+        Ok(entries)
     }
 
     fn online_plaintext_scope(
         &self,
         space_id: &str,
     ) -> Result<(CacheScope, RemoteEntry), CloudError> {
+        let (space, root) = self.backend.space_root_metadata(space_id)?;
+        let scope = self.plaintext_scope_from_observation(space_id, &space, &root)?;
+        Ok((scope, root))
+    }
+
+    fn plaintext_scope_from_observation(
+        &self,
+        space_id: &str,
+        space: &CloudSpace,
+        root: &RemoteEntry,
+    ) -> Result<CacheScope, CloudError> {
         let context = self
             .offline_cache
             .as_ref()
             .expect("online cache scope requires a cache context");
-        let (space, root) = self.backend.space_root_metadata(space_id)?;
         if space.id != space_id {
             return Err(CloudError::new(
                 ErrorKind::InvalidResponse,
@@ -1496,7 +1961,7 @@ impl Engine {
             ScopeProtection::PlaintextAllowed,
         )
         .map_err(cache_cloud_error)?;
-        Ok((scope, root))
+        Ok(scope)
     }
 
     fn cached_scope(
@@ -1523,6 +1988,16 @@ impl Engine {
             return Ok(None);
         };
         let (scope, _) = self.online_plaintext_scope(space_id)?;
+        self.begin_cache_mutation_in_scope(context, scope, paths)
+            .map(Some)
+    }
+
+    fn begin_cache_mutation_in_scope(
+        &self,
+        context: &OfflineCache,
+        scope: CacheScope,
+        paths: &[&str],
+    ) -> Result<CacheMutation, CloudError> {
         context
             .cache
             .invalidate_paths(&scope, paths)
@@ -1539,10 +2014,31 @@ impl Engine {
             .collect::<Result<Vec<_>, CloudError>>()?;
         parent_paths.sort();
         parent_paths.dedup();
-        Ok(Some(CacheMutation {
+        Ok(CacheMutation {
             scope,
             parent_paths,
-        }))
+        })
+    }
+
+    /// Admission and invalidation share the backend's fresh mutation root.
+    /// The execution and metadata gates remain held through confirmation.
+    fn prepare_observed_cache_mutation(
+        &self,
+        space_id: &str,
+        paths: &[&str],
+        space: &CloudSpace,
+        root: &RemoteEntry,
+    ) -> Result<(), CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Conflict,
+                "ordinary mutation cache is unavailable",
+            )
+        })?;
+        let scope = self.plaintext_scope_from_observation(space_id, space, root)?;
+        self.guard_create_mutation_in_scope(&scope, paths)?;
+        self.begin_cache_mutation_in_scope(context, scope, paths)?;
+        Ok(())
     }
 
     /// Republish exact complete parent listings after a mutation attempt.
@@ -3308,12 +3804,19 @@ impl Engine {
                         file: SnapshotReader::Download(file),
                     },
                     size,
+                    false,
                 ))
             })()
         };
         match result {
-            Ok((snapshot, bytes)) => {
-                self.finish_transfer(record, "completed", bytes, None)?;
+            Ok((snapshot, bytes, cache_read)) => {
+                self.finish_transfer_with_operation(
+                    record,
+                    cache_read.then_some("cache_read"),
+                    "completed",
+                    bytes,
+                    None,
+                )?;
                 Ok(snapshot)
             }
             Err(error) => {
@@ -3327,13 +3830,20 @@ impl Engine {
         &self,
         space: &str,
         path: &str,
-    ) -> Result<(FetchSnapshot, u64), CloudError> {
+    ) -> Result<(FetchSnapshot, u64, bool), CloudError> {
         let context = self
             .offline_cache
             .as_ref()
             .expect("cached snapshot requires a cache context");
-        let (scope, online_root) = match self.online_plaintext_scope(space) {
-            Ok(result) => result,
+        // Keep one fresh Space/root observation paired with the target lookup.
+        // `ordinary_stat_snapshot` retains root failures outside `target`, so
+        // only a scoped target Offline result can use the cached-entry fallback.
+        let (scope, online_root, target) = match self.backend.ordinary_stat_snapshot(space, path) {
+            Ok(snapshot) => {
+                let scope =
+                    self.plaintext_scope_from_observation(space, &snapshot.space, &snapshot.root)?;
+                (scope, snapshot.root, snapshot.target)
+            }
             Err(error) if error.kind == ErrorKind::Offline => {
                 let scope = self
                     .cached_scope(space, context)
@@ -3355,13 +3865,14 @@ impl Engine {
                             file: SnapshotReader::Cached(file),
                         },
                         bytes,
+                        true,
                     ));
                 }
                 let entry = self.cached_entry_or_error(context, &scope, path, error.clone())?;
                 let size = entry.size;
                 return self
                     .open_cached_snapshot(context, &scope, &entry, error)
-                    .map(|snapshot| (snapshot, size));
+                    .map(|snapshot| (snapshot, size, true));
             }
             Err(error) => return Err(error),
         };
@@ -3383,20 +3894,21 @@ impl Engine {
                         file: SnapshotReader::Cached(file),
                     },
                     bytes,
+                    true,
                 ));
             }
         }
         let before = if path == "/" {
             online_root
         } else {
-            match self.backend.stat(space, path) {
+            match target {
                 Ok(entry) => entry,
                 Err(error) if error.kind == ErrorKind::Offline => {
                     let entry = self.cached_entry_or_error(context, &scope, path, error.clone())?;
                     let size = entry.size;
                     return self
                         .open_cached_snapshot(context, &scope, &entry, error)
-                        .map(|snapshot| (snapshot, size));
+                        .map(|snapshot| (snapshot, size, true));
                 }
                 Err(error) => return Err(error),
             }
@@ -3409,6 +3921,9 @@ impl Engine {
         }
         if before.encrypted {
             return Err(unsupported_encrypted_cache());
+        }
+        if let Some(snapshot) = self.open_online_cached_snapshot(context, &scope, path, &before)? {
+            return Ok((snapshot, before.size, true));
         }
         let downloaded = (|| {
             let snapshot = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
@@ -3461,10 +3976,148 @@ impl Engine {
             Err(error) if error.kind == ErrorKind::Offline => {
                 let size = before.size;
                 self.open_cached_snapshot(context, &scope, &before, error)
-                    .map(|snapshot| (snapshot, size))
+                    .map(|snapshot| (snapshot, size, true))
             }
-            result => result,
+            Ok((snapshot, size)) => Ok((snapshot, size, false)),
+            Err(error) => Err(error),
         }
+    }
+
+    fn open_online_cached_snapshot(
+        &self,
+        context: &OfflineCache,
+        scope: &CacheScope,
+        path: &str,
+        entry: &RemoteEntry,
+    ) -> Result<Option<FetchSnapshot>, CloudError> {
+        if entry.path != path {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "cached open metadata path changed",
+            ));
+        }
+        let tag = entry.etag.as_bytes();
+        let strong_version = tag.len() > 2
+            && tag.first() == Some(&b'"')
+            && tag.last() == Some(&b'"')
+            && tag[1..tag.len() - 1]
+                .iter()
+                .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte) || *byte >= 0x80);
+        if entry.directory || entry.encrypted || entry.id.is_empty() || !strong_version {
+            return Ok(None);
+        }
+        let version = ContentVersion {
+            resource_id: entry.id.clone(),
+            etag: entry.etag.clone(),
+            protection: ContentProtection::Plaintext,
+        };
+        let mut file = match context.cache.open_content(scope, &version) {
+            Ok(file) => Some(file),
+            Err(
+                CacheError::NotFound
+                | CacheError::PolicyConflict
+                | CacheError::InvalidContentVersion,
+            ) => None,
+            Err(error) => return Err(cache_cloud_error(error)),
+        };
+        if file.is_none() {
+            let receipt = match context.cache.verified_ordinary_create_for_remote(
+                scope,
+                path,
+                &entry.id,
+                &entry.etag,
+            ) {
+                Ok(receipt) => receipt,
+                Err(CacheError::InvalidEntry | CacheError::NotFound) => None,
+                Err(error) => return Err(cache_cloud_error(error)),
+            };
+            let Some(receipt) = receipt else {
+                return Ok(None);
+            };
+            let remote_matches = receipt.remote.as_ref().is_some_and(|remote| {
+                remote.resource_id == entry.id
+                    && remote.etag == entry.etag
+                    && remote.protection == ContentProtection::Plaintext
+            });
+            if receipt.state != raiun_cache::OrdinaryCreateState::Verified
+                || receipt.body_evicted
+                || receipt.write.logical_path != path
+                || !remote_matches
+                || receipt.byte_len != entry.size
+            {
+                return Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "verified saved upload does not match the current cloud file",
+                ));
+            }
+            let retained = match context.cache.open_content(scope, &receipt.write.content) {
+                Ok(file) => file,
+                // A clean, acknowledged body may be evicted between lookup
+                // and open. That grants no cache hit; use conditional download.
+                Err(
+                    CacheError::NotFound
+                    | CacheError::PolicyConflict
+                    | CacheError::InvalidContentVersion,
+                ) => return Ok(None),
+                Err(error) => return Err(cache_cloud_error(error)),
+            };
+            file = Some(retained);
+        }
+        let mut file = file.expect("cache hit or verified create body");
+        if file.metadata().map_err(io_error)?.len() != entry.size {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "cached file version does not match its metadata size",
+            ));
+        }
+        // The cache body is fully hashed by open_content. Preserve the normal
+        // download's post-read file/ancestor checks: root-only observation
+        // would miss a nested folder becoming encrypted during the local read.
+        // Reuse one fresh root/target observation for the post-hash check.
+        // Keep outer (discovery/root) errors distinct from scoped target
+        // errors, and preserve the legacy missing-Space versus missing-root
+        // error distinction on the outer NotFound path.
+        let snapshot = match self.backend.ordinary_stat_snapshot(scope.space_id(), path) {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) if error.kind == ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let (after, observed_scope) = match snapshot {
+            Some(snapshot) => {
+                let after = snapshot.target?;
+                (after, Some((snapshot.space, snapshot.root)))
+            }
+            None => (self.backend.stat(scope.space_id(), path)?, None),
+        };
+        if after.path != path
+            || after.id != entry.id
+            || after.etag != entry.etag
+            || after.size != entry.size
+            || after.directory
+            || after.encrypted
+        {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "cloud file changed during cached open",
+            ));
+        }
+        let current_scope = match observed_scope {
+            Some((space, root)) => {
+                self.plaintext_scope_from_observation(scope.space_id(), &space, &root)?
+            }
+            None => self.online_plaintext_scope(scope.space_id())?.0,
+        };
+        if current_scope != *scope {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "cloud account or Space root changed during cached open",
+            ));
+        }
+        file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+        Ok(Some(FetchSnapshot {
+            _temp: None,
+            file: SnapshotReader::Cached(file),
+        }))
     }
 
     fn open_cached_snapshot(
@@ -3511,36 +4164,154 @@ impl Engine {
     }
 
     pub fn mkdir(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
+        self.mkdir_impl(space, path, false).map(|(entry, _)| entry)
+    }
+
+    pub fn mkdir_for_provider(
+        &self,
+        space: &str,
+        path: &str,
+    ) -> Result<(RemoteEntry, Option<LookupEmptyDirectoryHint>), CloudError> {
+        self.mkdir_impl(space, path, true)
+    }
+
+    fn mkdir_impl(
+        &self,
+        space: &str,
+        path: &str,
+        provider_birth_view: bool,
+    ) -> Result<(RemoteEntry, Option<LookupEmptyDirectoryHint>), CloudError> {
+        let started = Instant::now();
+        let birth_generation = if provider_birth_view {
+            self.backend.read_only_generation()
+        } else {
+            None
+        };
+        let observed_scope = std::cell::RefCell::new(None);
         let _guard = self.execution()?;
-        self.guard_create_mutation(space, &[path])?;
+        let observed_preflight = self.offline_cache.is_some() && self.vault_binding.is_none();
+        if !observed_preflight {
+            self.guard_create_mutation(space, &[path])?;
+        }
         let _metadata = self.metadata_publication()?;
-        let cache_mutation = self.begin_cache_mutation(space, &[path])?;
+        if !observed_preflight {
+            self.begin_cache_mutation(space, &[path])?;
+        }
         let id = self.begin_transfer(None, space, path, "mkdir")?;
-        match self.backend.mkdir(space, path) {
-            Ok(entry) => match self.backend.stat(space, path) {
-                Ok(verified) if verified.directory && verified.etag == entry.etag => {
-                    self.finish_cache_mutation(space, cache_mutation);
-                    self.finish_transfer(id, "completed", 0, None)?;
-                    Ok(verified)
+        let outcome = if observed_preflight {
+            let preflight = |selected: &CloudSpace, root: &RemoteEntry| {
+                self.prepare_observed_cache_mutation(space, &[path], selected, root)?;
+                if birth_generation.is_some() {
+                    observed_scope.replace(Some(
+                        self.plaintext_scope_from_observation(space, selected, root)?,
+                    ));
                 }
-                Ok(_) => {
-                    let error = CloudError::new(
-                        ErrorKind::InvalidResponse,
-                        "created directory could not be verified",
-                    );
-                    self.finish_transfer(id, "failed", 0, Some(&error.message))?;
-                    Err(error)
-                }
-                Err(error) => {
-                    self.finish_transfer(id, "failed", 0, Some(&error.message))?;
-                    Err(error)
-                }
-            },
+                Ok(())
+            };
+            if birth_generation.is_some() {
+                self.backend
+                    .mkdir_and_confirm_with_preflight_and_view(space, path, &preflight)
+            } else {
+                self.backend
+                    .mkdir_and_confirm_with_preflight(space, path, &preflight)
+                    .map(|entry| (entry, false))
+            }
+        } else {
+            self.backend
+                .mkdir_and_confirm(space, path)
+                .map(|entry| (entry, false))
+        };
+        match outcome {
+            Ok((verified, observed_empty)) => {
+                // The caller publishes this exact confirmed entry in its
+                // native node table. Leave the invalidated parent listing
+                // unavailable offline until the next normal directory read.
+                self.finish_transfer(id, "completed", 0, None)?;
+                let hint = match (
+                    observed_empty,
+                    birth_generation,
+                    observed_scope.into_inner(),
+                ) {
+                    (true, Some(generation), Some(scope)) => self.lookup_empty_directory_hint(
+                        scope,
+                        path,
+                        &verified,
+                        generation,
+                        started + Duration::from_secs(1),
+                    ),
+                    _ => None,
+                };
+                Ok((verified, hint))
+            }
             Err(error) => {
                 self.finish_transfer(id, "failed", 0, Some(&error.message))?;
                 Err(error)
             }
         }
+    }
+
+    pub fn can_delete_empty_directory_bound(&self) -> bool {
+        self.vault_binding.is_none()
+            && self.offline_cache.is_some()
+            && self.account_scope.is_some()
+            && self.backend.supports_empty_directory_delete()
+    }
+
+    /// Freshly prove ordinary cloud emptiness and conditionally delete once.
+    /// Local provider routes and frozen recovery spools remain adapter guards.
+    pub fn delete_empty_directory(
+        &self,
+        space: &str,
+        path: &str,
+        expected_resource_id: &str,
+    ) -> Result<(), CloudError> {
+        if !self.can_delete_empty_directory_bound() {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "bound empty-directory deletion is unavailable",
+            ));
+        }
+        if path.is_empty() || path.bytes().all(|byte| byte == b'/') {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot delete a cloud Space root",
+            ));
+        }
+        let id = self.begin_transfer(None, space, path, "delete")?;
+        let outcome = (|| {
+            let _execution = self.execution()?;
+            let _metadata = self.metadata_publication()?;
+            self.backend.delete_empty_directory_and_confirm_with_preflight(
+                space, path, expected_resource_id, &|selected, root| {
+                    self.prepare_observed_cache_mutation(space, &[path], selected, root)?;
+                    let scope = self.plaintext_scope_from_observation(space, selected, root)?;
+                    // The create-handoff guard intentionally permits legacy
+                    // Match writes. Rmdir must also preserve every unresolved
+                    // descendant/ancestor journal entry, regardless of kind.
+                    if self.has_pending_create_overlap(&scope, path)? {
+                        return Err(CloudError::new(ErrorKind::Conflict, "directory subtree has pending local edits; local bytes were preserved"));
+                    }
+                    Ok(())
+                },
+            )
+        })();
+        let message = outcome.as_ref().err().map(|error| {
+            format!(
+                "Checking empty directory, deleting and confirming cloud item: {}",
+                error.message
+            )
+        });
+        self.finish_transfer(
+            id,
+            if outcome.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            },
+            0,
+            message.as_deref(),
+        )?;
+        outcome
     }
 
     pub fn delete(&self, space: &str, path: &str, expected_etag: &str) -> Result<(), CloudError> {
@@ -3552,36 +4323,51 @@ impl Engine {
                 "cannot delete a cloud Space root",
             ));
         }
-        let _guard = self.execution()?;
-        self.guard_create_mutation(space, &[path])?;
-        let _metadata = self.metadata_publication()?;
-        let cache_mutation = self.begin_cache_mutation(space, &[path])?;
         let id = self.begin_transfer(None, space, path, "delete")?;
-        match self.backend.delete(space, path, expected_etag) {
-            Ok(()) => match self.backend.stat(space, path) {
-                Err(error) if error.kind == ErrorKind::NotFound => {
-                    self.finish_cache_mutation(space, cache_mutation);
-                    self.finish_transfer(id, "completed", 0, None)?;
-                    Ok(())
-                }
-                Ok(_) => {
-                    let error = CloudError::new(
-                        ErrorKind::InvalidResponse,
-                        "deleted item is still present",
-                    );
-                    self.finish_transfer(id, "failed", 0, Some(&error.message))?;
-                    Err(error)
-                }
-                Err(error) => {
-                    self.finish_transfer(id, "failed", 0, Some(&error.message))?;
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                self.finish_transfer(id, "failed", 0, Some(&error.message))?;
-                Err(error)
+        let mut stage = "Checking permissions and saved edits";
+        let outcome = (|| {
+            let _guard = self.execution()?;
+            let observed_preflight = self.offline_cache.is_some() && self.vault_binding.is_none();
+            if !observed_preflight {
+                self.guard_create_mutation(space, &[path])?;
             }
-        }
+            let _metadata = self.metadata_publication()?;
+            // Invalidate before sending. Successful deletes no longer relist
+            // the whole parent after every child; normal directory reads
+            // refresh it later. Until then offline metadata fails closed.
+            if observed_preflight {
+                stage = "Checking edits, deleting and confirming cloud item";
+                self.backend.delete_and_confirm_with_preflight(
+                    space,
+                    path,
+                    expected_etag,
+                    &|selected, root| {
+                        self.prepare_observed_cache_mutation(space, &[path], selected, root)
+                    },
+                )?;
+            } else {
+                self.begin_cache_mutation(space, &[path])?;
+                stage = "Deleting and confirming cloud item";
+                self.backend
+                    .delete_and_confirm(space, path, expected_etag)?;
+            }
+            Ok(())
+        })();
+        let message = outcome
+            .as_ref()
+            .err()
+            .map(|error: &CloudError| format!("{stage}: {}", error.message));
+        self.finish_transfer(
+            id,
+            if outcome.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            },
+            0,
+            message.as_deref(),
+        )?;
+        outcome
     }
 
     pub fn rename(
@@ -3665,7 +4451,7 @@ impl Engine {
 
     pub fn transfers(&self, limit: usize) -> Result<Vec<TransferRecord>, CloudError> {
         let db = self.db()?;
-        let mut statement = db.prepare("SELECT id,pair_id,space_id,path,operation,status,bytes,message,COALESCE(finished_unix,created_unix) FROM transfers ORDER BY id DESC LIMIT ?1").map_err(db_error)?;
+        let mut statement = db.prepare("SELECT id,pair_id,space_id,path,operation,status,bytes,message,COALESCE(finished_unix,created_unix),created_ms,finished_ms FROM transfers ORDER BY id DESC LIMIT ?1").map_err(db_error)?;
         let rows = statement
             .query_map([limit.min(i64::MAX as usize) as i64], |row| {
                 let pair_id: Option<String> = row.get(1)?;
@@ -3690,7 +4476,30 @@ impl Engine {
                     state: row.get(5)?,
                     bytes_total: bytes,
                     bytes_done: bytes,
-                    error: row.get(7)?,
+                    operation,
+                    duration_ms: match (
+                        row.get::<_, Option<i64>>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
+                    ) {
+                        (Some(start), Some(end)) if end >= start => Some((end - start) as u64),
+                        _ => None,
+                    },
+                    error: if matches!(
+                        row.get::<_, String>(5)?.as_str(),
+                        "failed" | "conflict" | "attention"
+                    ) {
+                        row.get(7)?
+                    } else {
+                        None
+                    },
+                    message: if matches!(
+                        row.get::<_, String>(5)?.as_str(),
+                        "failed" | "conflict" | "attention"
+                    ) {
+                        None
+                    } else {
+                        row.get(7)?
+                    },
                     updated_at: row.get(8)?,
                 })
             })
@@ -5135,9 +5944,12 @@ impl Engine {
         path: &str,
         operation: &str,
     ) -> Result<i64, CloudError> {
-        let now = now_unix();
-        self.db()?.execute("INSERT INTO transfers(pair_id,space_id,path,operation,status,created_unix) VALUES(?1,?2,?3,?4,'running',?5)", params![pair,space,path,operation,now]).map_err(db_error)?;
-        Ok(self.db()?.last_insert_rowid())
+        let now = now_unix_millis();
+        // INSERT and connection-local rowid belong to the same lock. Separate
+        // locks can attach concurrent workers' outcomes to the wrong file.
+        let db = self.db()?;
+        db.execute("INSERT INTO transfers(pair_id,space_id,path,operation,status,created_unix,created_ms) VALUES(?1,?2,?3,?4,'running',?5,?6)", params![pair,space,path,operation,now / 1000,now]).map_err(db_error)?;
+        Ok(db.last_insert_rowid())
     }
 
     fn finish_transfer(
@@ -5147,15 +5959,28 @@ impl Engine {
         bytes: u64,
         message: Option<&str>,
     ) -> Result<(), CloudError> {
+        self.finish_transfer_with_operation(id, None, status, bytes, message)
+    }
+
+    fn finish_transfer_with_operation(
+        &self,
+        id: i64,
+        operation: Option<&str>,
+        status: &str,
+        bytes: u64,
+        message: Option<&str>,
+    ) -> Result<(), CloudError> {
         self.db()?
             .execute(
-                "UPDATE transfers SET status=?1,bytes=?2,message=?3,finished_unix=?4 WHERE id=?5",
+                "UPDATE transfers SET operation=COALESCE(?1,operation),status=?2,bytes=?3,message=?4,finished_unix=?5,finished_ms=?7 WHERE id=?6",
                 params![
+                    operation,
                     status,
                     bytes.min(i64::MAX as u64) as i64,
                     message,
                     now_unix(),
-                    id
+                    id,
+                    now_unix_millis()
                 ],
             )
             .map_err(db_error)?;
@@ -5192,13 +6017,33 @@ impl Engine {
             .lock()
             .map_err(|_| CloudError::new(ErrorKind::Io, "engine execution lock was poisoned"))
     }
-    fn metadata_publication(&self) -> Result<MutexGuard<'_, ()>, CloudError> {
-        self.inner.metadata_gate.lock().map_err(|_| {
+    fn metadata_publication(&self) -> Result<MutexGuard<'_, u64>, CloudError> {
+        let mut guard = self.inner.metadata_gate.lock().map_err(|_| {
             CloudError::new(
                 ErrorKind::Io,
                 "engine metadata publication lock was poisoned",
             )
-        })
+        })?;
+        Self::advance_metadata_epoch(&mut guard)?;
+        Ok(guard)
+    }
+
+    fn advance_metadata_epoch(epoch: &mut u64) -> Result<(), CloudError> {
+        *epoch = epoch.checked_add(1).ok_or_else(|| {
+            CloudError::new(ErrorKind::Io, "engine metadata publication epoch exhausted")
+        })?;
+        Ok(())
+    }
+
+    fn try_metadata_observation(&self) -> Result<Option<MutexGuard<'_, u64>>, CloudError> {
+        match self.inner.metadata_gate.try_lock() {
+            Ok(guard) => Ok(Some(guard)),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => Err(CloudError::new(
+                ErrorKind::Io,
+                "engine metadata publication lock was poisoned",
+            )),
+        }
     }
 
     fn check_sync_paused(&self) -> Result<(), CloudError> {
@@ -6091,6 +6936,38 @@ fn db_error(error: rusqlite::Error) -> CloudError {
     CloudError::new(ErrorKind::Io, format!("engine database error: {error}"))
 }
 
+fn now_unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+fn ensure_transfer_timing_columns(db: &Connection) -> Result<(), CloudError> {
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    let names = {
+        let mut statement = tx
+            .prepare("PRAGMA table_info(transfers)")
+            .map_err(db_error)?;
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?
+    };
+    for column in ["created_ms", "finished_ms"] {
+        if !names.iter().any(|name| name == column) {
+            tx.execute(
+                &format!("ALTER TABLE transfers ADD COLUMN {column} INTEGER"),
+                [],
+            )
+            .map_err(db_error)?;
+        }
+    }
+    tx.commit().map_err(db_error)
+}
+
 fn ensure_media_job_revision_column(db: &Connection) -> Result<(), CloudError> {
     let mut statement = db
         .prepare("PRAGMA table_info(media_upload_attempts)")
@@ -6228,6 +7105,12 @@ mod tests {
         fail_all: Mutex<Option<ErrorKind>>,
         fail_stat_path: Mutex<Option<(String, ErrorKind)>>,
         space_encrypted: Mutex<bool>,
+        lookup_generation: Mutex<Option<u64>>,
+        lookup_parent_observed: AtomicBool,
+        lookup_parent_override: Mutex<Option<RemoteEntry>>,
+        lookup_empty_view: AtomicBool,
+        lookup_view_delay: Mutex<Duration>,
+        empty_directory_delete_supported: AtomicBool,
         spaces_override: Mutex<Option<Vec<CloudSpace>>>,
         spaces_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
         list_repeat: Mutex<usize>,
@@ -6327,6 +7210,92 @@ mod tests {
     impl CloudBackend for FakeCloud {
         fn server_origin(&self) -> Option<String> {
             Some("https://example.invalid".into())
+        }
+
+        fn read_only_generation(&self) -> Option<u64> {
+            self.lookup_generation.lock().ok().and_then(|value| *value)
+        }
+
+        fn supports_empty_directory_delete(&self) -> bool {
+            self.empty_directory_delete_supported
+                .load(Ordering::Acquire)
+        }
+
+        fn delete_empty_directory_and_confirm_with_preflight(
+            &self,
+            space: &str,
+            path: &str,
+            expected_resource_id: &str,
+            preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+        ) -> Result<(), CloudError> {
+            if !self.supports_empty_directory_delete() {
+                return Err(CloudError::new(
+                    ErrorKind::Unsupported,
+                    "fixture feature disabled",
+                ));
+            }
+            let (selected, root) = self.space_root_metadata(space)?;
+            let target = self.stat(space, path)?;
+            if target.id != expected_resource_id || !target.directory {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "fixture directory changed",
+                ));
+            }
+            let mut nonempty = false;
+            self.list(space, path, &mut |_| {
+                nonempty = true;
+                Ok(())
+            })?;
+            if nonempty {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "fixture directory is not empty",
+                ));
+            }
+            preflight(&selected, &root)?;
+            self.delete_and_confirm(space, path, &target.etag)
+        }
+
+        fn mkdir_and_confirm_with_preflight_and_view(
+            &self,
+            space: &str,
+            path: &str,
+            preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+        ) -> Result<(RemoteEntry, bool), CloudError> {
+            std::thread::sleep(*self.lookup_view_delay.lock().unwrap());
+            self.mkdir_and_confirm_with_preflight(space, path, preflight)
+                .map(|entry| (entry, self.lookup_empty_view.load(Ordering::Acquire)))
+        }
+
+        fn ordinary_stat_snapshot(
+            &self,
+            space: &str,
+            path: &str,
+        ) -> Result<raiun_core::backend::OrdinaryStatSnapshot, CloudError> {
+            let (selected, root) = self.space_root_metadata(space)?;
+            let observed_parent = if path == "/" {
+                Some(root.clone())
+            } else if self.lookup_parent_observed.load(Ordering::Acquire) {
+                self.lookup_parent_override
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .or_else(|| self.stat(space, &parent_path(path).ok()?).ok())
+            } else {
+                None
+            };
+            let target = if path == "/" {
+                Ok(root.clone())
+            } else {
+                self.stat(space, path)
+            };
+            Ok(raiun_core::backend::OrdinaryStatSnapshot {
+                space: selected,
+                root,
+                observed_parent,
+                target,
+            })
         }
 
         fn spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
@@ -9714,6 +10683,338 @@ mod tests {
     }
 
     #[test]
+    fn lookup_absence_hint_requires_exact_observed_parent_and_target() {
+        let (_state, cloud, cache, engine) = responsiveness_fixture();
+        let engine = engine
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid".into(),
+            )
+            .unwrap();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        let path = "/sync/absent.txt";
+        let (result, hint) = engine.provider_stat_for_lookup("space", path, "/sync");
+        assert_eq!(result.unwrap_err().kind, ErrorKind::NotFound);
+        assert!(
+            hint.is_none(),
+            "default backend has no observation provenance"
+        );
+        *cloud.lookup_generation.lock().unwrap() = Some(7);
+        assert!(
+            engine
+                .provider_stat_for_lookup("space", path, "/sync")
+                .1
+                .is_none()
+        );
+        cloud.lookup_parent_observed.store(true, Ordering::Release);
+        let (result, hint) = engine.provider_stat_for_lookup("space", path, "/sync");
+        assert_eq!(result.unwrap_err().kind, ErrorKind::NotFound);
+        let hint = hint.expect("fresh exact target absence");
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Forbidden);
+        assert!(
+            engine
+                .validate_lookup_absence_hint(&hint, "space", path, "/sync")
+                .unwrap(),
+            "validation is local and never calls the backend"
+        );
+        *cloud.fail_all.lock().unwrap() = None;
+        assert!(
+            engine
+                .provider_stat_for_lookup("space", path, "wrong-parent")
+                .1
+                .is_none()
+        );
+        let mut wrong = cloud.remote_entry("/sync").unwrap();
+        wrong.path = "/other".into();
+        *cloud.lookup_parent_override.lock().unwrap() = Some(wrong);
+        assert!(
+            engine
+                .provider_stat_for_lookup("space", path, "/sync")
+                .1
+                .is_none()
+        );
+        *cloud.lookup_parent_override.lock().unwrap() = None;
+        *cloud.fail_stat_path.lock().unwrap() = Some(("/".into(), ErrorKind::NotFound));
+        let (result, hint) = engine.provider_stat_for_lookup("space", path, "/sync");
+        assert_eq!(result.unwrap_err().kind, ErrorKind::NotFound);
+        assert!(hint.is_none(), "outer root failure is not target absence");
+        *cloud.fail_stat_path.lock().unwrap() = Some((path.into(), ErrorKind::Offline));
+        let (result, hint) = engine.provider_stat_for_lookup("space", path, "/sync");
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Offline);
+        assert!(hint.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_absence_hint_rejects_pending_generation_and_account_changes() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        let engine = engine
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid".into(),
+            )
+            .unwrap();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        *cloud.lookup_generation.lock().unwrap() = Some(7);
+        cloud.lookup_parent_observed.store(true, Ordering::Release);
+        let path = "/sync/create-1.txt";
+        let hint = engine
+            .provider_stat_for_lookup("space", path, "/sync")
+            .1
+            .unwrap();
+        assert!(
+            !engine
+                .validate_lookup_absence_hint(&hint, "space", "/sync/other.txt", "/sync")
+                .unwrap()
+        );
+        assert!(
+            !engine
+                .validate_lookup_absence_hint(&hint, "space", path, "other-parent")
+                .unwrap()
+        );
+        let rebound = engine
+            .with_account_scope("profile-account-1".into(), "https://example.invalid".into())
+            .unwrap();
+        assert!(
+            !rebound
+                .validate_lookup_absence_hint(&hint, "space", path, "/sync")
+                .unwrap()
+        );
+        *cloud.lookup_generation.lock().unwrap() = Some(8);
+        assert!(
+            !engine
+                .validate_lookup_absence_hint(&hint, "space", path, "/sync")
+                .unwrap()
+        );
+        *cloud.lookup_generation.lock().unwrap() = Some(7);
+        let mut expired = hint.clone();
+        expired.binding.expires_at = Instant::now();
+        assert!(
+            !engine
+                .validate_lookup_absence_hint(&expired, "space", path, "/sync")
+                .unwrap()
+        );
+        let source = state.path().join("lookup-pending-source");
+        fs::write(&source, b"retained pending bytes").unwrap();
+        let receipt = queue_create_fixture(&engine, &cloud, &source, 1);
+        assert!(
+            !engine
+                .validate_lookup_absence_hint(&hint, "space", path, "/sync")
+                .unwrap()
+        );
+        let (result, next_hint) = engine.provider_stat_for_lookup("space", path, "/sync");
+        assert_eq!(result.unwrap().size, b"retained pending bytes".len() as u64);
+        assert!(next_hint.is_none());
+        assert_eq!(
+            receipt.storage_receipt().state,
+            raiun_cache::OrdinaryCreateState::Ready
+        );
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn lookup_empty_directory_hint_requires_confirmed_empty_view_and_local_binding() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        let engine = engine
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid".into(),
+            )
+            .unwrap();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        *cloud.lookup_generation.lock().unwrap() = Some(7);
+        assert!(
+            engine
+                .mkdir_for_provider("space", "/sync/unobserved")
+                .unwrap()
+                .1
+                .is_none()
+        );
+        cloud.lookup_empty_view.store(true, Ordering::Release);
+        let (directory, hint) = engine.mkdir_for_provider("space", "/sync/born").unwrap();
+        let hint = hint.unwrap();
+        let child = "/sync/born/child.txt";
+        assert!(
+            engine
+                .validate_lookup_empty_directory_hint(
+                    &hint,
+                    "space",
+                    &directory.path,
+                    &directory.id,
+                    child
+                )
+                .unwrap()
+        );
+        assert!(
+            !engine
+                .validate_lookup_empty_directory_hint(
+                    &hint,
+                    "space",
+                    &directory.path,
+                    "wrong-id",
+                    child
+                )
+                .unwrap()
+        );
+        assert!(
+            !engine
+                .validate_lookup_empty_directory_hint(
+                    &hint,
+                    "space",
+                    &directory.path,
+                    &directory.id,
+                    "/sync/born/deeper/child.txt"
+                )
+                .unwrap()
+        );
+        *cloud.lookup_generation.lock().unwrap() = Some(8);
+        assert!(
+            !engine
+                .validate_lookup_empty_directory_hint(
+                    &hint,
+                    "space",
+                    &directory.path,
+                    &directory.id,
+                    child
+                )
+                .unwrap()
+        );
+        *cloud.lookup_generation.lock().unwrap() = Some(7);
+        cloud.insert_file(child, b"original");
+        engine.list("space", "/sync").unwrap();
+        engine.list("space", &directory.path).unwrap();
+        let original = cloud.remote_entry(child).unwrap();
+        let source = state.path().join("birth-pending-source");
+        fs::write(&source, b"pending local bytes").unwrap();
+        engine
+            .queue_offline_file_write(
+                "space",
+                child,
+                &source,
+                WriteCondition::Match(original.etag),
+            )
+            .unwrap();
+        assert!(
+            !engine
+                .validate_lookup_empty_directory_hint(
+                    &hint,
+                    "space",
+                    &directory.path,
+                    &directory.id,
+                    child
+                )
+                .unwrap()
+        );
+        *cloud.lookup_view_delay.lock().unwrap() = Duration::from_millis(1010);
+        assert!(
+            engine
+                .mkdir_for_provider("space", "/sync/slow-birth")
+                .unwrap()
+                .1
+                .is_none()
+        );
+        *cloud.lookup_view_delay.lock().unwrap() = Duration::ZERO;
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Offline);
+        assert_eq!(
+            engine
+                .mkdir_for_provider("space", "/sync/failed-birth")
+                .err()
+                .unwrap()
+                .kind,
+            ErrorKind::Offline
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_directory_delete_preserves_pending_descendant_custody() {
+        for handoff in [false, true] {
+            let (state, cloud, cache, engine) = responsiveness_fixture();
+            let engine = engine
+                .with_offline_cache(
+                    cache.clone(),
+                    "profile-account-1".into(),
+                    "https://example.invalid".into(),
+                )
+                .unwrap();
+            assert!(!engine.can_delete_empty_directory_bound());
+            cloud
+                .empty_directory_delete_supported
+                .store(true, Ordering::Release);
+            assert!(engine.can_delete_empty_directory_bound());
+            cloud
+                .entries
+                .lock()
+                .unwrap()
+                .get_mut("/sync")
+                .unwrap()
+                .0
+                .etag = "\"directory-v1\"".into();
+            cloud.insert_dir("/sync/sub");
+            cloud.insert_file("/sync/sub/dirty.txt", b"remote original");
+            engine.list("space", "/").unwrap();
+            engine.list("space", "/sync").unwrap();
+            engine.list("space", "/sync/sub").unwrap();
+            let scope = engine.ordinary_write_scope("space").unwrap();
+            let directory = cloud.remote_entry("/sync").unwrap();
+            let source = state.path().join("empty-delete-retained");
+            fs::write(&source, b"retained descendant bytes").unwrap();
+            let receipt = if handoff {
+                Some(queue_create_fixture(&engine, &cloud, &source, 1))
+            } else {
+                let target = cloud.remote_entry("/sync/sub/dirty.txt").unwrap();
+                engine
+                    .queue_offline_file_write(
+                        "space",
+                        &target.path,
+                        &source,
+                        WriteCondition::Match(target.etag),
+                    )
+                    .unwrap();
+                None
+            };
+            cloud
+                .entries
+                .lock()
+                .unwrap()
+                .retain(|path, _| !path.starts_with("/sync/"));
+            let error = engine
+                .delete_empty_directory("space", "/sync", &directory.id)
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Conflict);
+            if !handoff {
+                assert!(
+                    error
+                        .message
+                        .contains("directory subtree has pending local edits")
+                );
+            }
+            assert_eq!(*cloud.delete_calls.lock().unwrap(), 0);
+            assert!(cloud.remote_entry("/sync").is_ok());
+            assert_eq!(cache.pending_writes(&scope).unwrap().len(), 1);
+            assert_eq!(fs::read(&source).unwrap(), b"retained descendant bytes");
+            if let Some(receipt) = receipt {
+                assert_eq!(
+                    cache
+                        .ordinary_create_for_handoff(&scope, &receipt.storage_receipt().handoff_id)
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    raiun_cache::OrdinaryCreateState::Ready
+                );
+            }
+            assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+            assert_eq!(engine.transfers(1).unwrap()[0].state, "failed");
+        }
+    }
+
+    #[test]
     fn namespace_responsive_during_upload_and_verification_without_cache_publication() {
         for verification in [false, true] {
             let (state, cloud, cache, engine) = responsiveness_fixture();
@@ -10456,8 +11757,15 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn durable_create_ready_invalidates_a_listing_that_was_already_publishing() {
+    fn cache_publication_epoch_allows_ready_during_listing_http() {
         let (state, cloud, cache, engine) = responsiveness_fixture();
+        let engine = engine
+            .with_offline_cache(
+                cache.clone(),
+                "profile-account-1".into(),
+                "https://example.invalid".into(),
+            )
+            .unwrap();
         engine.list("space", "/").unwrap();
         engine.list("space", "/sync").unwrap();
         let scope = engine.ordinary_write_scope("space").unwrap();
@@ -10496,43 +11804,73 @@ mod tests {
             );
             let _ = ready.send(result);
         });
-        // Staging happens without the publication guard, but Ready cannot ACK
-        // until the already-running check/publish section has completed.
-        let start = std::time::Instant::now();
-        let staged = loop {
-            let found = cache
-                .ordinary_create_for_handoff(&scope, "00000000000000000000000000000031")
-                .unwrap();
-            if found.is_some() || start.elapsed() > std::time::Duration::from_secs(5) {
-                break found;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        };
-        let premature = ready_result.try_recv();
+        // A paused network observation must not retain the publication gate.
+        // Always release and join both fixtures before asserting on progress.
+        let admitted = ready_result.recv_timeout(std::time::Duration::from_secs(2));
         resume.send(()).unwrap();
-        listing.join().unwrap().unwrap();
+        let listed = listing.join().unwrap().unwrap();
         queue.join().unwrap();
-        assert_eq!(
-            staged.unwrap().state,
-            raiun_cache::OrdinaryCreateState::Staged
-        );
-        assert!(
-            premature.is_err(),
-            "Ready must not bypass publishing listing"
-        );
-        let receipt = ready_result
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap()
+        let receipt = admitted
+            .expect("Ready must complete while the listing HTTP remains paused")
             .unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|entry| entry.path == "/sync/publication-race.txt")
+        );
         assert_eq!(
             receipt.storage_receipt().state,
             raiun_cache::OrdinaryCreateState::Ready
         );
         assert!(
             cache.listing(&scope, &parent.id).is_err(),
-            "Ready invalidates any just-published old listing before ACK"
+            "the older network observation cannot republish after Ready invalidation"
         );
         assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn cache_publication_epoch_blocks_stale_publish_and_offline_fallback() {
+        for offline in [false, true] {
+            let (_state, cloud, cache, engine) = responsiveness_fixture();
+            engine.list("space", "/sync").unwrap();
+            let scope = engine.online_plaintext_scope("space").unwrap().0;
+            let parent_id = cloud.remote_entry("/sync").unwrap().id;
+            let (started, entered) = mpsc::sync_channel(1);
+            let (resume, paused) = mpsc::sync_channel(1);
+            *cloud.list_gate.lock().unwrap() = Some((started, paused));
+            let reader = engine.clone();
+            let old_read = std::thread::spawn(move || reader.list("space", "/sync"));
+            entered
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            cloud.insert_file("/sync/newer.txt", b"newer listing");
+            let newer = engine.list("space", "/sync").unwrap();
+            if !offline {
+                resume.send(()).unwrap();
+            }
+            drop(resume);
+            let old_result = old_read.join().unwrap();
+            if offline {
+                assert_eq!(old_result.unwrap_err().kind, ErrorKind::Offline);
+            } else {
+                assert!(
+                    old_result
+                        .unwrap()
+                        .iter()
+                        .all(|entry| entry.path != "/sync/newer.txt")
+                );
+            }
+            assert!(newer.iter().any(|entry| entry.path == "/sync/newer.txt"));
+            assert!(
+                cache
+                    .listing(&scope, &parent_id)
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .any(|entry| entry.entry.path == "/sync/newer.txt")
+            );
+        }
     }
 
     #[cfg(unix)]

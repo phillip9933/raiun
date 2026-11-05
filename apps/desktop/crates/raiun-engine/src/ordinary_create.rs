@@ -3,6 +3,7 @@ use super::*;
 use raiun_cache::{OrdinaryCreateReceipt, OrdinaryCreateRequest, OrdinaryCreateState};
 #[cfg(unix)]
 use raiun_core::backend::OperationCancellation;
+use raiun_core::backend::OrdinaryCreateMetadata;
 
 #[derive(Debug, Clone)]
 pub struct VerifiedCreateParent {
@@ -21,6 +22,34 @@ impl VerifiedCreateParent {
         &self.parent_resource_id
     }
 }
+#[derive(Debug, Clone, Serialize)]
+pub struct SavedCreateCheck {
+    pub outcome: &'static str,
+    pub checked_at_unix: i64,
+    pub bytes: u64,
+    pub resolved: bool,
+}
+
+fn checked_digest(
+    reader: &mut impl Read,
+    check: &dyn Fn() -> bool,
+) -> Result<(u64, String), CloudError> {
+    let mut hash = Sha256::new();
+    let mut len = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        current(check)?;
+        let count = reader.read(&mut buffer).map_err(io_error)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+        len = len.checked_add(count as u64).ok_or_else(refused)?;
+    }
+    current(check)?;
+    Ok((len, format!("{:x}", hash.finalize())))
+}
+
 pub struct CreateHandoffRequest<'a> {
     pub parent: &'a VerifiedCreateParent,
     pub source: &'a File,
@@ -77,6 +106,28 @@ impl Engine {
         Ok(&self.offline_cache.as_ref().ok_or_else(refused)?.cache)
     }
     /// Record local custody failure visibility only; this does not attempt an upload.
+    pub fn record_pending_create_delete_refusal(
+        &self,
+        scope: &CacheScope,
+        path: &str,
+    ) -> Result<(), CloudError> {
+        // A local refusal is normally before Engine::delete creates a transfer
+        // row. Surface it without granting network authority or changing custody.
+        self.create_cache(scope)?;
+        validate_remote_path(path).map_err(|_| refused())?;
+        if self.pending_create(scope, path)?.is_none() {
+            return Err(refused());
+        }
+        let transfer = self.begin_transfer(None, scope.space_id(), path, "delete")?;
+        self.finish_transfer(
+            transfer,
+            "failed",
+            0,
+            Some("Saved upload cannot be deleted while its remote outcome is unresolved. Review it in Transfers; the local copy is preserved."),
+        )
+    }
+
+    /// Record local custody failure visibility only; this does not attempt an upload.
     pub fn record_create_handoff_failure(
         &self,
         scope: &CacheScope,
@@ -128,6 +179,18 @@ impl Engine {
     ) -> Result<VerifiedCreateParent, CloudError> {
         self.prove_create_parent(expected_scope, path, expected_parent_id, check, true)
     }
+    /// Capture initial create authority and its exact scope from the same fresh
+    /// root/parent/absence observation. This proof is not reused at release or
+    /// pre-claim, which remain pinned to the captured scope.
+    pub fn capture_new_plaintext_create_parent_for_space(
+        &self,
+        space: &str,
+        path: &str,
+        expected_parent_id: Option<&str>,
+        check: &dyn Fn() -> bool,
+    ) -> Result<VerifiedCreateParent, CloudError> {
+        self.observe_create_parent(space, None, path, expected_parent_id, check, true)
+    }
     fn prove_create_parent(
         &self,
         expected_scope: &CacheScope,
@@ -137,102 +200,382 @@ impl Engine {
         require_absence: bool,
     ) -> Result<VerifiedCreateParent, CloudError> {
         self.create_cache(expected_scope)?;
+        self.observe_create_parent(
+            expected_scope.space_id(),
+            Some(expected_scope),
+            path,
+            expected_parent_id,
+            check,
+            require_absence,
+        )
+    }
+    fn observe_create_parent(
+        &self,
+        space: &str,
+        expected_scope: Option<&CacheScope>,
+        path: &str,
+        expected_parent_id: Option<&str>,
+        check: &dyn Fn() -> bool,
+        require_absence: bool,
+    ) -> Result<VerifiedCreateParent, CloudError> {
+        let identity = self.account_scope.as_ref().ok_or_else(refused)?;
+        let context = self.offline_cache.as_ref().ok_or_else(refused)?;
+        if self.vault_binding.is_some()
+            || context.account_id != identity.account_id
+            || context.origin != identity.origin
+            || self.backend.server_origin().as_deref() != Some(identity.origin.as_str())
+        {
+            return Err(refused());
+        }
         current(check)?;
         validate_remote_path(path).map_err(|_| refused())?;
         if !path.starts_with('/') || path == "/" || path.ends_with('/') {
-            return Err(refused());
-        }
-        let (scope, root) = self.online_plaintext_scope(expected_scope.space_id())?;
-        if scope != *expected_scope || !root.writable {
-            return Err(refused());
-        }
-        if !self
-            .backend
-            .spaces()?
-            .into_iter()
-            .any(|space| space.id == scope.space_id() && space.writable && !space.encrypted)
-        {
             return Err(refused());
         }
         let parent_path = parent_path(path)?;
         if parent_path != "/" && expected_parent_id.is_none() {
             return Err(refused());
         }
-        let mut parent = root;
+        // One observation reuses only this proof's freshly resolved routing.
+        // Admission, pre-claim and completion still make separate fresh proofs.
+        let observation = self.backend.ordinary_create_metadata(
+            space,
+            path,
+            expected_scope.map(CacheScope::root_resource_id),
+            expected_parent_id,
+            require_absence,
+            check,
+        )?;
+        self.validate_create_observation(
+            space,
+            expected_scope,
+            path,
+            expected_parent_id,
+            check,
+            require_absence,
+            &observation,
+        )
+    }
+    // Shared by ordinary proof calls and the upload preflight callback. Facts
+    // remain borrowed for this operation; no reusable authority is cached.
+    #[allow(clippy::too_many_arguments)]
+    fn validate_create_observation(
+        &self,
+        space: &str,
+        expected_scope: Option<&CacheScope>,
+        path: &str,
+        expected_parent_id: Option<&str>,
+        check: &dyn Fn() -> bool,
+        require_absence: bool,
+        observation: &OrdinaryCreateMetadata,
+    ) -> Result<VerifiedCreateParent, CloudError> {
+        let identity = self.account_scope.as_ref().ok_or_else(refused)?;
+        let context = self.offline_cache.as_ref().ok_or_else(refused)?;
+        if self.vault_binding.is_some()
+            || context.account_id != identity.account_id
+            || context.origin != identity.origin
+            || self.backend.server_origin().as_deref() != Some(identity.origin.as_str())
+        {
+            return Err(refused());
+        }
+        current(check)?;
+        validate_remote_path(path).map_err(|_| refused())?;
+        if !path.starts_with('/') || path == "/" || path.ends_with('/') {
+            return Err(refused());
+        }
+        let parent_path = parent_path(path)?;
+        if parent_path != "/" && expected_parent_id.is_none() {
+            return Err(refused());
+        }
+        let scope = CacheScope::new(
+            &context.origin,
+            &context.account_id,
+            &observation.space.id,
+            &observation.root.id,
+            ScopeProtection::PlaintextAllowed,
+        )
+        .map_err(cache_cloud_error)?;
+        self.create_cache(&scope)?;
+        if expected_scope.is_some_and(|expected| scope != *expected)
+            || observation.space.id != space
+            || observation.space.encrypted
+            || !observation.space.writable
+            || observation.root.path != "/"
+            || !observation.root.directory
+            || observation.root.encrypted
+            || !observation.root.writable
+            || observation.root.id.is_empty()
+            || observation.root.id.chars().any(char::is_control)
+        {
+            return Err(refused());
+        }
+        let mut parent = &observation.root;
+        let mut entries = observation.ancestors.iter();
         let mut ancestor = String::new();
         for component in parent_path.split('/').filter(|part| !part.is_empty()) {
             current(check)?;
             ancestor.push('/');
             ancestor.push_str(component);
-            parent = self.backend.stat(scope.space_id(), &ancestor)?;
-            if !parent.directory || parent.encrypted || !parent.writable || parent.path != ancestor
+            parent = entries.next().ok_or_else(refused)?;
+            if !parent.directory
+                || parent.encrypted
+                || !parent.writable
+                || parent.path != ancestor
+                || parent.id.is_empty()
+                || parent.id.chars().any(char::is_control)
             {
                 return Err(refused());
             }
         }
-        if expected_parent_id.is_some_and(|id| id != parent.id) {
+        if entries.next().is_some() || expected_parent_id.is_some_and(|id| id != parent.id) {
             return Err(refused());
         }
-        if require_absence {
-            match self.backend.stat(scope.space_id(), path) {
-                Err(error) if error.kind == ErrorKind::NotFound => {}
-                Ok(_) => return Err(refused()),
-                Err(error) => return Err(error),
-            }
+        if require_absence && observation.target.is_some() {
+            return Err(refused());
         }
         current(check)?;
         Ok(VerifiedCreateParent {
             scope,
             path: path.into(),
-            parent_resource_id: parent.id,
+            parent_resource_id: parent.id.clone(),
         })
     }
+    /// Inspect a stopped saved upload without sending or deleting cloud data.
+    /// Only an exact conditional readback can complete its local journal row.
+    pub fn check_saved_create(
+        &self,
+        scope: &CacheScope,
+        write_id: i64,
+        check: &dyn Fn() -> bool,
+    ) -> Result<SavedCreateCheck, CloudError> {
+        current(check)?;
+        let cache = self.create_cache(scope)?;
+        let receipt = cache
+            .ordinary_create_for_write(scope, write_id)
+            .map_err(cache_cloud_error)?
+            .ok_or_else(refused)?;
+        if !matches!(
+            receipt.state,
+            OrdinaryCreateState::Uncertain | OrdinaryCreateState::Conflict
+        ) || receipt.body_evicted
+        {
+            return Err(refused());
+        }
+        let mut local = cache
+            .open_content_cancellable(scope, &receipt.write.content, || !check())
+            .map_err(cache_cloud_error)?;
+        let (len, digest) = checked_digest(&mut local, check)?;
+        if len != receipt.byte_len || digest != receipt.sha256 {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "Saved file failed local integrity verification; no cloud request was sent",
+            ));
+        }
+        drop(local);
+        let transfer = self.begin_transfer(
+            None,
+            scope.space_id(),
+            &receipt.write.logical_path,
+            "verify_upload",
+        )?;
+        let outcome = (|| {
+            let (observed_scope, _) = self.online_plaintext_scope(scope.space_id())?;
+            if observed_scope != *scope {
+                return Err(refused());
+            }
+            current(check)?;
+            let entry = match self
+                .backend
+                .stat(scope.space_id(), &receipt.write.logical_path)
+            {
+                Ok(entry) => Some(entry),
+                Err(error) if error.kind == ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            current(check)?;
+            let result = |outcome, resolved| SavedCreateCheck {
+                outcome,
+                resolved,
+                bytes: receipt.byte_len,
+                checked_at_unix: now_unix(),
+            };
+            let Some(entry) = entry else {
+                // A negative observation is information only, never retry or
+                // deletion authority. Recheck root identity before reporting it.
+                if self.online_plaintext_scope(scope.space_id())?.0 != *scope {
+                    return Err(refused());
+                }
+                current(check)?;
+                return Ok(result("missing", false));
+            };
+            if entry.path != receipt.write.logical_path
+                || entry.directory
+                || entry.encrypted
+                || !entry.writable
+                || entry.id.is_empty()
+                || !entry.etag.starts_with('"')
+                || !entry.etag.ends_with('"')
+                || entry.etag.len() <= 2
+                || entry.etag.chars().any(char::is_control)
+            {
+                return Ok(result("unavailable", false));
+            }
+            if entry.size != receipt.byte_len {
+                return Ok(result("different", false));
+            }
+            let token = raiun_core::backend::OperationCancellation::new();
+            let downloaded = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
+            let verified = self.backend.download_in_root_with_cancellation(
+                scope.space_id(),
+                &receipt.write.logical_path,
+                Some(&entry.etag),
+                downloaded.path(),
+                scope.root_resource_id(),
+                &token,
+            )?;
+            current(check)?;
+            let (remote_len, remote_digest) =
+                checked_digest(&mut File::open(downloaded.path()).map_err(io_error)?, check)?;
+            if verified.id != entry.id
+                || verified.path != entry.path
+                || verified.etag != entry.etag
+                || verified.directory
+                || verified.encrypted
+                || !verified.writable
+            {
+                return Ok(result("unavailable", false));
+            }
+            if verified.size != receipt.byte_len
+                || remote_len != receipt.byte_len
+                || remote_digest != receipt.sha256
+            {
+                return Ok(result("different", false));
+            }
+            let _execution = self.execution()?;
+            self.prove_create_parent(
+                scope,
+                &receipt.write.logical_path,
+                Some(&receipt.write.parent_resource_id),
+                check,
+                false,
+            )?;
+            current(check)?;
+            let _metadata = self.metadata_publication()?;
+            cache
+                .invalidate_paths(scope, &[&receipt.write.logical_path])
+                .map_err(cache_cloud_error)?;
+            current(check)?;
+            cache
+                .confirm_ordinary_create_readback(scope, &receipt, &verified, &remote_digest)
+                .map_err(cache_cloud_error)?;
+            Ok(result("verified", true))
+        })();
+        let (state, message) = match &outcome {
+            Ok(result) if result.resolved => (
+                "completed",
+                "Cloud copy matches saved bytes; no upload was sent.".to_owned(),
+            ),
+            Ok(result) if result.outcome == "missing" => (
+                "attention",
+                "Cloud copy was not found. Saved bytes are preserved; no retry was sent."
+                    .to_owned(),
+            ),
+            Ok(result) if result.outcome == "unavailable" => (
+                "attention", "Cloud copy could not be compared reliably. Saved bytes are preserved; no upload was sent.".to_owned(),
+            ),
+            Ok(_) => (
+                "attention",
+                "Cloud copy does not match the saved upload. Both copies were left unchanged."
+                    .to_owned(),
+            ),
+            Err(error) => (
+                "failed",
+                format!("Checking saved upload: {}", error.message),
+            ),
+        };
+        self.finish_transfer(transfer, state, 0, Some(&message))?;
+        outcome
+    }
+
     pub fn queue_new_plaintext_create_scoped(
         &self,
         request: CreateHandoffRequest<'_>,
         check: &dyn Fn() -> bool,
     ) -> Result<DurableCreateReceipt, CloudError> {
+        let _total_admission = CreateAdmissionStageTimer::start(
+            &self.inner.create_admission_diagnostics.total_admission,
+        );
         let parent = request.parent;
         let cache = self.create_cache(&parent.scope)?;
         current(check)?;
-        let metadata = request.source.metadata().map_err(io_error)?;
-        if !metadata.is_file() || metadata.len() != request.expected_len {
-            return Err(refused());
-        }
-        self.clean_create_headroom(&parent.scope, request.expected_len);
-        let mut source = request.source.try_clone().map_err(io_error)?;
-        source.seek(SeekFrom::Start(0)).map_err(io_error)?;
-        let staged = cache
-            .stage_ordinary_create(
-                &parent.scope,
-                OrdinaryCreateRequest {
-                    max_pending_bytes: request.max_pending_bytes,
-                    handoff_id: request.handoff_id.into(),
-                    parent_resource_id: parent.parent_resource_id.clone(),
-                    name: parent.path.rsplit('/').next().ok_or_else(refused)?.into(),
-                    logical_path: parent.path.clone(),
-                    expected_len: request.expected_len,
-                    expected_sha256: request.expected_sha256.into(),
-                },
-                &mut source,
-            )
-            .map_err(cache_cloud_error)?;
+        let staged = {
+            let _body_staging = CreateAdmissionStageTimer::start(
+                &self.inner.create_admission_diagnostics.body_staging,
+            );
+            let metadata = request.source.metadata().map_err(io_error)?;
+            if !metadata.is_file() || metadata.len() != request.expected_len {
+                return Err(refused());
+            }
+            self.clean_create_headroom(&parent.scope, request.expected_len);
+            let mut source = request.source.try_clone().map_err(io_error)?;
+            source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+            cache
+                .stage_ordinary_create(
+                    &parent.scope,
+                    OrdinaryCreateRequest {
+                        max_pending_bytes: request.max_pending_bytes,
+                        handoff_id: request.handoff_id.into(),
+                        parent_resource_id: parent.parent_resource_id.clone(),
+                        name: parent.path.rsplit('/').next().ok_or_else(refused)?.into(),
+                        logical_path: parent.path.clone(),
+                        expected_len: request.expected_len,
+                        expected_sha256: request.expected_sha256.into(),
+                    },
+                    &mut source,
+                )
+                .map_err(cache_cloud_error)?
+        };
         // Serialize only final bounded namespace proof/admission with existing
         // mutators. No body copy or background transfer holds this gate.
+        let _execution_wait = CreateAdmissionStageTimer::start(
+            &self.inner.create_admission_diagnostics.execution_wait,
+        );
         let _execution = self.execution()?;
-        let proof = self.capture_new_plaintext_create_parent(
-            &parent.scope,
-            &parent.path,
-            Some(&parent.parent_resource_id),
-            check,
-        )?;
+        drop(_execution_wait);
+        let _execution_hold = CreateAdmissionStageTimer::start(
+            &self.inner.create_admission_diagnostics.execution_hold,
+        );
+        let proof = {
+            let _fresh_namespace_proof = CreateAdmissionStageTimer::start(
+                &self
+                    .inner
+                    .create_admission_diagnostics
+                    .fresh_namespace_proof,
+            );
+            self.capture_new_plaintext_create_parent(
+                &parent.scope,
+                &parent.path,
+                Some(&parent.parent_resource_id),
+                check,
+            )?
+        };
         if proof.parent_resource_id != parent.parent_resource_id {
             return Err(refused());
         }
         // The namespace proof above may perform bounded metadata HTTP; none
         // occurs while this publication guard is held. Serialize invalidation
         // and Ready CAS with cached_list's check-and-publish transaction.
+        let metadata_publication_wait = CreateAdmissionStageTimer::start(
+            &self
+                .inner
+                .create_admission_diagnostics
+                .metadata_publication_wait,
+        );
         let _metadata = self.metadata_publication()?;
+        drop(metadata_publication_wait);
+        let _local_ready_publish = CreateAdmissionStageTimer::start(
+            &self.inner.create_admission_diagnostics.local_ready_publish,
+        );
         current(check)?;
         cache
             .invalidate_paths(&parent.scope, &[&parent.path])
@@ -253,12 +596,15 @@ impl Engine {
             receipt,
         })
     }
-    pub fn create_receipt_for_handoff(
+    /// Look up exact admitted metadata for preparing a durable provider marker.
+    /// This does not verify the body or grant permission to discard a spool,
+    /// serve bytes or dispatch a write. Custody must be acknowledged separately.
+    pub fn create_handoff_receipt_metadata(
         &self,
         scope: &CacheScope,
         path: &str,
         handoff_id: &str,
-    ) -> Result<Option<DurableCreateReceipt>, CloudError> {
+    ) -> Result<Option<OrdinaryCreateReceipt>, CloudError> {
         let cache = self.create_cache(scope)?;
         let Some(receipt) = cache
             .ordinary_create_for_handoff(scope, handoff_id)
@@ -272,6 +618,17 @@ impl Engine {
         if receipt.state == OrdinaryCreateState::Staged {
             return Ok(None);
         }
+        Ok(Some(receipt))
+    }
+    pub fn create_receipt_for_handoff(
+        &self,
+        scope: &CacheScope,
+        path: &str,
+        handoff_id: &str,
+    ) -> Result<Option<DurableCreateReceipt>, CloudError> {
+        let Some(receipt) = self.create_handoff_receipt_metadata(scope, path, handoff_id)? else {
+            return Ok(None);
+        };
         Ok(Some(self.validate_create_receipt(
             scope, path, handoff_id, &receipt,
         )?))
@@ -327,15 +684,21 @@ impl Engine {
         check: &dyn Fn() -> bool,
     ) -> Result<DurableCreateReceipt, CloudError> {
         current(check)?;
-        let actual = self.validate_create_receipt(scope, path, handoff_id, expected)?;
+        let actual = self
+            .create_handoff_receipt_metadata(scope, path, handoff_id)?
+            .ok_or_else(refused)?;
+        if !actual.has_same_immutable_binding(expected) {
+            return Err(refused());
+        }
         let cache = self.create_cache(scope)?;
+        // Cache verifies the complete durable body and retains its reader
+        // through the ACK CAS. Do not duplicate that full read here.
         let receipt = cache
-            .acknowledge_ordinary_create_handoff(scope, &actual.receipt)
+            .acknowledge_ordinary_create_handoff(scope, &actual)
             .map_err(cache_cloud_error)?;
         current(check)?;
-        // Cleanup is separate and best effort. It cannot alter an accepted
-        // handoff/verified result into uncertain delivery or grant a resend.
-        self.clean_create_headroom(scope, 0);
+        // Optional cleanup runs before later admission under quota pressure,
+        // outside this custody acknowledgement path.
         Ok(DurableCreateReceipt {
             scope: scope.clone(),
             receipt,
@@ -522,8 +885,16 @@ impl Engine {
             return Ok(());
         }
         let (scope, _) = self.online_plaintext_scope(space)?;
+        self.guard_create_mutation_in_scope(&scope, paths)
+    }
+
+    pub(super) fn guard_create_mutation_in_scope(
+        &self,
+        scope: &CacheScope,
+        paths: &[&str],
+    ) -> Result<(), CloudError> {
         for path in paths {
-            if self.create_overlap_live(&scope, path)? {
+            if self.create_overlap_live(scope, path)? {
                 return Err(refused());
             }
         }
@@ -538,20 +909,74 @@ pub struct CreateUploadHooks {
 #[cfg(unix)]
 mod owner {
     use super::*;
-    use std::io::Write;
     use std::{
         sync::Condvar,
         thread::{self, JoinHandle},
-        time::Duration,
+        time::{Duration, Instant},
     };
+    const CREATE_WORKERS: usize = 4;
+    const READY_DISCOVERY_LIMIT: usize = CREATE_WORKERS;
+    const MAX_WATCHED_SCOPES: usize = 256;
+
     struct Shared {
         engine: Engine,
         stopping: AtomicBool,
         token: OperationCancellation,
         scopes: Mutex<Vec<CacheScope>>,
+        preparing: Mutex<Vec<(CacheScope, i64)>>,
         wake: Condvar,
-        signal: Mutex<u64>,
+        signal: Mutex<WakeSignal>,
         hooks: CreateUploadHooks,
+    }
+    #[derive(Default)]
+    struct WakeSignal {
+        generation: u64,
+        admission_generation: u64,
+    }
+    impl Shared {
+        fn notify(&self, admission: bool) -> Result<(), CloudError> {
+            let mut signal = self.signal.lock().map_err(|_| refused())?;
+            signal.generation = signal.generation.wrapping_add(1);
+            if admission {
+                signal.admission_generation = signal.admission_generation.wrapping_add(1);
+            }
+            self.wake.notify_all();
+            Ok(())
+        }
+    }
+    // This is only in-process preparation ownership. The durable one-use
+    // cache claim is still required before any send; dropping this lease never
+    // resets a durable claim or grants retry authority.
+    struct PreparationLease {
+        shared: Arc<Shared>,
+        scope: CacheScope,
+        write_id: i64,
+    }
+    impl PreparationLease {
+        fn acquire(
+            shared: &Arc<Shared>,
+            scope: &CacheScope,
+            write_id: i64,
+        ) -> Result<Option<Self>, CloudError> {
+            let mut active = shared.preparing.lock().map_err(|_| refused())?;
+            if active.iter().any(|(s, id)| s == scope && *id == write_id) {
+                return Ok(None);
+            }
+            active.push((scope.clone(), write_id));
+            Ok(Some(Self {
+                shared: shared.clone(),
+                scope: scope.clone(),
+                write_id,
+            }))
+        }
+    }
+    impl Drop for PreparationLease {
+        fn drop(&mut self) {
+            if let Ok(mut active) = self.shared.preparing.lock() {
+                active.retain(|(scope, id)| *scope != self.scope || *id != self.write_id);
+            }
+            let _ = self.shared.notify(false);
+        }
     }
     pub struct CreateUploadOwner {
         shared: Arc<Shared>,
@@ -573,7 +998,7 @@ mod owner {
             }
             let mut scopes = self.shared.scopes.lock().map_err(|_| refused())?;
             if !scopes.contains(scope) {
-                if scopes.len() >= 256 {
+                if scopes.len() >= MAX_WATCHED_SCOPES {
                     return Err(refused());
                 }
                 self.shared
@@ -584,15 +1009,12 @@ mod owner {
                 scopes.push(scope.clone());
             }
             drop(scopes);
-            let mut signal = self.shared.signal.lock().map_err(|_| refused())?;
-            *signal = signal.wrapping_add(1);
-            self.shared.wake.notify_all();
-            Ok(())
+            self.shared.notify(true)
         }
         pub fn stop_admission(&self) {
             self.shared.stopping.store(true, Ordering::Release);
             self.shared.token.cancel();
-            self.shared.wake.notify_all();
+            let _ = self.shared.notify(false);
         }
     }
     impl CreateUploadOwner {
@@ -666,8 +1088,9 @@ mod owner {
                 stopping: AtomicBool::new(false),
                 token: OperationCancellation::new(),
                 scopes: Mutex::new(Vec::new()),
+                preparing: Mutex::new(Vec::new()),
                 wake: Condvar::new(),
-                signal: Mutex::new(0),
+                signal: Mutex::new(WakeSignal::default()),
                 hooks,
             });
             let mut owner = CreateUploadOwner {
@@ -676,9 +1099,10 @@ mod owner {
                 _lock: lock,
                 _directory: directory,
             };
-            // One coordinator-free receiver per worker; bounded two-row SQL
-            // discovery, not an in-memory queue of every pending body.
-            for index in 0..2 {
+            // One coordinator-free receiver per worker; a bounded four-row
+            // SQL window lets each see past other workers' preparation leases.
+            // The durable one-use claim still follows full preparation/proof.
+            for index in 0..CREATE_WORKERS {
                 let engine = self.clone();
                 let shared = shared.clone();
                 owner.workers.push(
@@ -692,10 +1116,32 @@ mod owner {
         }
     }
     fn run(engine: Engine, shared: Arc<Shared>) {
+        // Lease-release wakes may make other receipts available, but must not
+        // repeatedly retry an unchanged Ready refusal (e.g. offline/pause).
+        // Only a real scope wake or bounded fallback starts a new retry epoch.
+        let mut deferred = Vec::new();
+        let mut admission_generation = 0;
+        let mut retry_at = Instant::now() + Duration::from_secs(1);
         loop {
             if shared.stopping.load(Ordering::Acquire) {
                 return;
             }
+            if Instant::now() >= retry_at {
+                deferred.clear();
+                retry_at = Instant::now() + Duration::from_secs(1);
+            }
+            // Capture before discovery: a notification between SQL discovery
+            // and waiting is a stored event, even if nobody was asleep yet.
+            let generation = match shared.signal.lock() {
+                Ok(signal) => {
+                    if signal.admission_generation != admission_generation {
+                        deferred.clear();
+                        admission_generation = signal.admission_generation;
+                    }
+                    signal.generation
+                }
+                Err(_) => return,
+            };
             let scopes = match shared.scopes.lock() {
                 Ok(scopes) => scopes.clone(),
                 Err(_) => return,
@@ -714,19 +1160,70 @@ mod owner {
                 if !(shared.hooks.dispatch_allowed)(&scope) {
                     continue;
                 }
-                let Ok(ready) = cache.ready_ordinary_creates(&scope, 2) else {
+                // Snapshot only selector hints; release the preparation mutex
+                // before cache SQL. A released lease's stored generation wake
+                // still makes its Ready row available to the next discovery.
+                let preparing = match shared.preparing.lock() {
+                    Ok(active) => {
+                        if active.len() > CREATE_WORKERS {
+                            return;
+                        }
+                        active
+                            .iter()
+                            .filter(|(active_scope, _)| active_scope == &scope)
+                            .map(|(_, id)| *id)
+                            .collect::<Vec<_>>()
+                    }
+                    Err(_) => return,
+                };
+                let Ok((observed_ids, ready)) = cache.ready_ordinary_create_discovery(
+                    &scope,
+                    READY_DISCOVERY_LIMIT,
+                    &preparing,
+                ) else {
                     continue;
                 };
+                // Each worker retains at most four discovered IDs per watched
+                // scope (4 * 256 = 1024); completed/blocked rows cannot accumulate.
+                deferred.retain(|(deferred_scope, id)| {
+                    deferred_scope != &scope || observed_ids.contains(id)
+                });
                 for receipt in ready {
                     if shared.stopping.load(Ordering::Acquire) {
                         return;
                     }
+                    if deferred.iter().any(|(deferred_scope, id)| {
+                        deferred_scope == &scope && *id == receipt.write.id
+                    }) {
+                        continue;
+                    }
+                    let _preparation =
+                        match PreparationLease::acquire(&shared, &scope, receipt.write.id) {
+                            Ok(Some(lease)) => lease,
+                            Ok(None) => continue,
+                            Err(_) => return,
+                        };
+                    // Discovery can have raced with another worker completing
+                    // this row. Recheck before copying/hashing the whole body.
+                    let receipt = match cache.ordinary_create_for_write(&scope, receipt.write.id) {
+                        Ok(Some(current))
+                            if current.state == OrdinaryCreateState::Ready
+                                && current.has_same_immutable_binding(&receipt) =>
+                        {
+                            current
+                        }
+                        _ => {
+                            deferred.push((scope.clone(), receipt.write.id));
+                            continue;
+                        }
+                    };
                     match engine.deliver_create(&scope, &receipt, &shared.token, &|| {
                         !shared.stopping.load(Ordering::Acquire)
                             && (shared.hooks.is_current)()
                             && (shared.hooks.dispatch_allowed)(&scope)
                     }) {
-                        Ok(work) => did_work |= work,
+                        Ok(true) => did_work = true,
+                        Ok(false) => deferred.push((scope.clone(), receipt.write.id)),
                         Err(error)
                             if !shared.stopping.load(Ordering::Acquire)
                                 && (shared.hooks.is_current)()
@@ -736,23 +1233,34 @@ mod owner {
                             // Definitely pre-claim validation/storage failures
                             // require attention. A stale claim cannot be reset
                             // by this Ready-only CAS.
+                            deferred.push((scope.clone(), receipt.write.id));
                             let _ = cache.block_ordinary_create(&scope, &receipt);
                         }
-                        Err(_) => {}
+                        Err(_) => deferred.push((scope.clone(), receipt.write.id)),
                     }
                 }
+            }
+            if did_work {
+                // Drain Ready work without the previous fixed 10ms gap.
+                continue;
             }
             let Ok(signal) = shared.signal.lock() else {
                 return;
             };
-            drop(shared.wake.wait_timeout(
+            let Ok((signal, timeout)) = shared.wake.wait_timeout_while(
                 signal,
-                if did_work {
-                    Duration::from_millis(10)
-                } else {
-                    Duration::from_secs(1)
+                retry_at.saturating_duration_since(Instant::now()),
+                |signal| {
+                    signal.generation == generation && !shared.stopping.load(Ordering::Acquire)
                 },
-            ));
+            ) else {
+                return;
+            };
+            drop(signal);
+            if timeout.timed_out() {
+                deferred.clear();
+                retry_at = Instant::now() + Duration::from_secs(1);
+            }
         }
     }
     impl Engine {
@@ -768,31 +1276,18 @@ mod owner {
             }
             let cache = self.create_cache(scope)?;
             current(check)?;
-            let mut body = cache
-                .open_content_cancellable(scope, &receipt.write.content, || token.is_cancelled())
-                .map_err(cache_cloud_error)?;
             let mut source = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
-            let mut buffer = [0u8; 64 * 1024];
-            loop {
-                if token.is_cancelled() {
-                    return Err(refused());
-                }
-                let count = body.read(&mut buffer).map_err(io_error)?;
-                if count == 0 {
-                    break;
-                }
-                source
-                    .as_file_mut()
-                    .write_all(&buffer[..count])
-                    .map_err(io_error)?;
-            }
-            drop(body);
-            source.as_file().sync_all().map_err(io_error)?;
-            if hash_cancelled(source.path(), token)? != receipt.sha256
-                || source.as_file().metadata().map_err(io_error)?.len() != receipt.byte_len
-            {
-                return Err(refused());
-            }
+            cache
+                .copy_ready_ordinary_create_snapshot_cancellable(
+                    scope,
+                    receipt,
+                    source.as_file_mut(),
+                    || token.is_cancelled() || !check(),
+                )
+                .map_err(cache_cloud_error)?;
+            // Fully validated disposable snapshot only. The synced immutable
+            // cache body and journal retain crash custody until verification;
+            // no receipt/recovery state ever depends on this temp surviving.
             // Remember pause refusal independently of its present value: a
             // fast resume must not turn an unclaimed paused job into Conflict.
             let paused_seen = std::cell::Cell::new(false);
@@ -804,54 +1299,99 @@ mod owner {
                     check()
                 }
             };
-            let proof = self.capture_new_plaintext_create_parent(
-                scope,
+            // The backend's fresh upload proof is independently validated here
+            // before the one-use Ready CAS. This avoids a second HTTP proof,
+            // without lending an admission proof to a later body operation.
+            let callback_called = std::cell::Cell::new(false);
+            let callback_repeated = std::cell::Cell::new(false);
+            let claimed = std::cell::RefCell::new(None);
+            let transfer = std::cell::Cell::new(None);
+            let stage = std::cell::Cell::new("Preparing upload");
+            let upload = self.backend.upload_new_in_root_with_preflight(
+                scope.space_id(),
                 &receipt.write.logical_path,
-                Some(&receipt.write.parent_resource_id),
+                source.path(),
+                scope.root_resource_id(),
+                &receipt.write.parent_resource_id,
+                token,
                 &preclaim_check,
+                &|observation| {
+                    if callback_called.replace(true) {
+                        callback_repeated.set(true);
+                        return Err(refused());
+                    }
+                    if token.is_cancelled() {
+                        return Err(refused());
+                    }
+                    let proof = self.validate_create_observation(
+                        scope.space_id(),
+                        Some(scope),
+                        &receipt.write.logical_path,
+                        Some(&receipt.write.parent_resource_id),
+                        &preclaim_check,
+                        true,
+                        observation,
+                    );
+                    if paused_seen.get() || self.inner.sync_paused.load(Ordering::Acquire) {
+                        return Ok(false);
+                    }
+                    proof?;
+                    current(&preclaim_check)?;
+                    if token.is_cancelled() {
+                        return Err(refused());
+                    }
+                    let Some(claim) = cache
+                        .claim_ordinary_create(scope, receipt)
+                        .map_err(cache_cloud_error)?
+                    else {
+                        return Ok(false);
+                    };
+                    // Save ownership before any fallible post-claim work. All
+                    // subsequent errors become Uncertain, never Ready/replay.
+                    *claimed.borrow_mut() = Some(claim);
+                    current(&|| {
+                        !token.is_cancelled()
+                            && check()
+                            && !self.inner.sync_paused.load(Ordering::Acquire)
+                    })?;
+                    {
+                        let _metadata = self.metadata_publication()?;
+                        cache
+                            .invalidate_paths(scope, &[&receipt.write.logical_path])
+                            .map_err(cache_cloud_error)?;
+                    }
+                    transfer.set(Some(self.begin_transfer(
+                        None,
+                        scope.space_id(),
+                        &receipt.write.logical_path,
+                        "upload",
+                    )?));
+                    stage.set("Sending file");
+                    Ok(true)
+                },
             );
-            if paused_seen.get() || self.inner.sync_paused.load(Ordering::Acquire) {
-                return Ok(false);
-            }
-            proof?;
-            let authorized = current(&preclaim_check);
-            if paused_seen.get() {
-                return Ok(false);
-            }
-            authorized?;
-            let Some(claim) = cache
-                .claim_ordinary_create(scope, receipt)
-                .map_err(cache_cloud_error)?
-            else {
-                return Ok(false);
+            // Even a backend that swallowed a repeated callback refusal cannot
+            // turn that contract violation into successful local completion.
+            let upload = if callback_repeated.get() {
+                Err(refused())
+            } else {
+                upload
             };
-            let mut transfer = None;
+            let Some(claim) = claimed.into_inner() else {
+                if !callback_repeated.get()
+                    && (paused_seen.get() || self.inner.sync_paused.load(Ordering::Acquire))
+                {
+                    return Ok(false);
+                }
+                return match upload {
+                    Ok(None) if callback_called.get() => Ok(false),
+                    Ok(_) => Err(refused()),
+                    Err(error) => Err(error),
+                };
+            };
             let mut completed = false;
             let outcome = (|| {
-                if token.is_cancelled() {
-                    return Err(refused());
-                }
-                current(&|| check() && !self.inner.sync_paused.load(Ordering::Acquire))?;
-                {
-                    let _metadata = self.metadata_publication()?;
-                    cache
-                        .invalidate_paths(scope, &[&receipt.write.logical_path])
-                        .map_err(cache_cloud_error)?;
-                }
-                transfer = Some(self.begin_transfer(
-                    None,
-                    scope.space_id(),
-                    &receipt.write.logical_path,
-                    "upload",
-                )?);
-                let uploaded = self.backend.upload_in_root_with_cancellation(
-                    scope.space_id(),
-                    &receipt.write.logical_path,
-                    source.path(),
-                    WriteCondition::Absent,
-                    scope.root_resource_id(),
-                    token,
-                )?;
+                let uploaded = upload?.ok_or_else(refused)?;
                 if uploaded.id.is_empty()
                     || uploaded.directory
                     || uploaded.encrypted
@@ -863,15 +1403,38 @@ mod owner {
                     return Err(refused());
                 }
                 current(&|| check() && !self.inner.sync_paused.load(Ordering::Acquire))?;
-                let download = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
-                let verified = self.backend.download_in_root_with_cancellation(
+                stage.set("Verifying uploaded file");
+                let verified = match self.backend.verify_download_in_root_with_cancellation(
                     scope.space_id(),
                     &receipt.write.logical_path,
-                    Some(&uploaded.etag),
-                    download.path(),
+                    &uploaded,
+                    &receipt.sha256,
                     scope.root_resource_id(),
                     token,
-                )?;
+                ) {
+                    Ok(Some(verified)) => verified,
+                    Ok(None) => {
+                        // Backends without full streaming verification retain
+                        // exact conditional readback into a disposable snapshot.
+                        let download = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
+                        let verified = self.backend.download_in_root_with_cancellation(
+                            scope.space_id(),
+                            &receipt.write.logical_path,
+                            Some(&uploaded.etag),
+                            download.path(),
+                            scope.root_resource_id(),
+                            token,
+                        )?;
+                        if hash_cancelled(download.path(), token)? != receipt.sha256
+                            || fs::metadata(download.path()).map_err(io_error)?.len()
+                                != receipt.byte_len
+                        {
+                            return Err(refused());
+                        }
+                        verified
+                    }
+                    Err(error) => return Err(error),
+                };
                 if verified.id != uploaded.id
                     || verified.etag != uploaded.etag
                     || verified.path != uploaded.path
@@ -879,8 +1442,6 @@ mod owner {
                     || verified.directory
                     || verified.encrypted
                     || !verified.writable
-                    || hash_cancelled(download.path(), token)? != receipt.sha256
-                    || fs::metadata(download.path()).map_err(io_error)?.len() != receipt.byte_len
                 {
                     return Err(refused());
                 }
@@ -888,6 +1449,7 @@ mod owner {
                 if token.is_cancelled() {
                     return Err(refused());
                 }
+                stage.set("Confirming upload destination");
                 self.prove_create_parent(
                     scope,
                     &receipt.write.logical_path,
@@ -902,15 +1464,16 @@ mod owner {
                 completed = true;
                 Ok(())
             })();
-            let progress = if let Some(id) = transfer {
+            let failure_message = outcome
+                .as_ref()
+                .err()
+                .map(|error: &CloudError| format!("{}: {}", stage.get(), error.message));
+            let progress = if let Some(id) = transfer.get() {
                 self.finish_transfer(
                     id,
                     if completed { "completed" } else { "failed" },
                     if completed { receipt.byte_len } else { 0 },
-                    outcome
-                        .as_ref()
-                        .err()
-                        .map(|error: &CloudError| error.message.as_str()),
+                    failure_message.as_deref(),
                 )
             } else {
                 Ok(())
@@ -919,9 +1482,6 @@ mod owner {
                 cache
                     .mark_ordinary_create_uncertain(scope, claim)
                     .map_err(cache_cloud_error)?;
-            }
-            if completed {
-                self.clean_create_headroom(scope, 0);
             }
             progress?;
             Ok(true)
