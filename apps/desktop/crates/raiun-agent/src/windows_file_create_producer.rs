@@ -461,7 +461,12 @@ impl Lane {
                             candidate.current.clone(),
                             self.generation.clone(),
                         )
-                        .map_err(|_| vault_refused(Stage::Begin, kind))?,
+                        .map_err(|error| match error {
+                            raiun_cloudfiles_windows::Error::CreateAdmission { stage } => {
+                                stage.reason()
+                            }
+                            _ => vault_refused(Stage::Begin, kind),
+                        })?,
                     Stage::Begin,
                     kind,
                 ))

@@ -574,26 +574,32 @@ impl Attempt {
         }
     }
     fn check(&self, connection: &ConfiguredRootConnection) -> Result<(), Error> {
-        if !connection.connected
-            || connection.context_key != self.key.context
-            || self.job.is_stopped()
-            || !(self.current)(self.key.authorization)
-            || !self.ticket.is_current()
-            || self.backend.is_revoked()
+        use crate::CreateAdmissionStage as S;
+        let refused = |stage| Error::CreateAdmission { stage };
+        if !connection.connected || connection.context_key != self.key.context {
+            return Err(refused(S::NativeContext));
+        }
+        if self.job.is_stopped() {
+            return Err(refused(S::OriginalJob));
+        }
+        if !(self.current)(self.key.authorization) {
+            return Err(refused(S::Authorization));
+        }
+        if !self.ticket.is_current() {
+            return Err(refused(S::Ticket));
+        }
+        if self.backend.is_revoked()
             || self.generation.load(Ordering::Acquire) != self.key.authorization.agent_generation
         {
-            return Err(Error::EditRecoveryUnavailable);
+            return Err(refused(S::NativeContext));
         }
-        let root = connection
-            .root
-            .as_ref()
-            .ok_or(Error::ConfiguredRootChanged)?;
-        root.verify_identity(true)?;
-        root.verify_registered()?;
+        let root = connection.root.as_ref().ok_or_else(|| refused(S::Root))?;
+        root.verify_identity(true).map_err(|_| refused(S::Root))?;
+        root.verify_registered().map_err(|_| refused(S::Root))?;
         if root.identity.volume_serial != self.key.root.volume_serial
             || root.identity.file_index != self.key.root.file_index
         {
-            return Err(Error::ConfiguredRootChanged);
+            return Err(refused(S::Root));
         }
         Ok(())
     }
@@ -616,48 +622,53 @@ impl ConfiguredRootConnection {
         current: crate::opencloud::file_create::Current,
         owner_generation: Arc<AtomicU64>,
     ) -> Result<VaultChildCreateStep, Error> {
+        use crate::CreateAdmissionStage as S;
+        let refused = |stage| Error::CreateAdmission { stage };
         if generation == 0
             || !valid_component(name)
             || components.is_empty()
             || components.iter().any(|c| !valid_component(c))
             || !(current)(auth)
         {
-            return Err(Error::InvalidConfiguredRoot);
+            return Err(refused(S::Candidate));
         }
         let mut owner = self
             .vault_child_owner
             .try_borrow_mut()
-            .map_err(|_| Error::ConnectionStateInvalid)?;
+            .map_err(|_| refused(S::OwnerBorrow))?;
         if owner.closed {
-            return Err(Error::ProviderUnavailable);
+            return Err(refused(S::OwnerClosed));
         }
         if owner.attempt.is_some() {
             return Ok(VaultChildCreateStep::Busy);
         }
-        let (tracker, recovery) = self.file_rename_guard_context(backend)?;
+        let (tracker, recovery) = self.file_create_guard_context(backend)?;
         if recovery
             .has_unresolved()
-            .map_err(|_| Error::EditRecoveryUnavailable)?
-            || recovery
-                .has_unresolved_content_authenticated_legacy()
-                .map_err(|_| Error::EditRecoveryUnavailable)?
+            .map_err(|_| refused(S::RecoveryScan))?
         {
-            return Err(Error::EditRecoveryUnavailable);
+            return Err(refused(S::RecoveryPending));
+        }
+        if recovery
+            .has_unresolved_content_authenticated_legacy()
+            .map_err(|_| refused(S::ContentScan))?
+        {
+            return Err(refused(S::ContentPending));
         }
         let ticket = match tracker.try_begin_create() {
             Some(ticket) => ticket,
             None if tracker.known_busy_for_create() => return Ok(VaultChildCreateStep::Busy),
-            None => return Err(Error::EditRecoveryUnavailable),
+            None => return Err(refused(S::CloseAdmission)),
         };
         let observation = ticket.observation_probe();
         let original = current.clone();
         let current: crate::opencloud::file_create::Current =
             Arc::new(move |auth| original(auth) && observation());
-        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        let root = self.root.as_ref().ok_or_else(|| refused(S::Root))?;
         owner.nonce = owner
             .nonce
             .checked_add(1)
-            .ok_or(Error::ConnectionStateInvalid)?;
+            .ok_or_else(|| refused(S::OwnerCounter))?;
         let key = Arc::new(Key {
             nonce: owner.nonce,
             context: self.context_key,

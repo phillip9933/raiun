@@ -303,6 +303,87 @@ pub struct VaultCleanupDiagnostics {
     pub inventory_complete: Option<bool>,
 }
 
+/// Fixed, non-path-bearing creation admission boundaries.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreateAdmissionStage {
+    Candidate,
+    OwnerBorrow,
+    OwnerClosed,
+    OwnerCounter,
+    NativeContext,
+    UnverifiedClose,
+    VaultDirty,
+    RecoveryContext,
+    RecoveryScan,
+    RecoveryPending,
+    ContentScan,
+    ContentPending,
+    CloseAdmission,
+    OriginalJob,
+    Authorization,
+    Ticket,
+    Root,
+}
+#[cfg(windows)]
+impl CreateAdmissionStage {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Candidate => {
+                "Creation paused: candidate or account authorization changed. Recovery files have been kept."
+            }
+            Self::OwnerBorrow => {
+                "Creation paused: native owner is already borrowed. Recovery files have been kept."
+            }
+            Self::OwnerClosed => {
+                "Creation paused: native creation owner is closed. Recovery files have been kept."
+            }
+            Self::OwnerCounter => {
+                "Creation paused: native creation owner counter is exhausted. Recovery files have been kept."
+            }
+            Self::NativeContext => {
+                "Creation paused: native account, root or dirty-close context could not be verified. Recovery files have been kept."
+            }
+            Self::UnverifiedClose => {
+                "Creation paused: a native placeholder close could not be verified. Recovery files have been kept."
+            }
+            Self::VaultDirty => {
+                "Creation paused: protected vault capture is pending or could not be verified. Recovery files have been kept."
+            }
+            Self::RecoveryContext => {
+                "Creation paused: protected recovery account or root binding could not be verified. Recovery files have been kept."
+            }
+            Self::RecoveryScan => {
+                "Creation paused: protected recovery history could not be verified. Recovery files have been kept."
+            }
+            Self::RecoveryPending => {
+                "Creation paused: unresolved protected recovery history needs review. Recovery files have been kept."
+            }
+            Self::ContentScan => {
+                "Creation paused: retained content history could not be verified. Recovery files have been kept."
+            }
+            Self::ContentPending => {
+                "Creation paused: retained content recovery needs review. Recovery files have been kept."
+            }
+            Self::CloseAdmission => {
+                "Creation paused: native close-admission bookkeeping is unknown. Recovery files have been kept."
+            }
+            Self::OriginalJob => {
+                "Creation paused: the original job expired or was cancelled. Recovery files have been kept."
+            }
+            Self::Authorization => {
+                "Creation paused: original account authorization is no longer current. Recovery files have been kept."
+            }
+            Self::Ticket => {
+                "Creation paused: original native close-admission ticket is no longer current. Recovery files have been kept."
+            }
+            Self::Root => {
+                "Creation paused: original registered root could not be verified. Recovery files have been kept."
+            }
+        }
+    }
+}
+
 /// Safe, non-path-bearing error from the Cloud Files adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -329,6 +410,8 @@ pub enum Error {
     /// A protected edit-recovery capability could not be prepared for this
     /// account/root, so the native provider connection was not started.
     EditRecoveryUnavailable,
+    #[cfg(windows)]
+    CreateAdmission { stage: CreateAdmissionStage },
     /// A selected file-create continuation stopped at a fixed safe phase.
     #[cfg(windows)]
     FileCreateContinuation { stage: FileCreateContinuationStage },
@@ -374,6 +457,8 @@ impl fmt::Display for Error {
             }
             Self::EditRecoveryUnavailable => formatter
                 .write_str("durable edit recovery is unavailable for this account and root"),
+            #[cfg(windows)]
+            Self::CreateAdmission { stage } => formatter.write_str(stage.reason()),
             #[cfg(windows)]
             Self::FileCreateContinuation { stage } => {
                 write!(

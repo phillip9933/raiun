@@ -51,6 +51,12 @@ replayed. Fixed begin/reply/outcome reasons preserve the creation failure bounda
 without exposing paths or arbitrary server text. The physical bulk-copy failure
 remains failed until a corrected exact package is actually exercised.
 
+The initial create-admission gateway also reports fixed reasons for an unknown
+close tracker, pending or unverifiable recovery history, dirty vault capture,
+closed owner, stale authorization and root binding. It checks each original
+condition once in its original order; existing rename error handling is retained.
+These diagnostics neither clear protected history nor grant retry authority.
+
 ## Current candidate — 3 November 2026
 
 The canonical Linux/Windows GUI and headless CLI source is consolidated in the
