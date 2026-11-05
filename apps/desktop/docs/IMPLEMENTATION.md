@@ -66,6 +66,13 @@ close-ticket and conditional-create checks. Legacy mutations, cached status,
 cleanup, eviction and unregister retain the aggregate historical barrier. The
 split never adopts, queues, removes or certifies an old local object.
 
+The existing Windows support diagnostics can also report authenticated namespace
+record and unresolved counts for rename, directory creation, file creation and
+deletion. This uses the original prepared account/root context and the existing
+bounded metadata reader; it reads no file bodies and grants no recovery action.
+Unsupported, corrupt, incomplete or unconfigured history is explicitly unavailable,
+not an empty result. Namespace counts do not describe legacy content recovery.
+
 ## Current candidate — 3 November 2026
 
 The canonical Linux/Windows GUI and headless CLI source is consolidated in the

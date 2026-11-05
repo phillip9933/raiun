@@ -1927,6 +1927,33 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
     }
 
     #[cfg(windows)]
+    fn namespace_recovery_summary(&self) -> Result<crate::NamespaceRecoverySummary, BackendError> {
+        let summary = namespace_storage::namespace_history_summary(
+            self.namespace_rename.as_ref(),
+            self.streamed.as_ref(),
+            &self.catalog,
+            &self.scope,
+            self.root_identity,
+        )?;
+        // Preserve configured-format and unknown-history refusals. The result
+        // below is support metadata, never an admission or replay decision.
+        let _ = crate::streamed_store::namespace_rename_store::history_unresolved(
+            &summary,
+            self.namespace_rename.is_some(),
+        )?;
+        Ok(crate::NamespaceRecoverySummary {
+            rename_records: summary.records,
+            rename_unresolved: summary.unresolved,
+            directory_records: summary.directory_records,
+            directory_unresolved: summary.directory_unresolved,
+            file_records: summary.file_records,
+            file_unresolved: summary.file_unresolved,
+            delete_records: summary.delete_records,
+            delete_unresolved: summary.delete_unresolved,
+        })
+    }
+
+    #[cfg(windows)]
     fn has_unresolved_content(&self) -> Result<bool, BackendError> {
         if !valid_scope_binding(&self.scope, self.root_identity) {
             return Err(BackendError::Unavailable);

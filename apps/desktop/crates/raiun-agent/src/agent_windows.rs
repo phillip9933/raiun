@@ -1526,7 +1526,19 @@ impl ProviderManager {
                                 Err("The Windows drive changed before support inspection".to_owned())
                             } else if let Some(active) = connection.as_ref() {
                                 let observation = active.vault_cleanup_diagnostics();
+                                let namespace_history = active.namespace_recovery_summary().ok().map(|summary| json!({
+                                    "rename_records": summary.rename_records,
+                                    "rename_unresolved": summary.rename_unresolved,
+                                    "directory_records": summary.directory_records,
+                                    "directory_unresolved": summary.directory_unresolved,
+                                    "file_records": summary.file_records,
+                                    "file_unresolved": summary.file_unresolved,
+                                    "delete_records": summary.delete_records,
+                                    "delete_unresolved": summary.delete_unresolved,
+                                }));
                                 Ok(json!({
+                                    "namespace_history_status": if namespace_history.is_some() { "available" } else { "unavailable" },
+                                    "namespace_history": namespace_history,
                                     "modified_closes": observation.modified_closes,
                                     "unverifiable_closes": observation.unverifiable_closes,
                                     "observed_unverifiable_closes": observation.observed_unverifiable_closes,

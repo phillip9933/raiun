@@ -1878,6 +1878,26 @@ impl ConfiguredRootConnection {
                 .is_ok_and(|inventory| inventory.is_complete())
     }
 
+    /// Read only the original connection-bound provider's existing metadata.
+    /// Missing or uncertain providers remain unavailable; never set storage up.
+    pub(super) fn namespace_recovery_summary(
+        &self,
+    ) -> Result<crate::NamespaceRecoverySummary, BackendError> {
+        if !self.connected {
+            return Err(BackendError::Unavailable);
+        }
+        let root = self.root.as_ref().ok_or(BackendError::Unavailable)?;
+        root.verify_identity(true)
+            .map_err(|_| BackendError::Unavailable)?;
+        root.verify_registered()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.state
+            .recovery
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .namespace_recovery_summary()
+    }
+
     pub(super) fn vault_cleanup_diagnostics(&self) -> crate::VaultCleanupDiagnostics {
         crate::VaultCleanupDiagnostics {
             modified_closes: self

@@ -443,6 +443,14 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     /// are treated as unresolved by the native teardown path.
     fn has_unresolved(&self) -> Result<bool, BackendError>;
 
+    /// Counts authenticated namespace metadata only at this original account/root.
+    /// Unknown or unsupported evidence is unavailable, never an empty summary.
+    /// This grants no replay, dispatch, native completion or cleanup authority.
+    #[cfg(windows)]
+    fn namespace_recovery_summary(&self) -> Result<crate::NamespaceRecoverySummary, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     /// Read-only content-recovery admission check for this exact retained
     /// account/root capability. Namespace operation history is intentionally
     /// excluded. `false` is returned only after a bounded authenticated scan;

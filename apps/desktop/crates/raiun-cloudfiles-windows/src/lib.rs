@@ -307,6 +307,20 @@ pub struct VaultCleanupDiagnostics {
     pub inventory_complete: Option<bool>,
 }
 
+/// Authenticated namespace metadata counts; no bodies or recovery authority.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NamespaceRecoverySummary {
+    pub rename_records: usize,
+    pub rename_unresolved: usize,
+    pub directory_records: usize,
+    pub directory_unresolved: usize,
+    pub file_records: usize,
+    pub file_unresolved: usize,
+    pub delete_records: usize,
+    pub delete_unresolved: usize,
+}
+
 /// Fixed, non-path-bearing creation admission boundaries.
 #[cfg(windows)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1432,6 +1446,10 @@ impl ConfiguredRootConnection {
     /// Fixed support counters only; this does not authorize cleanup or admission.
     pub fn vault_cleanup_diagnostics(&self) -> VaultCleanupDiagnostics {
         self.inner.vault_cleanup_diagnostics()
+    }
+    /// Authenticated namespace metadata counts only, never recovery authority.
+    pub fn namespace_recovery_summary(&self) -> Result<NamespaceRecoverySummary, BackendError> {
+        self.inner.namespace_recovery_summary()
     }
 
     /// Revoke/drain this retained route before cleaning recorded plaintext.

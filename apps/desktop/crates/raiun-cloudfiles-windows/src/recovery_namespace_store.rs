@@ -23,6 +23,18 @@ pub(super) fn has_unresolved_namespace(
     provider: &crate::ProviderScope,
     physical_root: crate::ConfiguredRootIdentity,
 ) -> Result<bool, BackendError> {
+    let summary = namespace_history_summary(namespace, streamed, catalog, provider, physical_root)?;
+    crate::streamed_store::namespace_rename_store::history_unresolved(&summary, namespace.is_some())
+}
+
+/// Same bounded authenticated metadata query; no body or mutation authority.
+pub(super) fn namespace_history_summary(
+    namespace: Option<&NamespaceRenameStoreContext>,
+    streamed: Option<&StreamedRecoveryContext>,
+    catalog: &ScopeCatalog,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+) -> Result<crate::streamed_store::namespace_rename_store::NamespaceHistorySummary, BackendError> {
     if !super::valid_scope_binding(provider, physical_root) {
         return Err(BackendError::Unavailable);
     }
@@ -51,7 +63,9 @@ pub(super) fn has_unresolved_namespace(
             Ok(state) => state,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return match std::fs::symlink_metadata(&catalog.state_directory) {
-                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(Default::default())
+                    }
                     _ => Err(BackendError::Unavailable),
                 };
             }
@@ -76,7 +90,7 @@ pub(super) fn has_unresolved_namespace(
         physical_root,
     )
     .map_err(|_| BackendError::Unavailable)?;
-    crate::streamed_store::namespace_rename_store::history_unresolved(&summary, namespace.is_some())
+    Ok(summary)
 }
 
 pub(super) fn prepared_store(
