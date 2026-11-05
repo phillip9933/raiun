@@ -585,6 +585,57 @@ impl OpenCloudClient {
         }
     }
 
+    /// Opt-in first live create with a scheduling-only accepted notification.
+    /// The hook runs after HTTP 201 and strict body consumption, before the
+    /// unchanged independent readback. It grants no recovery or native proof.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fresh_create_blocking_reader_with_parent_accepted_cancellable_with_context<R>(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        parent: Option<&RecoveryCreateParent<'_>>,
+        reader: R,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+        accepted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Result<RecoveryCreateReadback, CloudError>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        let original_cancel = self.transfer_budget.cancellation();
+        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || cancelled() || original_cancel.is_cancelled());
+        let (mut worker, reader) = crate::blocking_reader::start(reader)
+            .map_err(|_| invalid("create source worker could not start"))?;
+        let result = self.recovery_create_reader_inner(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            reader,
+            content_length,
+            expected_sha256,
+            context,
+            Arc::clone(&cancelled),
+            parent,
+            Some(accepted),
+        );
+        let completion = worker.cancel_and_join();
+        match result {
+            Err(error) => Err(error),
+            Ok(proof) if completion == crate::blocking_reader::WorkerCompletion::Eof => {
+                self.stream_context_current(context)?;
+                ensure_not_cancelled(&|| cancelled())?;
+                Ok(proof)
+            }
+            Ok(_) => Err(invalid("create source worker did not complete safely")),
+        }
+    }
+
     /// Create an ordinary file with one Absent/root-conditioned PUT and require
     /// HTTP 201 followed by an independent exact-ETag/ID/length/hash full GET.
     /// Not an atomic created-ID receipt. OC9 normal PUT can resolve an existing
@@ -620,6 +671,7 @@ impl OpenCloudClient {
             expected_sha256,
             context,
             cancelled,
+            None,
             None,
         )
     }
@@ -658,6 +710,7 @@ impl OpenCloudClient {
             context,
             cancelled,
             Some(parent),
+            None,
         )
     }
 
@@ -674,6 +727,7 @@ impl OpenCloudClient {
         context: RangeReadContext,
         cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
         parent: Option<&RecoveryCreateParent<'_>>,
+        accepted: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> Result<RecoveryCreateReadback, CloudError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -861,6 +915,9 @@ impl OpenCloudClient {
         result?;
         if !verified.load(Ordering::Acquire) {
             return Err(invalid("recovery source was not completely consumed"));
+        }
+        if let Some(accepted) = accepted {
+            accepted();
         }
         stream_metadata_step(self, context, || {
             self.validate_recovery_root(space, remote_root_path, expected_root_id)

@@ -302,11 +302,17 @@ impl Admission {
         joined: VerifiedFileJoin,
         before_sdk: impl FnOnce() -> Result<(), BackendError>,
     ) -> Result<VerifiedCreateReadback, BackendError> {
-        self.qualify_target(backend)?;
+        self.check(backend)?;
         if self.attempted {
             return Err(BackendError::Unavailable);
         }
         self.attempted = true;
+        let permit = backend.fresh_create_send_gates.acquire(
+            &self.parent.scope.space_id,
+            &self.parent.scope.root_resource_id,
+            || self.check(backend),
+        )?;
+        self.qualify_target(backend)?;
         let intent = joined.record().intent().clone();
         let NamespaceOperation::CreateFile {
             destination,
@@ -362,43 +368,61 @@ impl Admission {
             deadline: self.job.deadline(),
             token_generation: self.auth.token_generation,
         };
-        let proof = if self.parent.path == "/" {
-            // Preserve the established explicit root wrapper's SDK behavior.
-            backend
-                .client
-                .recovery_create_blocking_reader_cancellable_with_context(
-                    &self.parent.scope.space_id,
-                    "/",
-                    &self.parent.scope.root_resource_id,
-                    relative,
-                    reader,
-                    content.byte_len,
-                    digest,
-                    context,
-                    cancelled,
-                )
+        let transport_parent = if self.parent.path == "/" {
+            None
         } else {
-            let parent = raiun_opencloud::RecoveryCreateParent {
-                path: &self.parent.path,
-                resource_id: &self.parent.remote.resource_id,
-                etag: &self.parent.remote.etag,
-            };
-            backend
+            self.check(backend)?;
+            let metadata = self.job.cancellation().bounded_request();
+            let parent = backend
                 .client
-                .recovery_create_blocking_reader_with_parent_cancellable_with_context(
+                .stat_with_context(
                     &self.parent.scope.space_id,
-                    "/",
-                    &self.parent.scope.root_resource_id,
-                    relative,
-                    &parent,
-                    reader,
-                    content.byte_len,
-                    digest,
-                    context,
-                    cancelled,
+                    &self.parent.path,
+                    RangeReadContext {
+                        deadline: metadata.deadline(),
+                        token_generation: self.auth.token_generation,
+                    },
                 )
-        }
-        .map_err(|_| BackendError::Unavailable)?;
+                .map_err(|_| BackendError::Unavailable)?;
+            self.check(backend)?;
+            if parent.path != self.parent.path
+                || parent.id != self.parent.remote.resource_id
+                || !parent.directory
+                || parent.encrypted
+                || !parent.writable
+                || !namespace::strong(&parent.etag)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            Some(parent)
+        };
+        // This first live send has a distinct, freshly checked transport
+        // condition. The original admission, intent and snapshot stay immutable.
+        let parent =
+            transport_parent
+                .as_ref()
+                .map(|parent| raiun_opencloud::RecoveryCreateParent {
+                    path: &parent.path,
+                    resource_id: &parent.id,
+                    etag: &parent.etag,
+                });
+        self.check(backend)?;
+        let proof = backend
+            .client
+            .fresh_create_blocking_reader_with_parent_accepted_cancellable_with_context(
+                &self.parent.scope.space_id,
+                "/",
+                &self.parent.scope.root_resource_id,
+                relative,
+                parent.as_ref(),
+                reader,
+                content.byte_len,
+                digest,
+                context,
+                cancelled,
+                Box::new(move || permit.accepted()),
+            )
+            .map_err(|_| BackendError::Unavailable)?;
         self.qualify_target(backend)?;
         let observed = proof.observed;
         if observed.entry.path != path

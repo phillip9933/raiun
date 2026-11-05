@@ -312,6 +312,8 @@ pub struct VaultCleanupDiagnostics {
 // SDK helpers also compile on the host; only native workers emit these labels.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod creation_preparation;
+#[cfg(windows)]
+mod fresh_create_send_gate;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod fresh_create_target;
 

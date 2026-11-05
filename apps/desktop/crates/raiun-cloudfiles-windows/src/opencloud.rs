@@ -548,6 +548,8 @@ pub struct OpenCloudPlaceholderBackend {
     revoked: AtomicBool,
     lease_gate: RwLock<()>,
     publish_gate: Mutex<()>,
+    #[cfg(windows)]
+    fresh_create_send_gates: crate::fresh_create_send_gate::Gates,
     state: Mutex<State>,
     cached_only: bool,
 }
@@ -635,6 +637,8 @@ impl OpenCloudPlaceholderBackend {
             revoked: AtomicBool::new(false),
             lease_gate: RwLock::new(()),
             publish_gate: Mutex::new(()),
+            #[cfg(windows)]
+            fresh_create_send_gates: crate::fresh_create_send_gate::Gates::default(),
             cached_only: false,
             state: Mutex::new(State {
                 next_identity: 1,

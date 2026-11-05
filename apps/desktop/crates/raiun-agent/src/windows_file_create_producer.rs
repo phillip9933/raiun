@@ -112,7 +112,7 @@ enum Step {
     Completed,
     Held(&'static str),
 }
-fn file_step(step: FileCreateStep, stage: Stage) -> Step {
+fn file_step(step: FileCreateStep, stage: Stage, failure: Option<&'static str>) -> Step {
     match step {
         FileCreateStep::Task(task) => Step::Task(Task::File(Box::new(task))),
         FileCreateStep::Finished(FreshFileCreateOutcome::BusyBeforeCapture) => Step::BusyFile,
@@ -120,9 +120,9 @@ fn file_step(step: FileCreateStep, stage: Stage) -> Step {
         FileCreateStep::Finished(FreshFileCreateOutcome::CapturedLocalIncomplete) => Step::Held(
             stage_hold!(stage, "ordinary file", "captured local incomplete"),
         ),
-        FileCreateStep::Finished(FreshFileCreateOutcome::SubmittedUncertain) => {
-            Step::Held(stage_hold!(stage, "ordinary file", "submitted uncertain"))
-        }
+        FileCreateStep::Finished(FreshFileCreateOutcome::SubmittedUncertain) => Step::Held(
+            failure.unwrap_or(stage_hold!(stage, "ordinary file", "submitted uncertain")),
+        ),
         FileCreateStep::Finished(FreshFileCreateOutcome::RemoteVerifiedLocalIncomplete) => {
             Step::Held(stage_hold!(
                 stage,
@@ -414,6 +414,7 @@ impl Lane {
                             .advance_fresh_personal_file_create(*reply)
                             .map_err(|_| failure)?,
                         Stage::Advance,
+                        Some(failure),
                     )
                 }
                 Reply::Directory(reply) => {
@@ -487,6 +488,7 @@ impl Lane {
                                 stage_hold!(Stage::Begin, "ordinary file", "owner refused")
                             })?,
                         Stage::Begin,
+                        None,
                     ),
                     CreateKind::Directory => directory_step(
                         connection

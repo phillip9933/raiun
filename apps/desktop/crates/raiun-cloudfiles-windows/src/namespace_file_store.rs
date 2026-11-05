@@ -1714,13 +1714,26 @@ fn history_counts_existing_inner(
                     scope.space_id == candidate.space_id
                         && scope.root_resource_id == candidate.root_resource_id
                 });
-                if (different_space_root || (same_space_root && candidate_target.is_some()))
-                    && progress.remote == NamespacePhase::Submitted
+                // These closed event histories still own unresolved native
+                // work. Only isolation of an independently admitted new target
+                // is classified; no old send or completion is authorized.
+                let isolated_phase = (progress.remote == NamespacePhase::Submitted
                     && progress.sequence == 1
-                    && progress.attention.is_none()
+                    && progress.attention.is_none())
+                    || (progress.remote == NamespacePhase::Submitted
+                        && progress.sequence == 2
+                        && progress.attention == Some(NamespaceAttention::Uncertain)
+                        && loaded.remote.is_none())
+                    || (progress.remote == NamespacePhase::Verified
+                        && progress.sequence == 2
+                        && progress.attention.is_none()
+                        && loaded.remote.is_some());
+                if (different_space_root || (same_space_root && candidate_target.is_some()))
+                    && isolated_phase
                     && !progress.local_completed
                     && !progress.continued
                     && !progress.recorded_complete
+                    && progress.source_removal.is_none()
                 {
                     let (manifest, original_directory) = decoder.reference_manifest_metadata(
                         &loaded.record.joined,

@@ -564,9 +564,14 @@ impl FileCreateReply {
             ReplyKind::Prepared(Ok(_)) => {
                 "File creation paused: local source admission or protected capture failed. Recovery files have been kept."
             }
-            ReplyKind::Sent(_) => {
-                "File creation paused: upload verification or protected result persistence failed. Recovery files have been kept."
-            }
+            ReplyKind::Sent(pair) => match &pair.1 {
+                Err(_) => {
+                    "File creation paused: original upload send or readback returned no verified result. Recovery files have been kept."
+                }
+                Ok(_) => {
+                    "File creation paused: verified readback returned, but the original attempt or result recording was held or refused. Recovery files have been kept."
+                }
+            },
             ReplyKind::Refreshed(_) => {
                 "File creation paused: verified file publication or native completion failed. Recovery files have been kept."
             }

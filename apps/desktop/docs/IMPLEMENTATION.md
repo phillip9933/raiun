@@ -31,6 +31,27 @@ parents remain ordered. Unknown/dirty close observations still invalidate the
 whole wave, and teardown cancels/drains original flights before releasing native
 owners. Compilation and review are not native throughput or refresh acceptance.
 
+Fresh ordinary-file sends now coordinate their conditional PUTs per verified
+Space/root within the original backend. Preparation and readback can overlap;
+payload PUTs sharing that revision are ordered, not four simultaneous wire
+uploads. A sibling create can change the directory/root revision, so the first
+and only live send captures a separate current transport condition after taking
+the scheduling gate. It rechecks the same original parent identity/path,
+ordinary writable role, authorization and deadline. The SDK independently
+rechecks that current revision and retains both tagged root/parent conditions
+and create-only `If-None-Match`. The original captured parent revision remains
+unchanged historical intent metadata: the live condition point moves to first
+send, and historical recovery APIs keep their original strict behavior.
+
+Only HTTP 201 plus the existing complete length/hash/EOF witness releases the
+scheduling gate before independent readback. That notification is no remote
+verification, journal or native completion authority. A failure never refreshes
+conditions and resends; waiting peers retain original cancellation/deadlines.
+No native owner, credential, publication or backend-state lock is used as this
+network scheduling gate. Other writers and external revision changes can still
+cause normal conditional refusal; no server atomicity or absence guarantee is
+added by this coordination.
+
 The bounded native follow-up accepts a complete validated plan up to the parser's
 1,024-hint ceiling rather than refusing its 65th ordinary create endpoint. No
 prefix is processed before full pairing/alias validation, and the independent
@@ -93,9 +114,16 @@ unfinished upload. Generic recovery counts, cleanup and legacy mutation barriers
 still treat the join as unresolved; no history is changed or old file replayed.
 Every fresh create retains its own current content-health, native, account/root,
 opaque-parent and conditional-create checks. A joint bounded custody scan can
-also isolate an exact retained Submitted/sequence-1, attention-free file create
-with its original NotAttempted snapshot from a different SDK-verified Space AND
-remote root. The same quota lease and metadata allowance cover namespace,
+also isolate an exact retained original file create with its NotAttempted
+snapshot from a different SDK-verified Space AND remote root. Only three closed
+event histories qualify: Submitted/sequence-1 with no attention;
+Submitted/sequence-2 with Uncertain attention and no remote report; or
+Verified/sequence-2 with no attention and its authenticated original destination
+and content report. None may have local completion, continuation, recorded
+completion or source removal. Historical verification remains historical; the
+old outcome is never adopted as current native completion. Generic counts,
+recovery eligibility and cleanup remain strict. The same quota lease and
+metadata allowance cover namespace,
 exact original-key matching, other content and legacy checks. An SDK-minted
 original child target can also isolate that strict historical state inside the
 same exact Space/root. It binds the retained canonical parent path, remote parent
@@ -113,6 +141,10 @@ parent, ticket, native pins, retained FileID collision fence and create-only wri
 Encrypted routing keeps its strict pending guard before capture; ordinary routing
 must pass the joint check. Dispatch admission is claimed before the write-ahead
 Submitted marker, and the marker still precedes creation of any Send task.
+Fixed creation errors retain the typed distinction between a worker returning
+no verified send/readback result and verified readback whose original attempt
+or result recording was held. Neither label asserts an absent PUT, current
+remote verification or native completion.
 
 Preparation workers wait only for exact existing quota-open/lock contention
 inside their original task, context and bounded deadline. They rerun the same
