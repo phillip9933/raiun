@@ -1,7 +1,14 @@
 name: Desktop AppImage
 on:
+  push:
+    branches:
+      - work/desktop-transfer-performance
   workflow_dispatch:
     inputs:
+      build_only:
+        description: Build unsigned GUI and headless review artifacts without tests or acceptance runs
+        type: boolean
+        default: false
       reuse_checked_rust:
         description: Reuse passed Rust checks only if source and locks match the verified AppImage baseline
         type: boolean
@@ -20,6 +27,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
@@ -44,6 +52,7 @@ jobs:
           restore-keys: |
             raiun-appimage-ubuntu24-v1-${{ hashFiles('apps/desktop/**/Cargo.lock') }}-
       - name: Verify reuse of unchanged Rust checks
+        if: ${{ !(inputs.build_only || github.ref_name == 'work/desktop-transfer-performance') }}
         id: code-gates
         env:
           REUSE_CHECKED_RUST: ${{ inputs.reuse_checked_rust }}
@@ -57,11 +66,14 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all --check
       - name: Check Rust code
-        if: steps.code-gates.outputs.reuse != 'true'
+        if: ${{ !(inputs.build_only || github.ref_name == 'work/desktop-transfer-performance') && steps.code-gates.outputs.reuse != 'true' }}
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run Rust tests
-        if: steps.code-gates.outputs.reuse != 'true'
+        if: ${{ !(inputs.build_only || github.ref_name == 'work/desktop-transfer-performance') && steps.code-gates.outputs.reuse != 'true' }}
         run: cargo test --workspace --locked
+      - name: Check build-only source
+        if: (inputs.build_only || github.ref_name == 'work/desktop-transfer-performance')
+        run: cargo check --workspace --locked
       - name: Build AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -71,6 +83,19 @@ jobs:
         with:
           name: raiun-desktop-appimage-x86_64
           path: apps/desktop/target/appimage/
+          if-no-files-found: error
+          compression-level: 0
+      - name: Build separate headless review bundle
+        if: (inputs.build_only || github.ref_name == 'work/desktop-transfer-performance')
+        env:
+          RAIUN_HEADLESS_OUTPUT_DIR: ${{ runner.temp }}/raiun-headless-${{ github.run_id }}-${{ github.run_attempt }}
+        run: scripts/build-headless-linux.sh
+      - name: Upload separate headless CLI and agent
+        if: (inputs.build_only || github.ref_name == 'work/desktop-transfer-performance')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: raiun-headless-linux-x86_64-review
+          path: ${{ runner.temp }}/raiun-headless-${{ github.run_id }}-${{ github.run_attempt }}/raiun-headless-linux-x86_64.tar.gz
           if-no-files-found: error
           compression-level: 0
       - name: Save compilation work for packaging retries

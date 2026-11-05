@@ -1,9 +1,15 @@
 name: Desktop Windows candidate
 on:
   workflow_dispatch:
+    inputs:
+      build_only:
+        description: Build unsigned GUI and headless review artifacts without tests or acceptance runs
+        type: boolean
+        default: false
   push:
     branches:
       - work/desktop-0.7.5
+      - work/desktop-transfer-performance
     paths:
       - '.gitattributes'
       - 'apps/desktop/**'
@@ -25,7 +31,7 @@ jobs:
   windows:
     # This candidate builds once from its pushed head even while the draft
     # cannot produce a merge ref. Other PR branches keep their original route.
-    if: github.event_name != 'pull_request' || github.head_ref != 'work/desktop-0.7.5'
+    if: github.event_name != 'pull_request' || (github.head_ref != 'work/desktop-0.7.5' && github.head_ref != 'work/desktop-transfer-performance')
     runs-on: windows-2022
     timeout-minutes: 60
     outputs:
@@ -35,6 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
@@ -63,20 +70,20 @@ jobs:
       # Finish this candidate with a normal source check and package build.
       # Broader validation remains enabled for other branches and future main.
       - name: Check current candidate source
-        if: github.head_ref == 'work/desktop-0.7.5' || github.ref_name == 'work/desktop-0.7.5'
+        if: ${{ (inputs.build_only || github.ref_name == 'work/desktop-transfer-performance') || github.head_ref == 'work/desktop-0.7.5' || github.ref_name == 'work/desktop-0.7.5' }}
         run: cargo check --workspace --exclude raiun-fuse --locked
       - name: Compile Windows workspace tests first
-        if: github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5'
+        if: ${{ !(inputs.build_only || github.ref_name == 'work/desktop-transfer-performance') && (github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5') }}
         run: cargo test --workspace --exclude raiun-fuse --locked --no-run
       - name: Check Windows workspace
-        if: github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5'
+        if: ${{ !(inputs.build_only || github.ref_name == 'work/desktop-transfer-performance') && (github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5') }}
         run: cargo clippy --workspace --exclude raiun-fuse --all-targets --locked -- -D warnings
       - name: Verify concurrent pin admission before the full batch
-        if: github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5'
+        if: ${{ !(inputs.build_only || github.ref_name == 'work/desktop-transfer-performance') && (github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5') }}
         timeout-minutes: 3
         run: cargo test --locked -p raiun-cache --lib pin_resume_tests::concurrent_handles_admit_only_one_initial_pin_for_the_same_target -- --exact --nocapture
       - name: Run workspace tests
-        if: github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5'
+        if: ${{ !(inputs.build_only || github.ref_name == 'work/desktop-transfer-performance') && (github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5') }}
         timeout-minutes: 35
         run: cargo test --workspace --exclude raiun-fuse --locked
       - name: Build unsigned candidate installer
@@ -87,6 +94,18 @@ jobs:
           & (Join-Path $installation 'Common7/Tools/Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw 'MSVC environment was not initialized.' }
           ./scripts/build-windows-package.ps1 -UpdaterArtifacts
+      - name: Package separate native MSVC headless review bundle
+        if: (inputs.build_only || github.ref_name == 'work/desktop-transfer-performance')
+        run: python scripts/package-headless-windows.py --output "${{ runner.temp }}/raiun-headless-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Upload separate headless CLI and agent
+        if: (inputs.build_only || github.ref_name == 'work/desktop-transfer-performance')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: raiun-headless-windows-x86_64-review
+          path: |
+            ${{ runner.temp }}/raiun-headless-${{ github.run_id }}-${{ github.run_attempt }}/raiun-headless-windows-x86_64.zip
+            ${{ runner.temp }}/raiun-headless-${{ github.run_id }}-${{ github.run_attempt }}/SHA256SUMS
+          if-no-files-found: error
       - name: Bind candidate acceptance to these exact build outputs
         id: candidate-pins
         run: |
@@ -126,7 +145,7 @@ jobs:
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
   installed-package-acceptance:
-    if: github.head_ref == 'work/desktop-0.7.5' || github.ref_name == 'work/desktop-0.7.5'
+    if: ${{ !(inputs.build_only || github.ref_name == 'work/desktop-transfer-performance') && (github.head_ref == 'work/desktop-0.7.5' || github.ref_name == 'work/desktop-0.7.5') }}
     needs: windows
     runs-on: windows-2022
     timeout-minutes: 20
@@ -136,6 +155,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Download the verified 0.7.4 baseline
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
