@@ -5141,3 +5141,6 @@ inspection keep their original directory requirement. Plain-file/CF0, identity,
 path, worker-to-owner joins and later source-oplock/link/USN checks are unchanged.
 This fixes a deterministic source rejection; it does not establish physical
 completion or a measured speed improvement for the replacement candidate.
+The shared path-correspondence helper also compiles on the host because the
+Windows crate's read-only metadata code is checked in the Linux workspace.
+This changes no path policy or Linux/Windows runtime selection.

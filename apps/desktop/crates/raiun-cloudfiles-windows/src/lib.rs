@@ -1080,7 +1080,7 @@ impl fmt::Debug for NamespaceObservation {
 
 // Shared path correspondence only; native component and managed-parent admission
 // remain mandatory. The first component is the local namespace, never a Space.
-#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn personal_create_relative(parent: &[&str], leaf: &str) -> Option<String> {
     let prefix = match parent.first().copied() {
         Some("Personal") => 1,
