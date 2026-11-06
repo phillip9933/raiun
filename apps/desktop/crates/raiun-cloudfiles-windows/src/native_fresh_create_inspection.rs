@@ -50,11 +50,14 @@ impl FreshNativeInspection {
         leaf_path.push(name);
         // Metadata only, OPEN_REPARSE_POINT, no DELETE sharing. These handles
         // stay on this worker for the full query and never authorize mutation.
-        let leaf = open_root(
-            &leaf_path,
-            FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-        )?;
+        let leaf = match kind {
+            FreshCreateTargetKind::Directory => open_root(
+                &leaf_path,
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+            )?,
+            FreshCreateTargetKind::File => open_plain_leaf_metadata(&leaf_path)?,
+        };
         let leaf_snapshot = root_snapshot(leaf.0)?;
         let local_id = |snapshot: RootSnapshot| crate::LocalFileIdentity {
             volume_serial: snapshot.identity.volume_serial,
@@ -163,4 +166,27 @@ impl FreshNativeInspection {
         }
         native_namespace_directory::verify_reinspected_namespace_root(&self.root, &self.root_path)
     }
+}
+
+/// Unlike open_root, this does not require a directory. Shape, no-reparse/CF0,
+/// path and identity checks still run before any facts can be used.
+fn open_plain_leaf_metadata(path: &Path) -> Result<RawOwnedHandle, Error> {
+    let path = wide_path(path)?;
+    // SAFETY: bounded no-follow path, metadata-only access, no inheritance and
+    // no data/DELETE permission. RAII owns the successful handle on this worker.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(win32_io_error("open fresh create leaf metadata"));
+    }
+    Ok(RawOwnedHandle(handle))
 }

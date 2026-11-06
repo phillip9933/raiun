@@ -5132,3 +5132,12 @@ root/account/epoch validation, deadlines and cancellation rules remain. No
 cross-Space exception or remotely inferred creation provenance is introduced.
 Physical preservation, completion and speed still require the existing bounded
 folder-copy check; compilation and this source analysis do not establish them.
+
+The first C6 copy reached file inspection but stopped before any confirmed
+uploads. Source tracing found that its common leaf open incorrectly used the
+directory-only `open_root` helper for ordinary files. File leaves now use a
+separate metadata-only, no-follow open; directory leaves and every root/parent
+inspection keep their original directory requirement. Plain-file/CF0, identity,
+path, worker-to-owner joins and later source-oplock/link/USN checks are unchanged.
+This fixes a deterministic source rejection; it does not establish physical
+completion or a measured speed improvement for the replacement candidate.
