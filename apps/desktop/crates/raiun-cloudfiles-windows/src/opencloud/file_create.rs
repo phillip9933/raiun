@@ -50,6 +50,12 @@ impl Admission {
             name,
             crate::fresh_create_target::FreshCreateTargetKind::File,
         )
+        .and_then(|target| {
+            target.with_verified_parent_ancestry(
+                &self.parent.scope.root_resource_id,
+                &self.parent.remote_ancestor_ids,
+            )
+        })
         .ok_or(BackendError::Unavailable)?;
         let space =
             crate::FreshCreateSpace::from_verified_target(self.parent.scope.clone(), target);

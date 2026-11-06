@@ -709,6 +709,8 @@ pub(crate) struct CapturedDirectoryParent {
     pub(crate) scope: crate::EditJournalScope,
     pub(crate) remote: RemoteEditBaseline,
     pub(crate) path: String,
+    /// Fresh remote root-to-parent IDs from this original bounded capture.
+    pub(crate) remote_ancestor_ids: Vec<String>,
 }
 impl OpenCloudPlaceholderBackend {
     /// Resolve hints only through a freshly authenticated managed namespace.
@@ -806,6 +808,7 @@ impl OpenCloudPlaceholderBackend {
             selected
         };
         let mut route = Vec::with_capacity(components.len());
+        let mut ancestor_bindings = Vec::with_capacity(components.len());
         for component in components {
             preparation_stage(trace, PreparationStage::Job);
             if cancellation.is_cancelled() || cancellation.is_expired() {
@@ -836,6 +839,19 @@ impl OpenCloudPlaceholderBackend {
                     .try_into()
                     .map_err(|_| BackendError::Unavailable)?,
             );
+            // Listings may legitimately fall back to cached entries. Retain
+            // their expected bindings now, then qualify every remote ancestor
+            // below with fresh stats under the ORIGINAL request context.
+            if let Some(binding) = self
+                .state
+                .lock()
+                .map_err(|_| BackendError::Unavailable)?
+                .directories
+                .get(&identity)
+                .cloned()
+            {
+                ancestor_bindings.push(binding);
+            }
             route.push(child);
         }
         preparation_stage(trace, PreparationStage::ParentLookup);
@@ -876,7 +892,7 @@ impl OpenCloudPlaceholderBackend {
         // Preserve the original validation order and every condition. Only
         // the fixed diagnostic stage changes; no metadata value is recorded.
         preparation_stage(trace, PreparationStage::RootIdentity);
-        if root_entry.id != parent.root_resource_id {
+        if root_entry.id != parent.root_resource_id || root_entry.path != "/" {
             return Err(BackendError::Unavailable);
         }
         preparation_stage(trace, PreparationStage::RootEncryption);
@@ -892,7 +908,7 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         preparation_stage(trace, PreparationStage::ParentIdentity);
-        if entry.id != parent.remote_id {
+        if entry.id != parent.remote_id || entry.path != parent.path {
             return Err(BackendError::Unavailable);
         }
         preparation_stage(trace, PreparationStage::ParentEncryption);
@@ -918,10 +934,72 @@ impl OpenCloudPlaceholderBackend {
         if !strong(&entry.etag) {
             return Err(BackendError::Unavailable);
         }
+        let prefix = match components.first().copied() {
+            Some("Personal") => 1,
+            Some("Spaces") if components.len() >= 2 => 2,
+            _ => return Err(BackendError::Unavailable),
+        };
+        if ancestor_bindings.len() != components.len() - prefix + 1
+            || parent.path != format!("/{}", components[prefix..].join("/"))
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let mut remote_ancestor_ids = Vec::with_capacity(ancestor_bindings.len());
+        for (depth, binding) in ancestor_bindings.iter().enumerate() {
+            self.ensure_active()?;
+            if cancellation.is_cancelled() || cancellation.is_expired() {
+                return Err(BackendError::Unavailable);
+            }
+            let expected_path = format!("/{}", components[prefix..prefix + depth].join("/"));
+            if binding.space_id != parent.space_id
+                || binding.root_resource_id != root_entry.id
+                || binding.path != expected_path
+                || binding.remote_id.is_empty()
+                || remote_ancestor_ids.contains(&binding.remote_id)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            if depth == 0 {
+                if binding.remote_id != root_entry.id {
+                    return Err(BackendError::Unavailable);
+                }
+            } else if depth + 1 == ancestor_bindings.len() {
+                if binding.remote_id != entry.id {
+                    return Err(BackendError::Unavailable);
+                }
+            } else {
+                self.ensure_ordinary_location(&parent.space_id, &binding.path)?;
+                let ancestor = self
+                    .client
+                    .stat_with_context(&parent.space_id, &binding.path, context)
+                    .map_err(|error| {
+                        if let Some(trace) = trace {
+                            trace.cloud(error.kind);
+                        }
+                        BackendError::Unavailable
+                    })?;
+                if ancestor.id != binding.remote_id
+                    || ancestor.path != binding.path
+                    || !ancestor.directory
+                    || ancestor.encrypted
+                    || !ancestor.writable
+                {
+                    return Err(BackendError::Unavailable);
+                }
+            }
+            remote_ancestor_ids.push(binding.remote_id.clone());
+        }
+        if cancellation.is_cancelled()
+            || cancellation.is_expired()
+            || remote_ancestor_ids.last() != Some(&entry.id)
+        {
+            return Err(BackendError::Unavailable);
+        }
         preparation_stage(trace, PreparationStage::Current);
         self.ensure_active()?;
         Ok(CapturedDirectoryParent {
             path: parent.path,
+            remote_ancestor_ids,
             route,
             identity,
             scope: crate::EditJournalScope {
@@ -1005,6 +1083,12 @@ impl OwnedDirectorySession {
             name,
             crate::fresh_create_target::FreshCreateTargetKind::Directory,
         )
+        .and_then(|target| {
+            target.with_verified_parent_ancestry(
+                &self.captured.scope.root_resource_id,
+                &self.captured.remote_ancestor_ids,
+            )
+        })
         .ok_or(BackendError::Unavailable)?;
         let space =
             crate::FreshCreateSpace::from_verified_target(self.captured.scope.clone(), target);

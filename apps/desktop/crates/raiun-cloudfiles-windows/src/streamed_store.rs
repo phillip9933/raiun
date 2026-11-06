@@ -527,7 +527,8 @@ impl SnapshotStore {
                     &mut budget,
                 )?;
             // Keep every unknown/unconfigured-format and summary-bound refusal.
-            // The old ACK gap remains the only existing namespace-only exception.
+            // Exact-target independence is considered only in this joint scan;
+            // generic pending observations never become clean or replayable.
             if let Some(trace) = trace {
                 trace.enter(crate::creation_preparation::Stage::NamespaceValidation);
             }
@@ -544,8 +545,15 @@ impl SnapshotStore {
                 .file_unresolved
                 .checked_sub(excluded_files)
                 .ok_or(StoreError::CorruptEvidence)?;
+            // The generic unresolved count stays intact. Only this exact new
+            // SDK-qualified target can exclude a fully authenticated verified
+            // directory whose child is outside its complete fresh ancestry.
+            let remaining_directories = summary
+                .directory_unresolved
+                .checked_sub(summary.directory_fresh_create_independent)
+                .ok_or(StoreError::CorruptEvidence)?;
             let namespace_pending = summary.unresolved != 0
-                || summary.directory_unresolved != 0
+                || remaining_directories != 0
                 || summary.delete_unresolved != 0
                 || remaining_files != 0;
             let mut matched = vec![false; exemptions.len()];

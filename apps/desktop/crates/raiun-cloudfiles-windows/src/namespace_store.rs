@@ -91,6 +91,7 @@ struct Envelope {
 struct Loaded {
     record: StoredDirectoryIntent,
     progress: NamespaceIntentProgress,
+    remote_verified_child_id: Option<String>,
 }
 impl DirectoryIntentStore {
     /// Local metadata storage at the current user's admitted recovery root.
@@ -716,6 +717,7 @@ impl DirectoryHistoryDecoder<'_> {
         let mut commitment = commitment(&[0; 32], &plain);
         let mut progress = NamespaceIntentProgress::new(intent.clone())
             .map_err(|_| StoreError::CorruptEvidence)?;
+        let mut remote_verified_child_id = None;
         let mut events = Vec::new();
         for name in names {
             if let Some(suffix) = name.strip_prefix(&format!("{id}.")) {
@@ -744,6 +746,9 @@ impl DirectoryHistoryDecoder<'_> {
             progress
                 .record(&event)
                 .map_err(|_| StoreError::CorruptEvidence)?;
+            if let NamespaceEventKind::RemoteVerified { report } = &event.event {
+                remote_verified_child_id = Some(report.remote.resource_id.clone());
+            }
             commitment = commitment_fn(&commitment, &plain);
         }
         let snapshot = progress.snapshot();
@@ -755,6 +760,7 @@ impl DirectoryHistoryDecoder<'_> {
                 commitment,
             },
             progress,
+            remote_verified_child_id,
         })
     }
 }
@@ -788,10 +794,68 @@ pub(super) fn history_counts_existing_with_classifications(
     physical: crate::ConfiguredRootIdentity,
     budget: &mut Budget,
     remaining: usize,
-    mut classifications: Option<
+    classifications: Option<
         &mut std::collections::BTreeMap<PendingDirectoryCreateClassification, usize>,
     >,
 ) -> Result<(usize, usize), StoreError> {
+    let (records, unresolved, _) = history_counts_existing_inner(
+        directory,
+        protector,
+        scope,
+        provider,
+        physical,
+        budget,
+        remaining,
+        classifications,
+        None,
+    )?;
+    Ok((records, unresolved))
+}
+
+/// Classify only an independently admitted new target under the caller's
+/// existing lock. Retained history remains unresolved and grants no authority.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn history_counts_for_fresh_create_existing(
+    directory: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    scope: &EditJournalScope,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+    candidate_scope: &EditJournalScope,
+    candidate_target: Option<&crate::fresh_create_target::FreshCreateTarget>,
+) -> Result<(usize, usize, usize), StoreError> {
+    history_counts_existing_inner(
+        directory,
+        protector,
+        scope,
+        provider,
+        physical,
+        budget,
+        remaining,
+        None,
+        candidate_target.map(|target| (candidate_scope, target)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_counts_existing_inner(
+    directory: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    scope: &EditJournalScope,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+    mut classifications: Option<
+        &mut std::collections::BTreeMap<PendingDirectoryCreateClassification, usize>,
+    >,
+    fresh_create: Option<(
+        &EditJournalScope,
+        &crate::fresh_create_target::FreshCreateTarget,
+    )>,
+) -> Result<(usize, usize, usize), StoreError> {
     validate_scope(scope)?;
     directory.verify()?;
     let decoder = DirectoryHistoryDecoder { protector };
@@ -803,15 +867,39 @@ pub(super) fn history_counts_existing_with_classifications(
         && scope.root_file_index == physical.file_index;
     if !selected {
         directory.verify()?;
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     }
     if ids.len() > remaining {
         return Err(StoreError::ScanLimit);
     }
     let mut unresolved = 0;
+    let mut independent = 0;
     for id in &ids {
         let row = decoder.load_scoped(directory, id, budget, scope, &names)?;
         unresolved += usize::from(!row.record.progress.recorded_complete);
+        let progress = row.record.progress;
+        if progress.remote == NamespacePhase::Verified
+            && progress.sequence == 2
+            && progress.attention.is_none()
+            && !progress.local_completed
+            && !progress.continued
+            && progress.source_removal.is_none()
+            && !progress.recorded_complete
+            && let Some((candidate_scope, target)) = fresh_create
+            && scope == candidate_scope
+            && let Some(child_id) = row.remote_verified_child_id.as_deref()
+            && let NamespaceOperation::CreateDirectory { destination } =
+                &row.record.intent.operation
+            && target.definitely_disjoint_from_verified_directory(
+                &destination.parent.local_components,
+                &destination.parent.remote.resource_id,
+                &destination.name,
+                child_id,
+                &scope.root_resource_id,
+            )
+        {
+            independent += 1;
+        }
         if !row.record.progress.recorded_complete
             && let Some(classifications) = classifications.as_deref_mut()
         {
@@ -822,7 +910,7 @@ pub(super) fn history_counts_existing_with_classifications(
         }
     }
     directory.verify()?;
-    Ok((ids.len(), unresolved))
+    Ok((ids.len(), unresolved, independent))
 }
 
 #[cfg(all(test, unix))]

@@ -57,6 +57,7 @@ pub(crate) struct NamespaceHistorySummary {
     pub(crate) directory_evidence: bool,
     pub(crate) directory_records: usize,
     pub(crate) directory_unresolved: usize,
+    pub(crate) directory_fresh_create_independent: usize,
     pub(crate) directory_pending_classifications:
         Vec<namespace_store::PendingDirectoryCreateClassification>,
     pub(crate) other_namespace_evidence: bool,
@@ -93,8 +94,9 @@ pub(crate) fn history_unresolved(
         || summary.delete_unresolved != 0)
 }
 
-/// Fresh creation still requires its own live admission. Only an authenticated
-/// zero-attempt ACK gap may be excluded here; generic history remains pending.
+/// Validate summary bounds while preserving generic pending observations. The
+/// joint existing-lock scanner separately checks exact-target independence;
+/// these counts alone never authorize a new or retained operation.
 pub(crate) fn history_unresolved_for_fresh_create(
     summary: &NamespaceHistorySummary,
     configured: bool,
@@ -103,6 +105,7 @@ pub(crate) fn history_unresolved_for_fresh_create(
     let _ = history_unresolved(summary, configured)?;
     if summary.unresolved > summary.records
         || summary.directory_unresolved > summary.directory_records
+        || summary.directory_fresh_create_independent > summary.directory_unresolved
         || summary.file_unresolved > summary.file_records
         || summary.delete_unresolved > summary.delete_records
     {
@@ -318,8 +321,8 @@ fn history_summary_existing_locked(
             // Borrowed metadata decoder only. The outer quota lock and this
             // same remaining budget cover both formats; no writer, admission,
             // body access or second independently observed snapshot is made.
-            let (records, unresolved) = if let Some(classifications) = classifications.as_mut() {
-                namespace_store::history_counts_existing_with_classifications(
+            let (records, unresolved, independent) = if let Some(candidate) = candidate_scope {
+                namespace_store::history_counts_for_fresh_create_existing(
                     &*directory,
                     &*protector,
                     &scope,
@@ -327,10 +330,24 @@ fn history_summary_existing_locked(
                     physical_root,
                     budget,
                     remaining,
-                    Some(classifications),
+                    candidate,
+                    candidate_target,
                 )?
+            } else if let Some(classifications) = classifications.as_mut() {
+                let (records, unresolved) =
+                    namespace_store::history_counts_existing_with_classifications(
+                        &*directory,
+                        &*protector,
+                        &scope,
+                        provider,
+                        physical_root,
+                        budget,
+                        remaining,
+                        Some(classifications),
+                    )?;
+                (records, unresolved, 0)
             } else {
-                namespace_store::history_counts_existing(
+                let (records, unresolved) = namespace_store::history_counts_existing(
                     &*directory,
                     &*protector,
                     &scope,
@@ -338,10 +355,12 @@ fn history_summary_existing_locked(
                     physical_root,
                     budget,
                     remaining,
-                )?
+                )?;
+                (records, unresolved, 0)
             };
             result.directory_records += records;
             result.directory_unresolved += unresolved;
+            result.directory_fresh_create_independent += independent;
             directory.verify()?;
         }
         directories.verify()?;

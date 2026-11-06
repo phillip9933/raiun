@@ -5027,8 +5027,40 @@ this histogram or relax pending-history refusals. The original full binding is
 checked before and after the worker inspection, and the Agent rechecks its
 original generation and root configuration before returning the result.
 
-The physical folder preparation refusal still requires classification of its
-retained blocker. The previous two-second request yielded no usable counts;
-its record-family counts remain unknown. These diagnostics do not resolve old
-operations, clear recovery or establish file-copy completion or speed. Windows
-GUI and CLI share the production command; Linux runtime behavior is unchanged.
+The physical ECE inspection completed and identified one verified directory
+history and 22 unfinished file histories. The previous two-second request
+yielded no usable counts; its historical counts remain unknown. Diagnostics do
+not resolve old operations, clear recovery or establish file-copy completion or
+speed. Windows GUI and CLI share the command; Linux runtime is unchanged.
+
+### Windows fresh creation beside retained recovery — 6 November 2026
+
+Retained recovery remains pending, but a fresh ordinary create can establish
+that an authenticated verified-directory history does not overlap its exact
+new destination. Only the closed Verified/sequence-2 history with no attention,
+local completion, continuation or source-removal progress qualifies. The
+authenticated report's child resource ID is retained privately after full event
+validation; no record or diagnostic unresolved count is changed.
+
+The original SDK parent capture supplies the complete remote ancestor chain
+from the same verified Space root through the new parent. Existing root and
+parent stats are reused; intermediate ancestors are freshly checked under the
+original token, cancellation and deadline because directory listings may have
+used an offline fallback. Exact path, resource ID, Space/root correspondence,
+ordinary directory state and writable qualification remain mandatory. Missing,
+duplicate or inconsistent ancestors hold the operation. A retained directory's
+child ID anywhere in that chain prevents independence, including moved or
+renamed ancestors. Separate structural/path and conservative ASCII divergence
+checks still refuse equality, ancestry, ambiguous prefixes and same-parent
+folded-name aliases. Scope-only queries retain their original pending policy.
+
+Existing file-history isolation keeps its exact admitted phases and full
+manifest/reservation/snapshot join. Its spelling proof now needs unambiguous
+ASCII only through the first differing sibling; structurally valid deeper
+Unicode names do not invalidate an already distinct branch. Every full path is
+still validated. Equal parent IDs independently require ASCII-distinct leaves.
+All account/root/epoch bindings, retained quota/budget checks, original native
+pins, fresh qualification and conditional writes remain. These observations
+authorize no old retry, send, adoption, acknowledgement, clearing or completion.
+The Windows GUI and CLI share the fix; Linux behavior and old files are unchanged.
+Source compilation does not establish physical copy completion or throughput.
