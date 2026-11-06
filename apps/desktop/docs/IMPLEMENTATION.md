@@ -4788,3 +4788,26 @@ state and credential policies. Linux uses its existing recovery path; no Linux
 runtime speedup is implied. Native whole-folder completion and elapsed transfer
 speed must be reported from actual execution, separately from compilation and
 individual native in-sync observations.
+
+
+### Windows pre-custody quota contention — 6 November 2026
+
+An exact quota-file open/lease Busy result during ordinary-file preparation can
+now yield its original typed task to the connection owner instead of stopping
+the folder copy. This is allowed only after the original reply identity, phase,
+actual task disposal, root, ticket and account context are verified, with no
+local capture or dispatch claim. The same preparation, observation, candidate,
+job, cancellation, deadline and bounded health-wait allowance are retained.
+
+The producer keeps that task behind sibling work and returns before submission.
+A 10 ms earliest-resubmit guard paces this scheduling even when commands keep the
+owner active. The original allowance is not renewed. IO, corrupt/incomplete
+evidence, storage quota errors, other Busy categories, expired or changed jobs,
+and all post-custody failures retain their existing terminal handling. This does not retry native conversion or in-sync updates, send file bodies,
+acknowledge recovery or act on old records.
+The synchronous convenience path disposes the unexecuted deferred task and
+retires only its original uncaptured attempt; it neither spins nor cancels peers.
+
+The Windows GUI and CLI use this same adapter. Linux scheduling is unchanged.
+This source correction does not establish a completed native upload or a speed
+increase until the bounded file workflow is actually exercised.

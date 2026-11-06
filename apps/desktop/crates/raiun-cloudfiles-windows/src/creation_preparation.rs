@@ -173,7 +173,7 @@ pub(crate) struct Failure {
 }
 impl Failure {
     #[cfg(windows)]
-    fn is_recovery_quota_busy(self) -> bool {
+    pub(crate) fn is_recovery_quota_busy(self) -> bool {
         self.category == Category::Busy
             && matches!(
                 self.stage,
@@ -184,8 +184,9 @@ impl Failure {
 
 /// Wait only for exact pre-capture quota contention, then rerun the original
 /// health query with all of its checks. The caller shares one allowance across
-/// both health queries in this Prepare invocation. This schedules work only;
-/// no retained evidence, failed check or pending result becomes authority.
+/// both health queries and owner deferrals of this original Prepare. This
+/// schedules work only; no retained evidence, failed check or pending result
+/// becomes authority.
 #[cfg(windows)]
 pub(crate) fn wait_for_recovery_health<T>(
     job: &crate::StreamedRecoveryJob,

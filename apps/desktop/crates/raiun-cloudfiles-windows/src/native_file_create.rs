@@ -554,6 +554,7 @@ struct Preparation {
     recovery: Arc<dyn PreparedEditRecovery>,
     job: crate::StreamedRecoveryJob,
     current: crate::opencloud::file_create::Current,
+    health_wait: Option<crate::CancellationToken>,
 }
 enum TaskKind {
     Prepare(Box<Preparation>),
@@ -566,6 +567,7 @@ struct Prepared {
 }
 enum ReplyKind {
     Prepared(Result<Box<Prepared>, Failure>),
+    PrepareDeferred(Box<Preparation>, Failure),
     Sent(Box<(Admission, Result<VerifiedCreateReadback, BackendError>)>),
     Refreshed(Box<(Admission, Result<RefreshedCreateReadback, BackendError>)>),
 }
@@ -581,6 +583,7 @@ impl FileCreateReply {
     pub fn failure_context(&self) -> &'static str {
         match &self.kind {
             ReplyKind::Prepared(Err(failure)) => failure.message("File"),
+            ReplyKind::PrepareDeferred(_, failure) => failure.message("File"),
             ReplyKind::Prepared(Ok(_)) => {
                 "File creation paused: local source admission or protected capture failed. Recovery files have been kept."
             }
@@ -621,12 +624,14 @@ impl FileCreateReply {
 }
 pub enum FileCreateStep {
     Task(FileCreateTask),
+    /// Original uncaptured Prepare only; retain and schedule after sibling work.
+    DeferredBeforeCapture(FileCreateTask),
     Finished(crate::FreshFileCreateOutcome),
 }
 impl ReplyKind {
     fn phase(&self) -> Phase {
         match self {
-            Self::Prepared(_) => Phase::Prepare,
+            Self::Prepared(_) | Self::PrepareDeferred(_, _) => Phase::Prepare,
             Self::Sent(_) => Phase::Send,
             Self::Refreshed(_) => Phase::Refresh,
         }
@@ -636,10 +641,12 @@ impl FileCreateTask {
     /// No worker is spawned here. Every SDK source worker is joined before return.
     pub fn execute(mut self) -> FileCreateReply {
         let kind = match self.kind.take().expect("private single-use create task") {
-            TaskKind::Prepare(prep) => {
+            TaskKind::Prepare(mut prep) => {
                 let trace = Arc::new(Trace::new());
+                // Move, never renew, the original allowance across both health
+                // queries and any owner-scheduled pre-custody deferrals.
+                let mut health_wait = prep.health_wait.take();
                 let result = (|| {
-                    let mut health_wait = None;
                     trace.enter(PreparationStage::Job);
                     prep.job.check()?;
                     trace.enter(PreparationStage::Current);
@@ -706,7 +713,17 @@ impl FileCreateTask {
                     trace.backend(error);
                     trace.failure()
                 });
-                ReplyKind::Prepared(result)
+                prep.health_wait = health_wait;
+                match result {
+                    Err(failure)
+                        if failure.is_recovery_quota_busy()
+                            && !prep.job.is_stopped()
+                            && (prep.current)(self.key.authorization) =>
+                    {
+                        ReplyKind::PrepareDeferred(prep, failure)
+                    }
+                    result => ReplyKind::Prepared(result),
+                }
             }
             TaskKind::Send(pair) => {
                 let (mut admission, joined) = *pair;
@@ -897,6 +914,7 @@ impl ConfiguredRootConnection {
                 recovery,
                 job,
                 current,
+                health_wait: None,
             })),
         );
         slot.attempts.push(attempt);
@@ -970,6 +988,30 @@ impl ConfiguredRootConnection {
             return Ok(FileCreateStep::Finished(attempt.incomplete()));
         }
         match reply.kind {
+            ReplyKind::PrepareDeferred(preparation, failure) => {
+                // Correlation/disposition above proved the original Prepare's
+                // task has actually disposed. Never defer custody or dispatch.
+                // claim_dispatch occurs only after capture and immediately sets
+                // dispatched; ticket currentness was checked on this owner.
+                if !failure.is_recovery_quota_busy()
+                    || attempt.phase != Phase::Prepare
+                    || !attempt.flight_done.load(Ordering::Acquire)
+                    || attempt.local.is_some()
+                    || attempt.dispatched.load(Ordering::Acquire)
+                    || preparation.parent_components != attempt.parent_components
+                    || preparation.name != attempt.name
+                    || !Arc::ptr_eq(&preparation.recovery, &attempt.recovery)
+                    || !Arc::ptr_eq(&preparation.current, &attempt.current)
+                    || preparation.job.deadline() != attempt.job.deadline()
+                    || preparation.job.is_stopped()
+                    || !(preparation.current)(attempt.key.authorization)
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                let task = attempt.task(Phase::Prepare, TaskKind::Prepare(preparation));
+                slot.attempts.push(attempt);
+                Ok(FileCreateStep::DeferredBeforeCapture(task))
+            }
             ReplyKind::Prepared(result) => {
                 let prepared = result.map_err(|_| Error::EditRecoveryUnavailable)?;
                 let expected = self
@@ -1131,6 +1173,32 @@ impl ConfiguredRootConnection {
                 FileCreateStep::Finished(outcome) => return Ok(outcome),
                 FileCreateStep::Task(task) => {
                     self.advance_fresh_personal_file_create(task.execute())?
+                }
+                FileCreateStep::DeferredBeforeCapture(task) => {
+                    // This synchronous convenience caller has no scheduling
+                    // owner. Dispose first, then retire only its original key;
+                    // never execute repeatedly, cancel a shared job or close peers.
+                    let key = Arc::clone(&task.key);
+                    drop(task);
+                    let mut slot = self
+                        .create_owner
+                        .try_borrow_mut()
+                        .map_err(|_| Error::ConnectionStateInvalid)?;
+                    let index = slot
+                        .attempts
+                        .iter()
+                        .position(|attempt| Arc::ptr_eq(&attempt.key, &key))
+                        .ok_or(Error::ConnectionStateInvalid)?;
+                    let attempt = &slot.attempts[index];
+                    if attempt.phase != Phase::Prepare
+                        || !attempt.flight_done.load(Ordering::Acquire)
+                        || attempt.local.is_some()
+                        || attempt.dispatched.load(Ordering::Acquire)
+                    {
+                        return Err(Error::ConnectionStateInvalid);
+                    }
+                    slot.attempts.remove(index);
+                    return Ok(crate::FreshFileCreateOutcome::BusyBeforeCapture);
                 }
             };
         }

@@ -11,6 +11,7 @@ use std::sync::{
     Arc, Weak,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::{Duration, Instant};
 pub(crate) enum Task {
     File(Box<FileCreateTask>),
     Vault(Box<raiun_cloudfiles_windows::VaultChildCreateTask>),
@@ -128,6 +129,7 @@ impl From<&'static str> for FailureContext {
 enum Step {
     Task(Task),
     BusyFile,
+    DeferredFileTask(Task),
     BusyVaultTask(Task),
     Ordinary,
     Completed,
@@ -137,6 +139,9 @@ enum Step {
 fn file_step(step: FileCreateStep, stage: Stage, failure: Option<&'static str>) -> Step {
     match step {
         FileCreateStep::Task(task) => Step::Task(Task::File(Box::new(task))),
+        FileCreateStep::DeferredBeforeCapture(task) => {
+            Step::DeferredFileTask(Task::File(Box::new(task)))
+        }
         FileCreateStep::Finished(FreshFileCreateOutcome::BusyBeforeCapture) => Step::BusyFile,
         FileCreateStep::Finished(FreshFileCreateOutcome::LocallyCompleted) => Step::Completed,
         FileCreateStep::Finished(FreshFileCreateOutcome::CapturedLocalIncomplete) => Step::Held(
@@ -231,6 +236,7 @@ struct Lane {
     allow_directory: bool,
     ordinary_candidate: bool,
     retry_after_wave: bool,
+    prepare_retry_after: Option<Instant>,
 }
 impl Lane {
     pub(crate) fn new(
@@ -255,6 +261,7 @@ impl Lane {
             allow_directory,
             ordinary_candidate: false,
             retry_after_wave: false,
+            prepare_retry_after: None,
         }
     }
     pub(crate) fn is_current(
@@ -291,6 +298,7 @@ impl Lane {
         let _ = connection.close_fresh_personal_directory_create();
         let _ = connection.close_fresh_vault_child_create();
         self.deferred.take();
+        self.prepare_retry_after = None;
     }
     /// Poll even on HOLD so completed/late replies cannot consume a slot forever.
     pub(crate) fn drain_held(
@@ -541,6 +549,15 @@ impl Lane {
         if let Some(step) = step {
             match step {
                 Step::Task(task) => self.deferred = Some(task),
+                Step::DeferredFileTask(task) => {
+                    // Retain the exact original Prepare and candidate deadline.
+                    // Sibling captures drain first; never immediately re-submit
+                    // or spin once the one health-wait allowance has expired.
+                    self.deferred = Some(task);
+                    self.retry_after_wave = true;
+                    self.prepare_retry_after = Some(Instant::now() + Duration::from_millis(10));
+                    return Ok(false);
+                }
                 Step::BusyVaultTask(task) => {
                     self.deferred = Some(task);
                     return Ok(false);
@@ -571,13 +588,22 @@ impl Lane {
                 }
             }
         }
+        if self
+            .prepare_retry_after
+            .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            return Ok(false);
+        }
         if let Some(task) = self.deferred.take() {
             if task.kind() != kind {
                 self.stop(connection);
                 return Err(kind_hold!(kind, "executor task kind mismatch").into());
             }
             match workers.submit(task) {
-                Ok(id) => self.flight = Some(id),
+                Ok(id) => {
+                    self.flight = Some(id);
+                    self.prepare_retry_after = None;
+                }
                 Err(task) => self.deferred = Some(task),
             }
         }
