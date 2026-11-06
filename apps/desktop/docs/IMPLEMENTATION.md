@@ -4752,3 +4752,28 @@ operation strings, OS messages, paths, identities and file revisions are not
 included. This preserves the exact returned API code rather than guessing from
 the stage or reading a later global last-error value. It adds no native calls,
 RPCs, retries or completion authority; non-native errors retain fixed stages.
+
+
+### Windows recovery history traversal — 6 November 2026
+
+The existing locked namespace-history scan now uses one lazy snapshot-directory
+listing per authenticated scope. Previously, each joined file's original-state
+or acknowledgment check enumerated and charged that whole directory again.
+Retained history therefore multiplied traversal work and could exhaust the
+aggregate scan allowance before a normal folder upload completed.
+
+The view exists only inside that scan's ephemeral decoder while the same
+persistent quota lease excludes cooperating snapshot, dispatch and event writers.
+The actual enumeration is charged once. Each required manifest, reservation,
+intent, event chain, dispatch lock, body-length pin and continued/superseded link
+is still authenticated. Missing, unknown, staged, duplicate or corrupt evidence
+still refuses admission. The shared entry/metadata budgets, record/scope/event
+ceilings, whole-state accounting and later snapshot/legacy checks are unchanged.
+Standalone readers continue to enumerate independently; this is neither a
+persistent cache nor permission to adopt, replay, acknowledge or delete history.
+
+Windows GUI and CLI consume this shared adapter with their existing separate
+state and credential policies. Linux uses its existing recovery path; no Linux
+runtime speedup is implied. Native whole-folder completion and elapsed transfer
+speed must be reported from actual execution, separately from compilation and
+individual native in-sync observations.

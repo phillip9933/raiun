@@ -140,7 +140,104 @@ struct History {
     superseded_edit: Option<crate::namespace_intent::ContinuedEditReference>,
 }
 
+/// Borrowed only by the existing-quota-lease namespace history scanner. The
+/// original scope directory is enumerated once; every selected history is still
+/// authenticated under the caller's same cumulative metadata allowance.
+/// No listing, state or reference escapes that scanner's ephemeral decoder.
+pub(super) struct NamespaceSnapshotHistories<'store> {
+    store: &'store SnapshotStore,
+    listing: std::cell::RefCell<Option<NamespaceSnapshotListing>>,
+}
+struct NamespaceSnapshotListing {
+    directory: Arc<dyn Directory>,
+    names: Vec<String>,
+}
+impl NamespaceSnapshotHistories<'_> {
+    fn history(&self, key: &StreamedRecordKey, budget: &mut Budget) -> Result<History, StoreError> {
+        if key.scope() != &self.store.scope {
+            return Err(StoreError::CorruptEvidence);
+        }
+        self.store.root.verify()?;
+        let mut listing = self.listing.borrow_mut();
+        if listing.is_none() {
+            let directory = self.store.root.child(&self.store.key, false)?;
+            let names = directory.entries(budget.remaining_entries())?;
+            budget.entries(names.len())?;
+            directory.verify()?;
+            *listing = Some(NamespaceSnapshotListing { directory, names });
+        }
+        let listing = listing.as_ref().ok_or(StoreError::IncompleteEvidence)?;
+        listing.directory.verify()?;
+        let history =
+            self.store
+                .read_history_names(&*listing.directory, key, &listing.names, budget)?;
+        listing.directory.verify()?;
+        self.store.root.verify()?;
+        Ok(history)
+    }
+    pub(super) fn original_state(
+        &self,
+        manifest: &SnapshotManifest,
+        budget: &mut Budget,
+    ) -> Result<StreamedAttemptState, StoreError> {
+        let key = StreamedRecordKey::from_manifest(manifest)?;
+        Ok(self.history(&key, budget)?.state)
+    }
+    #[cfg(windows)]
+    pub(super) fn continued_edit_metadata(
+        &self,
+        record_id: &str,
+        budget: &mut Budget,
+    ) -> Result<(StreamedRecordKey, SnapshotManifest, StreamedAttemptState), StoreError> {
+        let manifest = self.store.selected_manifest(record_id, budget)?;
+        let key = StreamedRecordKey::from_manifest(&manifest)?;
+        let state = self.history(&key, budget)?.state;
+        Ok((key, manifest, state))
+    }
+    #[cfg(windows)]
+    pub(super) fn superseded_metadata(
+        &self,
+        key: &StreamedRecordKey,
+        budget: &mut Budget,
+    ) -> Result<Option<crate::namespace_intent::ContinuedEditReference>, StoreError> {
+        self.store.check_key(key)?;
+        superseded_metadata(self.history(key, budget)?)
+    }
+}
+
+#[cfg(windows)]
+fn superseded_metadata(
+    history: History,
+) -> Result<Option<crate::namespace_intent::ContinuedEditReference>, StoreError> {
+    if history.state
+        == (StreamedAttemptState::Superseded {
+            attempt_id: 0,
+            attempts: 0,
+        })
+    {
+        history
+            .superseded_edit
+            .ok_or(StoreError::CorruptEvidence)
+            .map(Some)
+    } else if history.superseded_edit.is_none() {
+        Ok(None)
+    } else {
+        Err(StoreError::CorruptEvidence)
+    }
+}
+
 impl SnapshotStore {
+    /// Caller retains this root's quota.lock throughout the namespace scan.
+    /// Snapshot capture, dispatch-lock creation and event append all publish
+    /// under that same persistent lock. Never retain this view across scans.
+    pub(super) fn namespace_snapshot_histories(&self) -> NamespaceSnapshotHistories<'_> {
+        // Constructing the view performs no IO or budget charge. A scope whose
+        // joins need no historical state lookup keeps its original behavior.
+        NamespaceSnapshotHistories {
+            store: self,
+            listing: std::cell::RefCell::new(None),
+        }
+    }
     /// Authenticate the selected manifest/reservation and current body metadata.
     /// No body bytes are read; possession of this key grants no dispatch admission.
     pub fn record_key(&self, record_id: &str) -> Result<StreamedRecordKey, StoreError> {
@@ -335,21 +432,7 @@ impl SnapshotStore {
         self.check_key(key)?;
         let directory = self.root.child(&self.key, false)?;
         let history = self.read_history(&*directory, key, budget)?;
-        if history.state
-            == (StreamedAttemptState::Superseded {
-                attempt_id: 0,
-                attempts: 0,
-            })
-        {
-            history
-                .superseded_edit
-                .ok_or(StoreError::CorruptEvidence)
-                .map(Some)
-        } else if history.superseded_edit.is_none() {
-            Ok(None)
-        } else {
-            Err(StoreError::CorruptEvidence)
-        }
+        superseded_metadata(history)
     }
     fn read_history(
         &self,

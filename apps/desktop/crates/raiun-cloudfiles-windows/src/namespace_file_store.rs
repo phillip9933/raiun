@@ -784,6 +784,19 @@ impl FileCreateStore {
         budget: &mut Budget,
         require_body: bool,
     ) -> Result<Loaded, StoreError> {
+        self.load_names_with_history(directory, id, scope, names, budget, require_body, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn load_names_with_history(
+        &self,
+        directory: &dyn Directory,
+        id: &str,
+        scope: &EditJournalScope,
+        names: &[String],
+        budget: &mut Budget,
+        require_body: bool,
+        history: Option<&super::events::NamespaceSnapshotHistories<'_>>,
+    ) -> Result<Loaded, StoreError> {
         if !valid_id(id) {
             return Err(StoreError::Invalid);
         }
@@ -862,10 +875,19 @@ impl FileCreateStore {
         let progress = checked.snapshot();
         if progress.recorded_complete && !progress.continued {
             let (manifest, directory) = self.reference_manifest_metadata(&joined, scope, budget)?;
-            if !self
-                .base
-                .create_acknowledged_metadata(&manifest, &*directory, budget)?
-            {
+            let acknowledged = match history {
+                Some(history) => {
+                    history.original_state(&manifest, budget)?
+                        == (StreamedAttemptState::LocallyAcknowledged {
+                            attempt_id: 0,
+                            attempts: 0,
+                        })
+                }
+                None => self
+                    .base
+                    .create_acknowledged_metadata(&manifest, &*directory, budget)?,
+            };
+            if !acknowledged {
                 return Err(StoreError::IncompleteEvidence);
             }
         }
@@ -876,7 +898,9 @@ impl FileCreateStore {
                 .as_ref()
                 .ok_or(StoreError::IncompleteEvidence)?;
             if scope == &self.base.scope {
-                self.validate_continued_edit(&joined, report, edit, budget, true)?;
+                self.validate_continued_edit_with_history(
+                    &joined, report, edit, budget, true, history,
+                )?;
             } else {
                 // Discovery authenticates every retained scope before filtering
                 // the caller's rows. Decode this foreign continuation against
@@ -890,7 +914,9 @@ impl FileCreateStore {
                         self.base.policy,
                     )?,
                 };
-                decoder.validate_continued_edit(&joined, report, edit, budget, true)?;
+                decoder.validate_continued_edit_with_history(
+                    &joined, report, edit, budget, true, history,
+                )?;
             }
         }
         #[cfg(not(windows))]
@@ -915,6 +941,14 @@ impl FileCreateStore {
         &self,
         loaded: &Loaded,
         budget: &mut DiscoveryBudget,
+    ) -> Result<bool, StoreError> {
+        self.acknowledged_original_with_history(loaded, budget, None)
+    }
+    fn acknowledged_original_with_history(
+        &self,
+        loaded: &Loaded,
+        budget: &mut DiscoveryBudget,
+        history: Option<&super::events::NamespaceSnapshotHistories<'_>>,
     ) -> Result<bool, StoreError> {
         let progress = loaded.record.progress;
         if progress.remote != NamespacePhase::Verified
@@ -950,8 +984,30 @@ impl FileCreateStore {
             &loaded.record.key.scope,
             budget,
         )?;
-        self.base
-            .create_acknowledged_metadata(&manifest, &*directory, budget)
+        match history {
+            Some(history) => Ok(history.original_state(&manifest, budget)?
+                == (StreamedAttemptState::LocallyAcknowledged {
+                    attempt_id: 0,
+                    attempts: 0,
+                })),
+            None => self
+                .base
+                .create_acknowledged_metadata(&manifest, &*directory, budget),
+        }
+    }
+    fn original_snapshot_state(
+        &self,
+        manifest: &SnapshotManifest,
+        directory: &dyn Directory,
+        budget: &mut Budget,
+        history: Option<&super::events::NamespaceSnapshotHistories<'_>>,
+    ) -> Result<StreamedAttemptState, StoreError> {
+        match history {
+            Some(history) => history.original_state(manifest, budget),
+            None => self
+                .base
+                .create_original_state_metadata(manifest, directory, budget),
+        }
     }
     #[cfg(windows)]
     fn validate_continued_edit(
@@ -962,11 +1018,33 @@ impl FileCreateStore {
         budget: &mut Budget,
         require_superseded: bool,
     ) -> Result<StreamedRecordKey, StoreError> {
+        self.validate_continued_edit_with_history(
+            joined,
+            report,
+            edit,
+            budget,
+            require_superseded,
+            None,
+        )
+    }
+    #[cfg(windows)]
+    fn validate_continued_edit_with_history(
+        &self,
+        joined: &FileJoin,
+        report: &crate::namespace_intent::NamespaceDestinationReport,
+        edit: &ContinuedEditReference,
+        budget: &mut Budget,
+        require_superseded: bool,
+        history: Option<&super::events::NamespaceSnapshotHistories<'_>>,
+    ) -> Result<StreamedRecordKey, StoreError> {
         let original = self
             .reference_manifest_metadata(joined, &self.base.scope, budget)?
             .0;
         let original_key = StreamedRecordKey::from_manifest(&original)?;
-        let (key, manifest, state) = self.base.continued_edit_metadata(&edit.record_id, budget)?;
+        let (key, manifest, state) = match history {
+            Some(history) => history.continued_edit_metadata(&edit.record_id, budget)?,
+            None => self.base.continued_edit_metadata(&edit.record_id, budget)?,
+        };
         let binding = manifest.binding();
         let destination = destination(&joined.intent)?;
         if key.record_id() == original_key.record_id()
@@ -983,14 +1061,16 @@ impl FileCreateStore {
         {
             return Err(StoreError::CorruptEvidence);
         }
-        if require_superseded
-            && self
-                .base
-                .create_superseded_metadata(&original_key, budget)?
-                .as_ref()
-                != Some(edit)
-        {
-            return Err(StoreError::IncompleteEvidence);
+        if require_superseded {
+            let superseded = match history {
+                Some(history) => history.superseded_metadata(&original_key, budget)?,
+                None => self
+                    .base
+                    .create_superseded_metadata(&original_key, budget)?,
+            };
+            if superseded.as_ref() != Some(edit) {
+                return Err(StoreError::IncompleteEvidence);
+            }
         }
         Ok(key)
     }
@@ -1699,11 +1779,29 @@ fn history_counts_existing_inner(
                     policy,
                 )?,
             };
+            // This existing-lock scanner borrows one exact snapshot-scope view.
+            // All snapshot/namespace event publication shares the caller's
+            // retained quota.lock, so no cooperating writer can change its names.
+            // Enumeration is lazy until the first historical state read; empty
+            // and noneligible joins gain no new IO or budget charge. Do not
+            // retain the view beyond this decoder. Direct readers enumerate.
+            let snapshot_history = decoder.base.namespace_snapshot_histories();
             for id in ids {
-                let loaded =
-                    decoder.load_names_checked(&*directory, &id, &scope, &names, budget, false)?;
+                let loaded = decoder.load_names_with_history(
+                    &*directory,
+                    &id,
+                    &scope,
+                    &names,
+                    budget,
+                    false,
+                    Some(&snapshot_history),
+                )?;
                 unresolved += usize::from(!loaded.record.progress.recorded_complete);
-                let eligible = decoder.acknowledged_original(&loaded, budget)?;
+                let eligible = decoder.acknowledged_original_with_history(
+                    &loaded,
+                    budget,
+                    Some(&snapshot_history),
+                )?;
                 acknowledged_join_gaps += usize::from(eligible);
                 let progress = loaded.record.progress;
                 let different_space_root = candidate_scope.is_some_and(|candidate| {
@@ -1740,10 +1838,11 @@ fn history_counts_existing_inner(
                         &loaded.record.key.scope,
                         budget,
                     )?;
-                    if decoder.base.create_original_state_metadata(
+                    if decoder.original_snapshot_state(
                         &manifest,
                         &*original_directory,
                         budget,
+                        Some(&snapshot_history),
                     )? == StreamedAttemptState::NotAttempted
                     {
                         // The manifest/reference/reservation join above already
@@ -1775,10 +1874,11 @@ fn history_counts_existing_inner(
                         &loaded.record.key.scope,
                         budget,
                     )?;
-                    let state = decoder.base.create_original_state_metadata(
+                    let state = decoder.original_snapshot_state(
                         &manifest,
                         &*original_directory,
                         budget,
+                        Some(&snapshot_history),
                     )?;
                     let classification = pending_classification(&loaded, state, eligible);
                     let count = classifications.entry(classification).or_insert(0usize);
