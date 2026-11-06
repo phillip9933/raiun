@@ -8,7 +8,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.w3c.dom.Element
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
-import javax.xml.parsers.DocumentBuilderFactory
 
 data class RemoteFileVersion(
     val id: String,
@@ -119,13 +118,7 @@ private fun parseVersions(
     xml: String,
     collection: HttpUrl,
 ): List<RemoteFileVersion> {
-    require(!xml.contains("<!DOCTYPE", true) && !xml.contains("<!ENTITY", true))
-    val factory =
-        DocumentBuilderFactory.newInstance().apply {
-            isNamespaceAware = true
-            isExpandEntityReferences = false
-        }
-    val document = factory.newDocumentBuilder().parse(xml.byteInputStream())
+    val document = parseSafeXml(xml)
     val responses = document.getElementsByTagNameNS("DAV:", "response")
     require(responses.length <= 10_001)
     return (0 until responses.length)

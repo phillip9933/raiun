@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="backup_filter_photos_help">画像として認識されたファイルを、サブフォルダー内も含めてバックアップします。混在フォルダー内の他のファイルはスキップし、除外したフォルダーは検索しません。</string>
+    <string name="backup_filter_videos_help">動画として認識されたファイルを、サブフォルダー内も含めてバックアップします。混在フォルダー内の他のファイルはスキップし、除外したフォルダーは検索しません。</string>
+    <string name="backup_filter_all_help">サブフォルダーも検索し、除外したファイルとフォルダーを除くすべてのファイルをバックアップします。</string>
     <string name="backup_settings_title">フォルダーとカメラのバックアップ</string>
     <string name="backup_settings_add_accessibility">バックアップを追加</string>
     <string name="backup_settings_scan_accessibility">今すぐバックアップをスキャン</string>

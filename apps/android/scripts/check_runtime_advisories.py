@@ -169,7 +169,7 @@ def run(pins_path: Path) -> dict[str, object]:
     scope = {
         "source": "gradle/runtime-artifact-pins.sha256",
         "ecosystem": "Maven",
-        "coverage": "advisories reported by OSV for pinned runtime group:artifact:version coordinates",
+        "coverage": "OSV advisories for pinned runtime coordinates and original upstream inputs retained for native-only backports",
         "excludes": [
             "scanner/updater bundled implementation and source behavior",
             "native libraries, model assets, and embedded non-Maven components",

@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="backup_filter_photos_help">Sauvegarde les images reconnues comme telles par le dossier source, y compris dans les sous-dossiers. Les autres fichiers des dossiers mixtes sont ignorés ; les dossiers exclus ne sont pas analysés.</string>
+    <string name="backup_filter_videos_help">Sauvegarde les vidéos reconnues comme telles par le dossier source, y compris dans les sous-dossiers. Les autres fichiers des dossiers mixtes sont ignorés ; les dossiers exclus ne sont pas analysés.</string>
+    <string name="backup_filter_all_help">Analyse les sous-dossiers et sauvegarde tous les fichiers, sauf les fichiers et dossiers exclus.</string>
     <string name="backup_settings_title">Sauvegarde des dossiers et de l’appareil photo</string>
     <string name="backup_settings_add_accessibility">Ajouter une sauvegarde</string>
     <string name="backup_settings_scan_accessibility">Analyser les sauvegardes maintenant</string>

@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="backup_filter_photos_help">Guarda imagens identificadas como tal pela pasta de origem, incluindo nas subpastas. Os restantes ficheiros em pastas mistas são ignorados; as pastas excluídas não são analisadas.</string>
+    <string name="backup_filter_videos_help">Guarda vídeos identificados como tal pela pasta de origem, incluindo nas subpastas. Os restantes ficheiros em pastas mistas são ignorados; as pastas excluídas não são analisadas.</string>
+    <string name="backup_filter_all_help">Analisa as subpastas e guarda todos os ficheiros, exceto ficheiros e pastas excluídos.</string>
     <string name="backup_settings_title">Cópia de segurança de pastas e da câmara</string>
     <string name="backup_settings_add_accessibility">Adicionar cópia de segurança</string>
     <string name="backup_settings_scan_accessibility">Analisar as cópias de segurança agora</string>

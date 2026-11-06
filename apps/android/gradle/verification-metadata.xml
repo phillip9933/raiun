@@ -6702,5 +6702,21 @@
             <sha256 value="1dda8077c6ab65730b14f9c7624eb6e1fc0af6852d847921b85c62309a32d84e" origin="Verified published updater v0.2.1 bundle"/>
          </artifact>
       </component>
+      <component group="app.raiun.vendor" name="lazysodium-android" version="5.2.0-raiun-native.1">
+         <artifact name="lazysodium-android-5.2.0-raiun-native.1.aar">
+            <sha256 value="83326921726084e014289bffed0407bfeaa496622b9e01c862d684b32b56e6bc" origin="Raiun source-bound native security backport; see third_party/native-security-fixes"/>
+         </artifact>
+         <artifact name="lazysodium-android-5.2.0-raiun-native.1.pom">
+            <sha256 value="72b360969368036f5506720bbb2975cd6274fc1a86c58f894a69e154354ad748" origin="Raiun source-bound native security backport; see third_party/native-security-fixes"/>
+         </artifact>
+      </component>
+      <component group="app.raiun.vendor" name="scanner-processing-opencv" version="0.8.0-beta.1-raiun-native.1">
+         <artifact name="scanner-processing-opencv-0.8.0-beta.1-raiun-native.1.aar">
+            <sha256 value="638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66" origin="Raiun source-bound native security backport; see third_party/native-security-fixes"/>
+         </artifact>
+         <artifact name="scanner-processing-opencv-0.8.0-beta.1-raiun-native.1.pom">
+            <sha256 value="0f0eabe993181062e10ae511e1a1ff531461e54333b0644e991b5e6a294491af" origin="Raiun source-bound native security backport; see third_party/native-security-fixes"/>
+         </artifact>
+      </component>
    </components>
 </verification-metadata>

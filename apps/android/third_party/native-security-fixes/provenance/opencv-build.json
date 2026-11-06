@@ -1,0 +1,62 @@
+{
+  "build": {
+    "abis": {
+      "arm64-v8a": {
+        "bytes": 6525072,
+        "jni_export_count": 779,
+        "jni_exports_identical": true,
+        "minimum_load_alignment": 16384,
+        "original_libcxx_sha256": "cd61762848882a16c8244c964a6f396c0caa0b440588a210ce9cc4ab0e6d9f0c",
+        "sha256": "34d7f4d34908b9c8f78586c6908517258cf1b89cdaa5a28e333d4b3eb78c71d9"
+      },
+      "x86_64": {
+        "bytes": 10526480,
+        "jni_export_count": 779,
+        "jni_exports_identical": true,
+        "minimum_load_alignment": 16384,
+        "original_libcxx_sha256": "2e855857f80819737d25a663109fedf816a5e996a85423166806014a06593256",
+        "sha256": "ba27a05353d919f26bd91364095f68ade8975ce009f00d07cf28ab125457507a"
+      }
+    },
+    "abis_serialized": true,
+    "api": 26,
+    "compiled_modules": [
+      "opencv_core",
+      "opencv_imgproc",
+      "opencv_java_bindings_generator",
+      "opencv_java"
+    ],
+    "compiler": "Android NDK Clang19.0.1, existing Linux-host NDKr28c",
+    "host_function_sanitizer": {
+      "compiler": "clang version 23.1.4",
+      "flags": [
+        "-fsanitize=function",
+        "-fno-sanitize-recover=function"
+      ],
+      "old_real_core_test_exit": 1,
+      "patched_cases": 672,
+      "patched_real_core_test_exit": 0
+    },
+    "imgcodecs_absent": true,
+    "ndk": "28.2.13676358 (existing Linux-host toolchain)",
+    "workers": 2
+  },
+  "integration_scope": "Replaces only libopencv_java4.so for arm64-v8a and x86_64. Original scanner classes, resources, notices, model assets, and libc++ payloads are preserved byte-for-byte.",
+  "native_source": {
+    "changed_source": "modules/core/src/split.dispatch.cpp",
+    "local_patch_id": "raiun-split-function-pointer-1",
+    "patch_file": "../sources/opencv-split-function-pointer.patch",
+    "patch_sha256": "d80350b6a3b354accacaabdd058da0b36f435eab95b2ef88acb2b021ed09b0ad",
+    "patched_source_sha256": "c246697a13508647497afaa0da02442301df32d648fa08f866b1268f479cdaf0",
+    "project": "OpenCV",
+    "sha256": "fa3faf7581f1fa943c9e670cf57dd6ba1c5b4178f363a188a2c8bff1eb28b7e4",
+    "url": "https://github.com/opencv/opencv/archive/refs/tags/4.12.0.zip",
+    "version": "4.12.0"
+  },
+  "origin": {
+    "aar_sha256": "6de7e504bda98f1f4a8d9c2451196061e0662ee1848f3278ab14c03cc3539375",
+    "coordinate": "dev.offlinescan:scanner-processing-opencv:0.8.0-beta.1",
+    "public_source": "https://github.com/phillip9933/open-android-doc-scanner/tree/8d9a451c27ed87d20110d25dcedb81001e0f521f",
+    "source_commit": "8d9a451c27ed87d20110d25dcedb81001e0f521f"
+  }
+}

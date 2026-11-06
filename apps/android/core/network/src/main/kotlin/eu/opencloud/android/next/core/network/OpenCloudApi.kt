@@ -14,7 +14,6 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.Credentials
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -135,7 +134,7 @@ class OpenCloudApi(
         serverUrl: String,
         username: String,
         password: String,
-    ): UserProfile = profile(serverUrl, Credentials.basic(username, password))
+    ): UserProfile = profile(serverUrl, openCloudBasicAuthorization(username, password))
 
     fun bearerProfile(
         serverUrl: String,

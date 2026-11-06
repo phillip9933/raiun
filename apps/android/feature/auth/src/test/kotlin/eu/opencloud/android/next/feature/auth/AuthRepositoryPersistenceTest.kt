@@ -14,11 +14,13 @@ import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
+import java.util.Base64
 
 class AuthRepositoryPersistenceTest {
     private lateinit var server: MockWebServer
@@ -54,6 +56,47 @@ class AuthRepositoryPersistenceTest {
 
         assertEquals("secret", credentials.basicPassword)
         assertEquals(2, server.requestCount)
+    }
+
+    @Test fun `profile and capabilities send identical UTF8 bytes before persisting original basic credentials`() {
+        listOf(
+            "alice" to "secret",
+            "利用者" to "秘密",
+            "user😀" to "pass🔑",
+            "élise" to "café",
+        ).forEach { (username, password) ->
+            server.enqueue(MockResponse().setBody(PROFILE))
+            server.enqueue(MockResponse().setBody(CAPABILITIES))
+            repository.loginBasic(server.url("/").toString().trimEnd('/'), username, password)
+
+            repeat(2) {
+                val header = requireNotNull(server.takeRequest().getHeader("Authorization"))
+                assertEquals("Basic", header.substringBefore(' '))
+                assertArrayEquals(
+                    "$username:$password".toByteArray(Charsets.UTF_8),
+                    Base64.getDecoder().decode(header.substringAfter(' ')),
+                )
+            }
+            assertEquals(username, credentials.basicUsername)
+            assertEquals(password, credentials.basicPassword)
+        }
+    }
+
+    @Test fun `basic persistence failure still propagates after metadata without changing stored credentials`() {
+        credentials.basicUsername = "previous-user"
+        credentials.basicPassword = "previous-password"
+        credentials.rejectBasicWrite = true
+        server.enqueue(MockResponse().setBody(PROFILE))
+        server.enqueue(MockResponse().setBody(CAPABILITIES))
+
+        assertThrows(IllegalStateException::class.java) {
+            repository.loginBasic(server.url("/").toString().trimEnd('/'), "利用者😀", "café")
+        }
+
+        assertEquals("previous-user", credentials.basicUsername)
+        assertEquals("previous-password", credentials.basicPassword)
+        assertEquals(2, server.requestCount)
+        assertEquals(0, credentials.credentialWrites)
     }
 
     @Test fun `oidc tokens are not saved when capabilities validation fails`() {
@@ -222,6 +265,8 @@ class AuthRepositoryPersistenceTest {
         var credentialWrites = 0
         var removals = 0
         var basicPassword: String? = null
+        var basicUsername: String? = null
+        var rejectBasicWrite = false
         var tokens: AuthTokens? = null
         var sessionRegistration: OidcClientRegistration? = null
         private val registrations = mutableMapOf<String, OidcClientRegistration>()
@@ -231,7 +276,9 @@ class AuthRepositoryPersistenceTest {
             username: String,
             password: String,
         ) {
+            check(!rejectBasicWrite)
             credentialWrites++
+            basicUsername = username
             basicPassword = password
         }
 

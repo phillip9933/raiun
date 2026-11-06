@@ -7,12 +7,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.w3c.dom.Element
-import java.io.ByteArrayInputStream
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.time.ZonedDateTime
 import java.util.UUID
-import javax.xml.parsers.DocumentBuilderFactory
 
 data class RemoteTrashResource(
     val id: String,
@@ -114,10 +112,7 @@ class WebDavFeatureClient(
         requestUrl: String,
         spaceId: String,
     ): List<RemoteTrashResource> {
-        val document =
-            secureDocumentBuilderFactory().newDocumentBuilder().parse(
-                ByteArrayInputStream(xml.toByteArray()),
-            )
+        val document = parseSafeXml(xml)
         val responses = document.getElementsByTagNameNS(DAV_NAMESPACE, "response")
         return (0 until responses.length).mapNotNull { index ->
             val response = responses.item(index) as Element
@@ -286,11 +281,3 @@ private fun Element.trashSize(): Long? {
 
 private fun String?.toEpochMillis(): Long =
     runCatching { this?.let(ZonedDateTime::parse)?.toInstant()?.toEpochMilli() }.getOrNull() ?: 0
-
-private fun secureDocumentBuilderFactory() =
-    DocumentBuilderFactory.newInstance().apply {
-        isNamespaceAware = true
-        isExpandEntityReferences = false
-        runCatching { setAttribute("http://javax.xml.XMLConstants/property/accessExternalDTD", "") }
-        runCatching { setAttribute("http://javax.xml.XMLConstants/property/accessExternalSchema", "") }
-    }

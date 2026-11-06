@@ -1,0 +1,41 @@
+--- a/modules/core/src/split.dispatch.cpp
++++ b/modules/core/src/split.dispatch.cpp
+@@ -49,21 +49,32 @@
+ *                                       split & merge                                    *
+ \****************************************************************************************/
+ 
++// Keep the dispatch table's actual function signatures equal to SplitFunc.
++// Casting typed HAL functions to SplitFunc and then calling them is undefined.
+ typedef void (*SplitFunc)(const uchar* src, uchar** dst, int len, int cn);
+ 
++template<typename T, void (*Split)(const T*, T**, int, int)>
++static void splitTyped(const uchar* src, uchar** dst, int len, int cn)
++{
++    // Convert pointer values individually: reinterpreting uchar** as T** would
++    // also access the pointer array through an incompatible type.
++    AutoBuffer<T*, 4> typedDst(cn);
++    for (int c = 0; c < cn; ++c)
++        typedDst[c] = reinterpret_cast<T*>(dst[c]);
++    Split(reinterpret_cast<const T*>(src), typedDst.data(), len, cn);
++}
++
+ static SplitFunc getSplitFunc(int depth)
+ {
+     static SplitFunc splitTab[CV_DEPTH_MAX] =
+     {
+-        (SplitFunc)GET_OPTIMIZED(cv::hal::split8u), (SplitFunc)GET_OPTIMIZED(cv::hal::split8u),
+-        (SplitFunc)GET_OPTIMIZED(cv::hal::split16u), (SplitFunc)GET_OPTIMIZED(cv::hal::split16u),
+-        (SplitFunc)GET_OPTIMIZED(cv::hal::split32s), (SplitFunc)GET_OPTIMIZED(cv::hal::split32s),
+-        (SplitFunc)GET_OPTIMIZED(cv::hal::split64s), (SplitFunc)GET_OPTIMIZED(cv::hal::split16u)
++        cv::hal::split8u, cv::hal::split8u,
++        splitTyped<ushort, cv::hal::split16u>, splitTyped<ushort, cv::hal::split16u>,
++        splitTyped<int, cv::hal::split32s>, splitTyped<int, cv::hal::split32s>,
++        splitTyped<int64, cv::hal::split64s>, splitTyped<ushort, cv::hal::split16u>
+     };
+-
+     return splitTab[depth];
+ }
+-
+ #ifdef HAVE_IPP
+ 
+ static bool ipp_split(const Mat& src, Mat* mv, int channels)

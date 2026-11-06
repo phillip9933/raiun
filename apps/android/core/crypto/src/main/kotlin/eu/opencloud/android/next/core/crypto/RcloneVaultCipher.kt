@@ -23,7 +23,7 @@ class RcloneVaultCipher private constructor(
     private val keys: ByteArray,
     private val secretBox: SecretBox.Native,
 ) : AutoCloseable {
-    private var closed = false
+    @Volatile private var closed = false
 
     /** A defensive copy for local Keystore wrapping. The caller owns and must clear it. */
     @Synchronized fun exportKeyMaterial(): ByteArray {
@@ -35,7 +35,7 @@ class RcloneVaultCipher private constructor(
     @Synchronized fun createIntegrityToken(): String {
         checkOpen()
         val uuidBytes = UUID.randomUUID().toString().toByteArray(StandardCharsets.US_ASCII)
-        val output = ByteArrayOutputStream(64)
+        val output = WipingOutput(64)
         return try {
             encryptContent(ByteArrayInputStream(uuidBytes), output, uuidBytes.size.toLong())
             val ciphertext = output.toByteArray()
@@ -46,7 +46,7 @@ class RcloneVaultCipher private constructor(
             }
         } finally {
             uuidBytes.fill(0)
-            output.reset()
+            output.close()
         }
     }
 
@@ -121,8 +121,11 @@ class RcloneVaultCipher private constructor(
         return plain.split('/').joinToString("/") { encryptName(it) }
     }
 
-    /** Authenticates each complete 64-KiB block before writing its plaintext. Does not close streams. */
-    @Synchronized fun decryptContent(
+    /**
+     * Authenticates each complete 64-KiB block before writing its plaintext. Does not close streams.
+     * Only bounded crypto work owns the key monitor; an external stream can never delay key disposal.
+     */
+    fun decryptContent(
         input: InputStream,
         output: OutputStream,
         maximumPlaintextBytes: Long,
@@ -130,15 +133,16 @@ class RcloneVaultCipher private constructor(
         checkOpen()
         require(maximumPlaintextBytes >= 0)
         val header = ByteArray(32)
-        readExactly(input, header, header.size)
-        if (!header.copyOfRange(0, 8).contentEquals(MAGIC)) throw VaultContentIntegrityException()
-        val nonce = header.copyOfRange(8, 32)
+        val nonce = ByteArray(24)
         val block = ByteArray(65552)
         var total = 0L
         try {
+            readExactly(input, header, header.size)
+            if (MAGIC.indices.any { header[it] != MAGIC[it] }) throw VaultContentIntegrityException()
+            header.copyInto(nonce, startIndex = 8)
             while (true) {
                 val count = readUpTo(input, block)
-                if (count == 0) return total
+                if (count == 0) return completed(total)
                 if (count < 16) throw VaultContentIntegrityException()
                 val plainSize = count - 16
                 require(plainSize.toLong() <= maximumPlaintextBytes - total) { "Plaintext size limit exceeded" }
@@ -150,13 +154,13 @@ class RcloneVaultCipher private constructor(
                         ciphertext.fill(0)
                     }
                 try {
-                    output.write(plain)
+                    writeContent(output, plain)
                     total += plain.size
                 } finally {
                     plain.fill(0)
                 }
                 incrementNonce(nonce)
-                if (count < block.size) return total
+                if (count < block.size) return completed(total)
             }
         } finally {
             header.fill(0)
@@ -166,11 +170,12 @@ class RcloneVaultCipher private constructor(
     }
 
     /** Writes a fresh random file nonce. For deterministic fixtures, use the internal nonce overload. */
-    @Synchronized fun encryptContent(
+    fun encryptContent(
         input: InputStream,
         output: OutputStream,
         maximumPlaintextBytes: Long,
     ): Long {
+        checkOpen()
         val nonce = ByteArray(24).also(SecureRandom()::nextBytes)
         try {
             return encryptContentWithNonce(input, output, maximumPlaintextBytes, nonce)
@@ -179,7 +184,7 @@ class RcloneVaultCipher private constructor(
         }
     }
 
-    @Synchronized internal fun encryptContentWithNonce(
+    internal fun encryptContentWithNonce(
         input: InputStream,
         output: OutputStream,
         maximumPlaintextBytes: Long,
@@ -190,12 +195,12 @@ class RcloneVaultCipher private constructor(
         val nonce = fileNonce.copyOf()
         val plain = ByteArray(65536)
         var total = 0L
-        output.write(MAGIC)
-        output.write(nonce)
         try {
+            writeContent(output, MAGIC)
+            writeContent(output, nonce)
             while (true) {
                 val count = readUpTo(input, plain)
-                if (count == 0) return total
+                if (count == 0) return completed(total)
                 require(count.toLong() <= maximumPlaintextBytes - total) { "Plaintext size limit exceeded" }
                 val chunk = plain.copyOf(count)
                 val ciphertext =
@@ -203,20 +208,93 @@ class RcloneVaultCipher private constructor(
                         sealBlock(nonce, chunk)
                     } finally {
                         chunk.fill(0)
+                        plain.fill(0)
                     }
                 try {
-                    output.write(ciphertext)
+                    writeContent(output, ciphertext)
                 } finally {
                     ciphertext.fill(0)
                 }
                 total += count
                 incrementNonce(nonce)
-                if (count < plain.size) return total
+                if (count < plain.size) return completed(total)
             }
         } finally {
             nonce.fill(0)
             plain.fill(0)
         }
+    }
+
+    private fun completed(total: Long): Long {
+        checkOpen()
+        return total
+    }
+
+    private fun writeContent(
+        output: OutputStream,
+        bytes: ByteArray,
+    ) {
+        checkOpen()
+        output.write(bytes)
+        checkOpen()
+    }
+
+    private fun readExactly(
+        input: InputStream,
+        dst: ByteArray,
+        length: Int,
+    ) {
+        var at = 0
+        while (at < length) {
+            val n = readContent(input, dst, at, length - at)
+            if (n < 0) throw VaultContentIntegrityException()
+            if (n == 0) {
+                val byte = readContentByte(input)
+                if (byte < 0) throw VaultContentIntegrityException()
+                dst[at++] = byte.toByte()
+            } else {
+                at += n
+            }
+        }
+    }
+
+    private fun readUpTo(
+        input: InputStream,
+        dst: ByteArray,
+    ): Int {
+        var at = 0
+        var eof = false
+        while (at < dst.size && !eof) {
+            val n = readContent(input, dst, at, dst.size - at)
+            if (n < 0) {
+                eof = true
+            } else if (n == 0) {
+                val byte = readContentByte(input)
+                if (byte < 0) eof = true else dst[at++] = byte.toByte()
+            } else {
+                at += n
+            }
+        }
+        return at
+    }
+
+    private fun readContent(
+        input: InputStream,
+        dst: ByteArray,
+        offset: Int,
+        length: Int,
+    ): Int {
+        checkOpen()
+        val count = input.read(dst, offset, length)
+        checkOpen()
+        return count
+    }
+
+    private fun readContentByte(input: InputStream): Int {
+        checkOpen()
+        val byte = input.read()
+        checkOpen()
+        return byte
     }
 
     /** Only an authenticated nonempty canonical UUID proves possession of the content key. */
@@ -228,26 +306,24 @@ class RcloneVaultCipher private constructor(
             } catch (_: IllegalArgumentException) {
                 null
             }
-        return if (ciphertext == null) {
-            false
-        } else {
-            try {
-                if (ciphertext.size !in 49..256) {
-                    false
-                } else {
-                    val plaintext = ByteArrayOutputStream(64)
+        if (ciphertext == null) return false
+        return try {
+            if (ciphertext.size !in 49..256) {
+                false
+            } else {
+                WipingOutput(64).use { plaintext ->
                     val count = decryptContent(ByteArrayInputStream(ciphertext), plaintext, 64)
                     count == 36L && UUID_PATTERN.matches(plaintext.toString(StandardCharsets.US_ASCII.name()))
                 }
-            } catch (_: IllegalArgumentException) {
-                false
-            } catch (_: SecurityException) {
-                false
-            } catch (_: IOException) {
-                false
-            } finally {
-                ciphertext.fill(0)
             }
+        } catch (_: IllegalArgumentException) {
+            false
+        } catch (_: SecurityException) {
+            false
+        } catch (_: IOException) {
+            false
+        } finally {
+            ciphertext.fill(0)
         }
     }
 
@@ -272,36 +348,52 @@ class RcloneVaultCipher private constructor(
         }
     }
 
-    private fun sealBlock(
+    @Synchronized private fun sealBlock(
         nonce: ByteArray,
         plain: ByteArray,
     ): ByteArray {
+        checkOpen()
         val key = keys.copyOfRange(0, 32)
+        val ciphertext = ByteArray(plain.size + 16)
+        var delivered = false
         return try {
-            val ciphertext = ByteArray(plain.size + 16)
             check(secretBox.cryptoSecretBoxEasy(ciphertext, plain, plain.size.toLong(), nonce, key)) {
                 "libsodium SecretBox encryption failed"
             }
+            delivered = true
             ciphertext
         } finally {
             key.fill(0)
+            if (!delivered) ciphertext.fill(0)
         }
     }
 
-    private fun openBlock(
+    @Synchronized private fun openBlock(
         nonce: ByteArray,
         ciphertext: ByteArray,
     ): ByteArray {
+        checkOpen()
         val key = keys.copyOfRange(0, 32)
         val plain = ByteArray(ciphertext.size - 16)
+        var delivered = false
         return try {
             if (!secretBox.cryptoSecretBoxOpenEasy(plain, ciphertext, ciphertext.size.toLong(), nonce, key)) {
-                plain.fill(0)
                 throw VaultContentIntegrityException()
             }
+            delivered = true
             plain
         } finally {
             key.fill(0)
+            if (!delivered) plain.fill(0)
+        }
+    }
+
+    private class WipingOutput(
+        size: Int,
+    ) : ByteArrayOutputStream(size) {
+        override fun close() {
+            buf.fill(0)
+            reset()
         }
     }
 
@@ -393,49 +485,6 @@ class RcloneVaultCipher private constructor(
                 }
             require(encoded.remaining() <= 255) { "Vault name is too long" }
             return name
-        }
-
-        private fun readExactly(
-            input: InputStream,
-            dst: ByteArray,
-            length: Int,
-        ) {
-            var at = 0
-            while (at < length) {
-                val n = input.read(dst, at, length - at)
-                if (n < 0) throw VaultContentIntegrityException()
-                if (n == 0) {
-                    val byte = input.read()
-                    if (byte < 0) throw VaultContentIntegrityException()
-                    dst[at++] = byte.toByte()
-                    continue
-                }
-                at += n
-            }
-        }
-
-        private fun readUpTo(
-            input: InputStream,
-            dst: ByteArray,
-        ): Int {
-            var at = 0
-            var eof = false
-            while (at < dst.size && !eof) {
-                val n = input.read(dst, at, dst.size - at)
-                if (n < 0) {
-                    eof = true
-                } else if (n == 0) {
-                    val byte = input.read()
-                    if (byte < 0) {
-                        eof = true
-                    } else {
-                        dst[at++] = byte.toByte()
-                    }
-                } else {
-                    at += n
-                }
-            }
-            return at
         }
 
         private fun incrementNonce(nonce: ByteArray) {

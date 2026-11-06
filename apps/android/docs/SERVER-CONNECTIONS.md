@@ -24,6 +24,39 @@ This supports TLS client-certificate requirements at a configured server or iden
 
 The authorization page opens in a separate browser, which controls its own client-certificate permission and selection. Granting Raiun access does not grant the browser access or guarantee both use the same certificate. Embedded office-editor WebViews still reject client-certificate requests; this feature does not add editor mTLS support.
 
+## Connection reuse and legacy certificate pins
+
+Compatible operations reuse bounded, process-memory transport components. Each
+request client retains its own dispatcher, cancellation scope, timeouts and
+interceptors. Authentication headers and request credentials are not cached.
+Client-certificate transports retain HTTP/1.1 origin isolation and use separate
+TLS contexts and pools for distinct bindings and configured Wi-Fi route
+admissions. Without configured local routing, ordinary default-network behavior
+is unchanged.
+
+Changing a binding or route invalidates its old admission; unrelated server
+settings remain separate. Requests recheck the current policy before sending
+HTTP bytes. Evicting an idle cached transport does not cancel an active request.
+Already-transmitted operations retain the existing uncertain-outcome and
+conditional-retry rules. Physical network and KeyChain deployment acceptance
+remains separate from synthetic tests.
+
+Older host-specific certificate pins have no current approval UI. A checked,
+one-way migration preserves them in backup-excluded private storage before
+removing their legacy preference entries. The store's checksum detects
+accidental corruption; it is not authentication against an attacker who can
+rewrite app-private files. Corrupt or missing migrated policy fails closed.
+Legacy pins add a required check alongside the caller's existing pin policy,
+system CA trust and hostname verification. They cannot approve an otherwise
+untrusted certificate. Legacy-pinned WebSocket upgrades are refused because
+their transport does not run the HTTP network-interceptor pin check.
+
+The connection compatibility rules follow the pinned
+[OkHttp 4.12 address policy](https://github.com/square/okhttp/blob/parent-4.12.0/okhttp/src/main/kotlin/okhttp3/Address.kt).
+Private-key permission, certificate identity and expiry are checked at admission
+and use. An entirely unobserved removal and regrant of the exact same KeyChain
+identity between requests is not claimed to be detected.
+
 ## Verification before release
 
 Use synthetic identities and a test deployment. Check selected versus other Wi-Fi, unavailable location permission, VPN, public override, wrong TLS identity, disconnected local endpoint, foreground/background changes, transfers and process recreation. Check certificate selection/cancellation, expiry/replacement/removal, unrelated origins and OIDC discovery/code exchange/refresh. Existing non-mTLS authentication and ordinary/encrypted data must remain usable.

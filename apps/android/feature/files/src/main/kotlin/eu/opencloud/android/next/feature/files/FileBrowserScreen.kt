@@ -99,6 +99,8 @@ fun FileBrowserRoute(
     sharedShortcut: eu.opencloud.android.next.core.sync.SharedFolderRequest? = null,
     shortcutFolder: ResourceEntity? = null,
     onConsumeShortcutFolder: () -> Unit = {},
+    shortcutRequestId: Long? = null,
+    canApplyShortcut: () -> Boolean = { true },
     viewModel: FileBrowserViewModel = viewModel(key = "files-$accountId"),
     favoritesViewModel: FavoritesViewModel = viewModel(key = "favorites-$accountId"),
 ) {
@@ -126,11 +128,15 @@ fun FileBrowserRoute(
     favoritesViewModel.load(accountId)
     LaunchedEffect(accountId, state.encryptedFolders) { favoritesViewModel.knownRoots(state.encryptedFolders) }
     var folderOpenRequest by remember(accountId) { mutableIntStateOf(0) }
-    ApplyFolderShortcut(shortcutFolder, state.spaces, accountId) {
-        viewModel.browseSharedResource(it)
-        folderOpenRequest++
-        onConsumeShortcutFolder()
-    }
+    val shortcutApplication =
+        remember(accountId, shortcutRequestId, shortcutFolder, viewModel) {
+            FolderShortcutApplication(canApplyShortcut) {
+                viewModel.browseSharedResource(it)
+                folderOpenRequest++
+                onConsumeShortcutFolder()
+            }
+        }
+    ApplyFolderShortcut(shortcutFolder, state.spaces, accountId, shortcutApplication)
     scanTarget?.let { target ->
         ScannerRoute(target, onClose = { scanTarget = null })
         return
@@ -246,6 +252,8 @@ fun FileBrowserRoute(
             onOpenAccount = destinations.onOpenAccount,
             onShareResource = destinations.onShareResource,
             sharedShortcut = sharedShortcut,
+            shortcutRequestId = shortcutRequestId,
+            canApplyShortcut = canApplyShortcut,
             notifications = { openShares -> ServerNotificationsBell(accountId, openShares) },
             sharesContent = sharesContent,
             onBrowseShare = viewModel::browseSharedResource,
@@ -342,6 +350,8 @@ fun FileBrowserScreen(
     sharesContent: @Composable (PaddingValues, (ResourceEntity) -> Unit) -> Unit = { _, _ -> },
     spacesContent: @Composable (PaddingValues, (String) -> Unit, Int) -> Unit = { _, _, _ -> },
     sharedShortcut: eu.opencloud.android.next.core.sync.SharedFolderRequest? = null,
+    shortcutRequestId: Long? = null,
+    canApplyShortcut: () -> Boolean = { true },
     notifications: @Composable (() -> Unit) -> Unit = {},
     modifier: Modifier = Modifier,
     initialDestination: FileBrowserDestination = FileBrowserDestination.Personal,
@@ -413,8 +423,9 @@ fun FileBrowserScreen(
         remember(accountId) {
             movableContentOf { currentNotifications { selectedDestination = FileBrowserDestination.Shares } }
         }
-    LaunchedEffect(sharedShortcut) {
-        if (sharedShortcut != null) selectedDestination = FileBrowserDestination.Shares
+    val sharedShortcutGuard = remember(sharedShortcut, shortcutRequestId, accountId) { ShortcutGuard(canApplyShortcut) }
+    LaunchedEffect(sharedShortcut, shortcutRequestId, accountId) {
+        if (sharedShortcut != null && sharedShortcutGuard.current()) selectedDestination = FileBrowserDestination.Shares
     }
     LaunchedEffect(openFolderRequest) {
         if (openFolderRequest > 0) selectedDestination = FileBrowserDestination.Personal
@@ -1294,19 +1305,32 @@ enum class FileBrowserDestination(
 }
 
 @Composable
-private fun ApplyFolderShortcut(
+internal fun ApplyFolderShortcut(
     resource: ResourceEntity?,
     spaces: List<eu.opencloud.android.next.core.database.SpaceEntity>,
     accountId: String,
-    open: (ResourceEntity) -> Unit,
+    application: FolderShortcutApplication,
 ) {
-    val currentOpen by rememberUpdatedState(open)
-    LaunchedEffect(resource, spaces) {
+    LaunchedEffect(resource, spaces, accountId, application) {
         resource
             ?.takeIf { it.accountId == accountId && spaces.any { space -> space.driveId == it.spaceId } }
-            ?.let(currentOpen)
+            ?.let(application::openIfCurrent)
     }
 }
+
+/** Capture the matching guard and navigation/ack together; a late A cannot use B's callbacks. */
+internal class FolderShortcutApplication(
+    private val canApply: () -> Boolean,
+    private val open: (ResourceEntity) -> Unit,
+) {
+    fun openIfCurrent(resource: ResourceEntity) {
+        if (canApply()) open(resource)
+    }
+}
+
+private class ShortcutGuard(
+    val current: () -> Boolean,
+)
 
 @Composable
 private fun DirectoryPagingBar(

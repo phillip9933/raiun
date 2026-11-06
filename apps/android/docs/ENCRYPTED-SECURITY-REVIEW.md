@@ -2,6 +2,25 @@
 
 Review date: 2026-10-06 (owner timezone). Scope: current vault-test.16 source, encryption compatibility, biometric key storage, offline files, explicit external-app handoff and cleanup. This is a focused source review plus regression tests, not an independent penetration test or certification. No claim of zero vulnerabilities is made.
 
+## Local content-cipher lifetime follow-up — 2026-11-05
+
+`RcloneVaultCipher` now holds its monitor only during bounded crypto operations;
+it does not hold the key monitor while reading from or writing to caller-owned
+streams. Session content forks use an exactly-once lease: cancellation or session
+closure revokes the operation and disposes its fork even if provider IO is
+stalled. A provider that ignores cancellation can keep an operation and temporary
+plaintext buffers alive until the IO returns. This is not a guarantee of universal
+JVM or forensic memory erasure, and the rclone-compatible format is unchanged.
+
+The trash and file-version clients now share `SafeXml` declaration rejection and
+controlled parse failures. A constant-space DOM walk also rejects unresolved entity
+nodes retained by Android; normal character references, CDATA and comments remain
+supported. Existing per-client response-byte and item-count limits
+remain in force; this change does not impose a global DOM node or depth quota.
+OpenCloud Basic-auth UTF-8 compatibility is scoped to source-reviewed OpenCloud
+8.0.1 and 9.0.0 behavior; [Authentication](AUTHENTICATION.md) records the RFC 7617
+legacy ambiguity and no-alternate-encoding retry policy.
+
 ## Pre-1.0 development review — 2026-10-13
 
 This follow-up covers unpublished changes based on 0.9.3. The original review below remains historical evidence. Current acceptance gates and test results belong in [TESTING.md](TESTING.md); this review is not a penetration test or a guarantee that vulnerabilities are absent.

@@ -1,0 +1,122 @@
+{
+  "build": {
+    "abis": {
+      "arm64-v8a": {
+        "bytes": 333424,
+        "sha256": "806f02e3d7e2f36cd8da101ed9edcc78eda4aeaf3277316b19e14ccda391dd80"
+      },
+      "x86_64": {
+        "bytes": 480600,
+        "sha256": "8f30f96fa9f7b5fe1d347c068868f25b428f9287479e50add6708374b06eb904"
+      }
+    },
+    "api": 26,
+    "build_commands": [
+      "make clean",
+      "make -j2"
+    ],
+    "compiler_flags": [
+      "-O2",
+      "-fPIC",
+      "-fstack-protector-strong",
+      "-ffile-prefix-map=<source-tree>=libsodium",
+      "-fmacro-prefix-map=<source-tree>=libsodium",
+      "-ffile-prefix-map=<build-dir>=libsodium-build",
+      "-fmacro-prefix-map=<build-dir>=libsodium-build",
+      "-ffile-prefix-map=<ndk>=android-ndk",
+      "-fmacro-prefix-map=<ndk>=android-ndk"
+    ],
+    "configure_arguments": {
+      "arm64-v8a": [
+        "--host=aarch64-linux-android",
+        "--disable-soname-versions",
+        "--disable-pie",
+        "--disable-static",
+        "--enable-shared",
+        "--disable-dependency-tracking"
+      ],
+      "x86_64": [
+        "--host=x86_64-linux-android",
+        "--disable-soname-versions",
+        "--disable-pie",
+        "--disable-static",
+        "--enable-shared",
+        "--disable-dependency-tracking"
+      ]
+    },
+    "linker_flags": [
+      "-Wl,-z,max-page-size=16384",
+      "-Wl,-z,relro,-z,now"
+    ],
+    "lto": false,
+    "ndk": "28.2.13676358 (r28c)",
+    "optimization": "-O2",
+    "source_date_epoch": 1767046935,
+    "strip_command": "llvm-strip --strip-unneeded <separate candidate copy>",
+    "toolchain": [
+      {
+        "sha256": "6156dd4e5e466333197a00b8d20bca72c292186643b749dcaaa3aa9164afb1de",
+        "tool": "clang",
+        "version": "Android (13624864, +pgo, +bolt, +lto, +mlgo, based on r530567e) clang version 19.0.1 (https://android.googlesource.com/toolchain/llvm-project 97a699bf4812a18fb657c2779f5296a4ab2694d2)"
+      },
+      {
+        "sha256": "0bb0398c038e4c8b5e01e61061f6d9349961fb495efb4cbf2552e36058acf0be",
+        "tool": "ld.lld",
+        "version": "LLD 19.0.1 (compatible with GNU linkers)"
+      },
+      {
+        "sha256": "fca4e66c591578b67dbd10e17e1112dc06fc02b202753bf91b4d2460083ab09e",
+        "tool": "llvm-ar",
+        "version": "LLVM (http://llvm.org/):"
+      },
+      {
+        "sha256": "fca4e66c591578b67dbd10e17e1112dc06fc02b202753bf91b4d2460083ab09e",
+        "tool": "llvm-ranlib",
+        "version": "LLVM (http://llvm.org/):"
+      },
+      {
+        "sha256": "1da35c6bcee9649adcaadf8a493132c3b7205901149622836d28e42d7fca7267",
+        "tool": "llvm-strip",
+        "version": "llvm-strip, compatible with GNU strip"
+      }
+    ]
+  },
+  "integration_scope": "Replaces only libsodium.so for arm64-v8a and x86_64; omits unsupported 32-bit Sodium ABI members.",
+  "native_source": {
+    "backport_commit": "ad3004ec8731730e93fcfbbc824e67eadc1c1bae",
+    "patch_file": "../sources/libsodium-fix.patch",
+    "patch_sha256": "3134c046e09bddf5bbd25c04d9c17f1252b98a9ca59b36fe426fea155f59a35e",
+    "project": "libsodium",
+    "release": "1.0.20-RELEASE",
+    "sha256": "ebb65ef6ca439333c2bb41a0c1990587288da07f6c7fd07cb3a18cc18d30ce19",
+    "source_signature_verified": true,
+    "source_tree_verification": {
+      "candidate_bytes_unchanged": true,
+      "changed_source_files": [
+        {
+          "original_sha256": "4b4a0f1f285b5afcf03a21d5be65cbd5bf00cfc7ecc6d9741d8791a5631baad4",
+          "patched_sha256": "86c5a0dae9729e32e899bb5ca3601d232ce507447c22ea1f1f6c17f5e71eaf56",
+          "path": "src/libsodium/crypto_core/ed25519/ref10/ed25519_ref10.c"
+        },
+        {
+          "original_sha256": "6eb8d8338e96cccef7416bc9721d463fe2a10c22faed6300dc9dd0571128a9ce",
+          "patched_sha256": "752e6cefe006964b1cf73b3d898b2bd98aeb1e39cf5352883800e04fd9a526dc",
+          "path": "test/default/core_ed25519.c"
+        }
+      ],
+      "complete_tree_match": true,
+      "exact_patch_reapplication": "verified",
+      "expected_directory_count": 115,
+      "expected_file_count": 583,
+      "status": "verified",
+      "tamper_case_count": 8,
+      "tamper_test_status": "passed"
+    },
+    "url": "https://github.com/jedisct1/libsodium/releases/download/1.0.20-RELEASE/libsodium-1.0.20.tar.gz"
+  },
+  "origin": {
+    "aar_sha256": "b5378c1d9db2573d61b304e89cf83db187a05c3e4ff081d9b2ef3d0bb00ca314",
+    "coordinate": "com.goterl:lazysodium-android:5.2.0",
+    "public_source": "https://github.com/terl/lazysodium-android/tree/d8b1885cff127a47b5a3bd9bcf0a53d36c372855"
+  }
+}

@@ -24,7 +24,7 @@ plugins {
     alias(libs.plugins.roborazzi)
 }
 
-val appVersionCode = 58
+val appVersionCode = 61
 // Deliberately absent from ordinary builds: this candidate is for disposable native validation.
 val r8ValidationEnabled = providers.gradleProperty("raiun.r8Validation").map { it.toBooleanStrict() }.getOrElse(false)
 val r8InstrumentationEnabled =
@@ -66,7 +66,7 @@ android {
         // The scanner SDK ships native processing for 64-bit Android only.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         versionCode = r8UpgradeVersionCode ?: appVersionCode
-        versionName = "1.5.0"
+        versionName = "1.6.0-beta.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEV_SERVER_URL", "\"\"")

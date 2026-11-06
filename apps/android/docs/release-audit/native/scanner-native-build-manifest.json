@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "openCvVersion": "4.12.0",
+  "sourceArchiveSha256": "fa3faf7581f1fa943c9e670cf57dd6ba1c5b4178f363a188a2c8bff1eb28b7e4",
+  "sourceUrl": "https://github.com/opencv/opencv/archive/refs/tags/4.12.0.zip",
+  "ndkVersion": "28.2.13676358",
+  "cmake": "cmake version 3.22.1-g37088a8-dirty\r\n\r\nCMake suite maintained and supported by Kitware (kitware.com/cmake).",
+  "ninja": "1.10.2",
+  "python": "Python 3.12.14",
+  "androidApi": 26,
+  "outputDirectory": "scanner-processing-opencv/src/main/jniLibs",
+  "pathPrivacy": "Compiler file-prefix maps plus anonymized generated OpenCV build diagnostics and unused sample-data lookup paths; verified upstream source unchanged",
+  "artifacts": [
+    {
+      "abi": "arm64-v8a",
+      "modules": [
+        "opencv_core",
+        "opencv_imgproc",
+        "opencv_java_bindings_generator",
+        "opencv_java"
+      ],
+      "opencv": {
+        "file": "libopencv_java4.so",
+        "bytes": 6523792,
+        "sha256": "a014a769ae11446af05cbdbd01b7273ad42f26cddfbf3f206a38290d0fb91bb9",
+        "needed": [
+          "libdl.so",
+          "libm.so",
+          "liblog.so",
+          "libjnigraphics.so",
+          "libz.so",
+          "libc++_shared.so",
+          "libc.so"
+        ],
+        "loadSegmentAlignmentMinimum": 16384
+      },
+      "runtime": {
+        "file": "libc++_shared.so",
+        "bytes": 9236352,
+        "sha256": "ab4e6c71b96b851de45a8a9bd86369e7dbc2130a44b3b4520564be94847910f2",
+        "needed": [
+          "libc.so",
+          "libm.so",
+          "libdl.so"
+        ],
+        "loadSegmentAlignmentMinimum": 16384
+      }
+    },
+    {
+      "abi": "x86_64",
+      "modules": [
+        "opencv_core",
+        "opencv_imgproc",
+        "opencv_java_bindings_generator",
+        "opencv_java"
+      ],
+      "opencv": {
+        "file": "libopencv_java4.so",
+        "bytes": 10525136,
+        "sha256": "2d1b2e08719ffb2650f04b253c3852c5da8aab887691764d4809c90be0f65575",
+        "needed": [
+          "libdl.so",
+          "libm.so",
+          "liblog.so",
+          "libjnigraphics.so",
+          "libz.so",
+          "libc++_shared.so",
+          "libc.so"
+        ],
+        "loadSegmentAlignmentMinimum": 16384
+      },
+      "runtime": {
+        "file": "libc++_shared.so",
+        "bytes": 8808664,
+        "sha256": "e4cd73c8a3607269f3be58d15c21f78bff112e27f9398d6261e5f965668f8746",
+        "needed": [
+          "libc.so",
+          "libm.so",
+          "libdl.so"
+        ],
+        "loadSegmentAlignmentMinimum": 16384
+      }
+    }
+  ]
+}

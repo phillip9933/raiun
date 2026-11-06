@@ -3,6 +3,7 @@ package eu.opencloud.android.next.core.network
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -21,6 +22,65 @@ class WebDavFeatureClientTest {
     }
 
     @After fun tearDown() = server.shutdown()
+
+    @Test fun `trash rejects declarations entities NUL malformed and alternate encoded unsafe XML`() {
+        val malicious = "<!DOCTYPE x [<!ENTITY secret SYSTEM 'https://secret.example'>]><x>&secret;</x>"
+        val bodies =
+            listOf(
+                malicious.toByteArray() to "UTF-8",
+                "<!DOCTYPE x SYSTEM 'https://secret.example'><x/>".toByteArray() to "UTF-8",
+                "<!ENTITY secret 'expanded'><x/>".toByteArray() to "UTF-8",
+                "<x>\u0000</x>".toByteArray() to "UTF-8",
+                "<x>private".toByteArray() to "UTF-8",
+                "<x>&unknown;</x>".toByteArray() to "UTF-8",
+                ("<?xml version='1.0' encoding='UTF-16'?>" + malicious).toByteArray(Charsets.UTF_16) to "UTF-16",
+                ("<?xml version='1.0' encoding='ISO-8859-1'?>" + malicious).toByteArray(Charsets.ISO_8859_1) to
+                    "ISO-8859-1",
+            )
+        bodies.forEach { (bytes, encoding) ->
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(207)
+                    .setHeader("Content-Type", "application/xml; charset=$encoding")
+                    .setBody(Buffer().write(bytes)),
+            )
+            val failure =
+                assertThrows(OpenCloudException::class.java) {
+                    client.trash(server.url("dav/spaces/storage-id").toString(), "space", "Bearer test")
+                }
+            assertEquals(OpenCloudError.InvalidResponse, failure.error)
+            assertEquals("The server returned incomplete or unexpected metadata.", failure.message)
+        }
+        assertEquals(bodies.size, server.requestCount)
+    }
+
+    @Test fun `trash accepts legal escaped names and alternate response encoding with arbitrary namespace prefix`() {
+        val xml =
+            trashResponse()
+                .replace("report.pdf", "日本語 &amp; café 😀.pdf")
+                .replace("d:", "dav:")
+                .replace("xmlns:d=", "xmlns:dav=")
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(207)
+                .setHeader("Content-Type", "application/xml; charset=UTF-16")
+                .setBody(Buffer().write(xml.toByteArray(Charsets.UTF_16))),
+        )
+        val item = client.trash(server.url("dav/spaces/storage-id").toString(), "space", "Bearer test").single()
+        assertEquals("日本語 & café 😀.pdf", item.name)
+        assertEquals("/Documents/日本語 & café 😀.pdf", item.originalPath)
+    }
+
+    @Test fun `trash retains bounded metadata response bytes`() {
+        server.enqueue(
+            MockResponse().setResponseCode(207).setBody(" ".repeat(LISTING_METADATA_LIMIT_BYTES.toInt() + 1)),
+        )
+        val failure =
+            assertThrows(OpenCloudException::class.java) {
+                client.trash(server.url("dav/spaces/storage-id").toString(), "space", "Bearer test")
+            }
+        assertEquals(OpenCloudError.InvalidResponse, failure.error)
+    }
 
     @Test fun `trash sizes ignore failed properties and require aggregate size for folders`() {
         val responses =

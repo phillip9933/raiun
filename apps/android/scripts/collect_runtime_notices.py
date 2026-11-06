@@ -41,6 +41,11 @@ LICENSE_FILENAMES = re.compile(
 # inventory. Keep them through offline regeneration, but reject altered copies.
 # The source URLs are provenance from that inventory, not a fresh network check.
 VETTED_LICENSE_TEXTS = {
+    ("app.raiun.vendor:lazysodium-android", "5.2.0-raiun-native.1", "Mozilla Public License, Version 2.0"): (
+        "Mozilla_Public_License_Version_2.0.txt",
+        "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+        "https://www.mozilla.org/MPL/2.0/index.txt",
+    ),
     ("com.google.protobuf:protobuf-javalite", "3.25.8", "BSD-3-Clause"): (
         "BSD-3-Clause.txt",
         "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d",
@@ -141,6 +146,12 @@ def portable_source(source: str, cache: Path, scanner: Path, version: str) -> st
         return source
     path = Path(source)
     try:
+        return "bundled native security backport / " + path.resolve().relative_to(
+            (ROOT / "third_party/native-security-fixes").resolve()
+        ).as_posix()
+    except (ValueError, OSError):
+        pass
+    try:
         return "bundled updater / " + path.resolve().relative_to((ROOT / "third_party/android-updater").resolve()).as_posix()
     except (ValueError, OSError):
         pass
@@ -175,7 +186,23 @@ def bundled_updater_file(group: str, artifact: str, version: str, suffix: str) -
     return path
 
 
+def bundled_native_file(group: str, artifact: str, version: str, suffix: str) -> Path | None:
+    if group != "app.raiun.vendor":
+        return None
+    bundle = ROOT / "third_party/native-security-fixes"
+    relative = f"maven/{group.replace('.', '/')}/{artifact}/{version}/{artifact}-{version}{suffix}"
+    path = bundle / relative
+    pins = dict(line.split("  ", 1)[::-1] for line in (bundle / "SHA256SUMS").read_text().splitlines() if line)
+    if (relative not in pins or not path.is_file() or
+            not path.resolve().is_relative_to(bundle.resolve()) or sha256(path.read_bytes()) != pins[relative]):
+        raise SystemExit(f"Missing or modified pinned native backport artifact: {relative}")
+    return path
+
+
 def local_pom(cache: Path, group: str, artifact: str, version: str) -> Path | None:
+    native = bundled_native_file(group, artifact, version, ".pom")
+    if native is not None:
+        return native
     bundled = bundled_updater_file(group, artifact, version, ".pom")
     if bundled is not None:
         return bundled
@@ -250,6 +277,9 @@ def artifact_file(cache: Path, group: str, artifact: str, version: str) -> Path 
 
 
 def find_artifact(cache: Path, scanner: Path, group: str, artifact: str, version: str) -> Path | None:
+    native = bundled_native_file(group, artifact, version, ".aar")
+    if native is not None:
+        return native
     bundled = bundled_updater_file(group, artifact, version, ".aar")
     if bundled is not None:
         return bundled

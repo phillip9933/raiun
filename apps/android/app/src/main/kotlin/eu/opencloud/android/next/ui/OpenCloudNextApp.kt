@@ -11,7 +11,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +28,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.BuildConfig
+import eu.opencloud.android.next.LaunchIntentViewModel
 import eu.opencloud.android.next.R
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.sync.VaultLocation
@@ -52,11 +52,10 @@ import kotlinx.coroutines.withContext
 
 @Composable
 @Suppress("CyclomaticComplexMethod", "LongMethod", "FunctionNaming", "ktlint:standard:function-naming")
-fun OpenCloudNextApp(
-    oauthCallback: String?,
+internal fun OpenCloudNextApp(
+    launchIntents: LaunchIntentViewModel,
+    onConsumeLaunchRequest: (Long) -> Boolean,
     modifier: Modifier = Modifier,
-    folderShortcut: String? = null,
-    onConsumeFolderShortcut: () -> Unit = {},
     viewModel: AuthViewModel = viewModel(),
 ) {
     val context = LocalContext.current
@@ -76,31 +75,40 @@ fun OpenCloudNextApp(
     var encryptedRootActions by remember(state.value.activeAccountId) { mutableStateOf(false) }
     var boundaryRequest by remember(state.value.activeAccountId) { mutableStateOf<BoundaryTransferRequest?>(null) }
     var shareResource by remember(state.value.activeAccountId) { mutableStateOf<ResourceEntity?>(null) }
-    var shortcutFolder by remember(state.value.activeAccountId) { mutableStateOf<ResourceEntity?>(null) }
-
-    var sharedShortcut by remember(state.value.activeAccountId) {
-        mutableStateOf<eu.opencloud.android.next.core.sync.SharedFolderRequest?>(null)
-    }
-
+    val launchRequest = launchIntents.pending
+    val launchAccount = state.value.activeAccountId
+    val folderNavigation = launchIntents.folderNavigation
+    val shortcutFolder = folderNavigation?.resource?.takeIf { it.accountId == state.value.activeAccountId }
+    val sharedShortcut = folderNavigation?.shared?.takeIf { it.account == state.value.activeAccountId }
+    val folderRequest = launchRequest?.takeIf { it.folderShortcut && folderNavigation == null }
     FolderShortcutEntry(
-        folderShortcut,
+        folderRequest?.uri,
+        folderRequest?.id,
         state.value.activeAccountId,
         state.value.isRestoringSession,
         viewModel::switchAccount,
         {
-            shortcutFolder = it
+            launchIntents.openFolder(requireNotNull(folderRequest).id, it)
             destination = AppDestination.Files
         },
-        onConsumeFolderShortcut,
+        onUnavailable = { folderRequest != null && onConsumeLaunchRequest(folderRequest.id) },
+        isCurrent = {
+            launchIntents.isPending(folderRequest?.id) &&
+                state.value.activeAccountId == launchAccount &&
+                !state.value.isRestoringSession
+        },
         openShared = {
-            sharedShortcut = it
+            launchIntents.openSharedFolder(requireNotNull(folderRequest).id, it)
             destination = AppDestination.Files
         },
     )
 
-    LaunchedEffect(oauthCallback) {
-        oauthCallback?.let(viewModel::completeOidcCallback)
-    }
+    OidcLaunchEntry(
+        request = launchRequest?.takeUnless { it.folderShortcut },
+        restoringSession = state.value.isRestoringSession,
+        consume = onConsumeLaunchRequest,
+        complete = viewModel::completeOidcCallback,
+    )
 
     Surface(modifier = modifier.fillMaxSize()) {
         when {
@@ -131,7 +139,14 @@ fun OpenCloudNextApp(
                                 encryptedReturnRevision = encryptedReturnRevision,
                                 shortcutFolder = shortcutFolder,
                                 sharedShortcut = sharedShortcut,
-                                onConsumeShortcutFolder = { shortcutFolder = null },
+                                shortcutRequestId = folderNavigation?.id,
+                                canApplyShortcut = {
+                                    launchIntents.isPending(folderNavigation?.id) &&
+                                        state.value.activeAccountId == launchAccount
+                                },
+                                onConsumeShortcutFolder = {
+                                    folderNavigation?.let { onConsumeLaunchRequest(it.id) }
+                                },
                                 releaseVersion = BuildConfig.VERSION_NAME,
                                 openAddMenuRequest = pendingBrowserAddRequest,
                                 onConsumeAddMenuRequest = { pendingBrowserAddRequest = 0 },
@@ -194,7 +209,14 @@ fun OpenCloudNextApp(
                                         modifier = Modifier.padding(padding),
                                         onBrowseResource = onBrowseResource,
                                         initialFolder = sharedShortcut,
-                                        onConsumeInitialFolder = { sharedShortcut = null },
+                                        initialFolderRequestId = folderNavigation?.id,
+                                        canApplyInitialFolder = {
+                                            launchIntents.isPending(folderNavigation?.id) &&
+                                                state.value.activeAccountId == launchAccount
+                                        },
+                                        onConsumeInitialFolder = {
+                                            folderNavigation?.let { onConsumeLaunchRequest(it.id) }
+                                        },
                                     )
                                 },
                                 spacesContent = { padding, onOpenSpace, refreshToken ->

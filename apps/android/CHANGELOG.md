@@ -1,9 +1,21 @@
 # Changelog
 
-## Unreleased
+## 1.6.0-beta.1
+
+### Fixes
+
+- Harden the native libraries used by scanning and encrypted files with tested security fixes, preserving existing encrypted-file compatibility.
+- Prevent browser sign-in and folder shortcuts from replaying after rotation or app-lock re-entry.
+- Let encrypted content operations close vault keys without waiting for a stalled provider stream.
+- Apply the same safe XML checks to trash and file-version responses.
+- Preserve non-ASCII OpenCloud credentials by encoding Basic authorization as UTF-8.
+- Preserve older saved certificate pins through a checked migration while keeping normal certificate verification enabled.
 
 ### Improvements
 
+- Explain what Photos, Videos and All files include when adding or managing a backup, including subfolders and exclusions.
+- Check packaged native libraries against their pinned artifacts and report native advisory matches and coverage gaps separately.
+- Reuse compatible connections for Wi-Fi routing and client certificates while keeping each operation's cancellation and connection settings separate.
 - Separate ordinary file exports and encrypted preview actions into focused components, preserving account checks, cancellation and temporary-file cleanup.
 - Extract backup, transfer-conflict and encrypted root-management commands from the ViewModels while keeping their validation and recovery rules together.
 

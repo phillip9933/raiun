@@ -5,12 +5,14 @@ import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPOutputStream
 
@@ -28,6 +30,28 @@ class OpenCloudApiTest {
     @After
     fun tearDown() {
         server.shutdown()
+    }
+
+    @Test fun `basic profile sends UTF8 credential bytes without a charset retry`() {
+        listOf(
+            "alice" to "secret",
+            "利用者" to "秘密",
+            "user😀" to "pass🔑",
+            "élise" to "café",
+        ).forEach { (username, password) ->
+            server.enqueue(MockResponse().setBody("""{"ocs":{"data":{"id":"id","display-name":"Name"}}}"""))
+            api.basicProfile(server.url("/").toString().trimEnd('/'), username, password)
+            val header = requireNotNull(server.takeRequest().getHeader("Authorization"))
+            assertArrayEquals(
+                "$username:$password".toByteArray(Charsets.UTF_8),
+                Base64.getDecoder().decode(header.removePrefix("Basic ")),
+            )
+        }
+        server.enqueue(MockResponse().setResponseCode(401))
+        org.junit.Assert.assertThrows(TransferHttpException::class.java) {
+            api.basicProfile(server.url("/").toString().trimEnd('/'), "élise", "café")
+        }
+        assertEquals(5, server.requestCount)
     }
 
     @Test
