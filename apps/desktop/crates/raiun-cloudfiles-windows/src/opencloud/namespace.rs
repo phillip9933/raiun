@@ -812,7 +812,19 @@ impl OpenCloudPlaceholderBackend {
                 return Err(BackendError::Unavailable);
             }
             preparation_stage(trace, PreparationStage::ParentRoute);
-            let children = self.enumerate_scoped(identity.as_bytes(), cancellation)?;
+            let namespace = self
+                .state
+                .lock()
+                .map_err(|_| BackendError::Unavailable)?
+                .namespace_directories
+                .get(&identity)
+                .cloned();
+            let children = match namespace {
+                Some(namespace @ NamespaceDirectory::Spaces { .. }) => {
+                    self.enumerate_namespace_for_parent(namespace, cancellation, Some(component))?
+                }
+                _ => self.enumerate_scoped(identity.as_bytes(), cancellation)?,
+            };
             let child = children
                 .into_iter()
                 .find(|child| child.name == *component && child.metadata.is_directory)

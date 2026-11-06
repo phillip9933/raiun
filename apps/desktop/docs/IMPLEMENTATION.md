@@ -4880,3 +4880,28 @@ this change. GUI and CLI share the Windows adapter; Linux runtime is unchanged.
 This fixes a demonstrated source classification path, not the unobserved inner
 cause of the prior physical-laptop refusal. Native completion and speed still
 require the existing bounded file workflow to finish.
+
+### Windows selected-Space parent preparation — 6 November 2026
+
+Preparing one ordinary operation no longer needs remote root metadata for every
+Space when the selected display name is independent of collisions. The ancestry
+lookup validates the fresh authenticated Space list and Personal account/root,
+requires globally unique case-folded base names and unique non-Personal IDs,
+and checks the selected ordinary root twice using the original encryption,
+route and identity rules. Fresh full Space/Personal validation after those
+probes must still select the same Space metadata and name. Existing pinned
+native path/opaque-parent checks and later conditional mutation proofs remain.
+
+Hidden or encrypted roots cannot change a unique base name. Any name collision,
+ordinal ambiguity, invalid or absent selector, or Graph-encrypted selection
+keeps the previous complete discovery path. Persisted labels are never current
+authority. The partial ancestry lookup publishes only its selected binding and
+label, without pruning unrelated state or claiming complete directory population.
+Explorer enumeration continues to use complete discovery. There is no persistent
+metadata cache, negative authorization reuse, missing-item exemption or automatic
+backend recovery. Actual authoritative failures still fence the backend.
+
+Windows GUI and CLI share this adapter; Linux runtime is unchanged. This removes
+a demonstrated all-Spaces request dependency from ordinary parent preparation.
+It does not establish which cloud item was missing in the previous physical
+run or prove a whole-folder speed improvement before native completion.

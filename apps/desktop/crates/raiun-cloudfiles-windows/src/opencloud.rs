@@ -2831,6 +2831,17 @@ impl OpenCloudPlaceholderBackend {
         namespace: NamespaceDirectory,
         cancellation: &CancellationToken,
     ) -> Result<Vec<PlaceholderChild>, BackendError> {
+        self.enumerate_namespace_for_parent(namespace, cancellation, None)
+    }
+
+    // A selected child is an internal ancestry lookup, never a complete
+    // population result. Ordinary Explorer enumeration always passes None.
+    fn enumerate_namespace_for_parent(
+        &self,
+        namespace: NamespaceDirectory,
+        cancellation: &CancellationToken,
+        selected_name: Option<&str>,
+    ) -> Result<Vec<PlaceholderChild>, BackendError> {
         check_cancel(cancellation)?;
         self.ensure_active()?;
         let deadline = cancellation.deadline();
@@ -2852,10 +2863,21 @@ impl OpenCloudPlaceholderBackend {
             personal_root_id,
             deadline,
         )?;
+        // Root visibility can change which names consume ordinal suffixes.
+        // Only globally unique base names are independent of that visibility;
+        // every ambiguous case retains the original full discovery path.
+        let selected_space = if matches!(&namespace, NamespaceDirectory::Spaces { .. }) {
+            selected_name.and_then(|name| unique_space_parent_target(&spaces, name))
+        } else {
+            None
+        };
         let staged_space_roots = if matches!(&namespace, NamespaceDirectory::Spaces { .. }) {
             let mut names = std::collections::HashSet::new();
             let mut staged = Vec::new();
             for space in spaces.iter().filter(|space| !space.personal) {
+                if selected_space.is_some_and(|selected| selected.id != space.id) {
+                    continue;
+                }
                 check_cancel(cancellation)?;
                 if space.encrypted && !self.has_vault_space_root(&space.id)? {
                     continue;
@@ -2887,14 +2909,21 @@ impl OpenCloudPlaceholderBackend {
                     return Err(BackendError::Unavailable);
                 }
             }
-            // Bind the complete set only if the account's Personal root and
-            // namespace identity still match after root discovery.
-            self.validate_namespace_scope(
+            // Bind roots only if the account's Personal root and namespace
+            // identity still match after discovery. A selected route also
+            // rechecks the complete Graph name set without probing other roots.
+            let spaces_after = self.validate_namespace_scope(
                 account_id,
                 personal_space_id,
                 personal_root_id,
                 deadline,
             )?;
+            if let Some(selected) = selected_space
+                && selected_name.and_then(|name| unique_space_parent_target(&spaces_after, name))
+                    != Some(selected)
+            {
+                return Err(BackendError::Unavailable);
+            }
             for (space_id, root_id, _, vault_identity) in &staged {
                 check_cancel(cancellation)?;
                 let spaces_by_id = spaces
@@ -2924,6 +2953,21 @@ impl OpenCloudPlaceholderBackend {
                     if self.vault_root_identity(space_id, &root_after)?.as_ref() != Some(expected) {
                         return Err(BackendError::Unavailable);
                     }
+                }
+            }
+            if let Some(selected) = selected_space {
+                // The exact account/Personal root and selected Graph route
+                // must still be current after the selected root recheck.
+                let spaces_final = self.validate_namespace_scope(
+                    account_id,
+                    personal_space_id,
+                    personal_root_id,
+                    deadline,
+                )?;
+                if selected_name.and_then(|name| unique_space_parent_target(&spaces_final, name))
+                    != Some(selected)
+                {
+                    return Err(BackendError::Unavailable);
                 }
             }
             Some(staged)
@@ -3066,11 +3110,14 @@ impl OpenCloudPlaceholderBackend {
                         personal_space_id,
                         personal_root_id,
                     } => {
-                        // Replace Space names only from the freshly validated
-                        // complete set. Old roots must not keep a stale label.
-                        state.location_labels.retain(|(space, root), _| {
-                            space == &personal_space_id && root == &personal_root_id
-                        });
+                        // Only full discovery replaces the complete label set.
+                        // A selected ancestry lookup publishes its one child
+                        // without pruning unrelated labels or bindings.
+                        if selected_space.is_none() {
+                            state.location_labels.retain(|(space, root), _| {
+                                space == &personal_space_id && root == &personal_root_id
+                            });
+                        }
                         let mut children = Vec::new();
                         for (space_id, root_id, name, vault_identity) in
                             staged_space_roots.unwrap_or_default()
@@ -4051,6 +4098,33 @@ fn find_spaces_identity(state: &State, account_id: &str) -> Option<OpaqueIdentit
             matches!(binding, NamespaceDirectory::Spaces { account_id: current, .. } if current == account_id)
         })
         .map(|(identity, _)| *identity)
+}
+
+// Base names must be globally unique even for Graph roots whose DAV metadata
+// could later exclude them. Then no visibility subset can change the selected
+// name through ordinal allocation. None means use full discovery, not absence.
+fn unique_space_parent_target<'a>(
+    spaces: &'a [raiun_core::backend::CloudSpace],
+    name: &str,
+) -> Option<&'a raiun_core::backend::CloudSpace> {
+    let mut names = std::collections::HashSet::new();
+    let mut ids = std::collections::HashSet::new();
+    let mut selected = None;
+    for space in spaces.iter().filter(|space| !space.personal) {
+        let base = checked_space_display_name(
+            &space.name,
+            &space.id,
+            &mut std::collections::HashSet::new(),
+        )
+        .ok()?;
+        if !names.insert(base.to_lowercase()) || !ids.insert(space.id.as_str()) {
+            return None;
+        }
+        if base == name {
+            selected = Some(space);
+        }
+    }
+    selected.filter(|space| !space.encrypted)
 }
 
 fn checked_space_display_name(
