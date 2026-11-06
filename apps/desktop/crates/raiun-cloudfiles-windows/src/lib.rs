@@ -313,6 +313,8 @@ pub struct VaultCleanupDiagnostics {
 #[cfg_attr(not(windows), allow(dead_code))]
 mod creation_preparation;
 #[cfg(windows)]
+mod file_create_completion_diagnostics;
+#[cfg(windows)]
 mod fresh_create_send_gate;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod fresh_create_target;

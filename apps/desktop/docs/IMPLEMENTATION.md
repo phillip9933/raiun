@@ -146,6 +146,15 @@ no verified send/readback result and verified readback whose original attempt
 or result recording was held. Neither label asserts an absent PUT, current
 remote verification or native completion.
 
+Ordinary file completion also retains an invocation-local annotation through
+its original task/reply and reads it after native advancement. Fixed labels
+distinguish current-owner, source, conversion, placeholder identity, body hash,
+USN comparison, completion claim, in-sync update and durable custody boundaries.
+They describe failed verification rather than asserting an unproven data change.
+Only the first failing boundary is latched; no paths, identities, revision values
+or arbitrary exception text are exposed. The annotation adds no native or cloud
+calls, changes no completion fence or outcome, and grants no retry or ACK authority.
+
 Preparation workers wait only for exact existing quota-open/lock contention
 inside their original task, context and bounded deadline. They rerun the same
 authenticated health check before proceeding, retain the whole Prepare barrier,

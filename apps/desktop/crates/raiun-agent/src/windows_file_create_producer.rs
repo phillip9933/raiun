@@ -124,11 +124,11 @@ fn file_step(step: FileCreateStep, stage: Stage, failure: Option<&'static str>) 
             failure.unwrap_or(stage_hold!(stage, "ordinary file", "submitted uncertain")),
         ),
         FileCreateStep::Finished(FreshFileCreateOutcome::RemoteVerifiedLocalIncomplete) => {
-            Step::Held(stage_hold!(
+            Step::Held(failure.unwrap_or(stage_hold!(
                 stage,
                 "ordinary file",
                 "remote verified local incomplete"
-            ))
+            )))
         }
     }
 }
@@ -408,13 +408,13 @@ impl Lane {
                     )
                 }
                 Reply::File(reply) => {
-                    let failure = reply.failure_context();
+                    let failure = reply.failure_context_after_advance();
                     file_step(
                         connection
                             .advance_fresh_personal_file_create(*reply)
-                            .map_err(|_| failure)?,
+                            .map_err(|_| failure())?,
                         Stage::Advance,
-                        Some(failure),
+                        Some(failure()),
                     )
                 }
                 Reply::Directory(reply) => {
