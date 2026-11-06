@@ -4710,29 +4710,40 @@ task stays in flight, preserving the all-Prepare barrier and independent file
 workers. No SDK request, capture, publication, upload or old-record action is
 retried. Other failures and unresolved recovery results still stop preparation.
 
-### Original Windows file conversion journal phase — 6 November 2026
+### Original Windows atomic file conversion — 6 November 2026
 
-New ordinary files and plain-file replacements establish a separate journal
-revision after their own successful placeholder conversion. The original
-exclusive owner, referenced file, pre-conversion metadata/revision and full
-content proof remain pinned. Conversion is attempted once without dehydration
-or marking the file in sync. A negative returned conversion revision refuses
-completion; a positive returned revision must match the same file's current
-journal before proceeding. A zero conversion output alone grants no authority.
+Original fresh ordinary file creation uses one documented conversion with
+`CF_CONVERT_FLAG_MARK_IN_SYNC`. The original protected owner was
+opened with exclusive write access (share none and read/handle oplock). The same
+referenced file stays continuously live from the final original metadata,
+positive-USN, full known-byte hash and scope checks through the original
+completion claim, conversion and postproof. This path creates no duplicate
+writable handle or mapping. Oplock protection alone is not a universal writer
+fence; the exclusive sharing contract and exclusion of preexisting writable
+mappings are also necessary.
 
-After checking the exact placeholder identity, full resident shape, path and
-known content, the same referenced file receives one journal close-record
-barrier. Its positive output must immediately match a FileID-bound journal read.
-The full content, shape and original scope are checked again at that unchanged
-positive revision before the original one-use completion claim and conditional
-in-sync update. The in-sync update never receives a zero or null revision;
-post-update content, identity, journal and scope verification remain required.
-Any failure keeps protected recovery. The barrier is not retried or used to
-rebase a failed update, reopen a file, replay an upload or adopt old history.
-Already-placeholder continuation retains its existing captured-revision path.
+The one-use original claim precedes this combined native operation, which does
+not dehydrate or force conversion. Only exact `S_OK` proceeds. A negative
+conversion revision refuses completion; a positive output must match the same
+file's journal before proceeding. A zero output alone provides no completion
+proof. Exact opaque identity, FileID, path, single-link full resident shape,
+size, modification time, in-sync state and known content must all match.
 
-This corrects a native completion stop observed after conversion. Compilation
-and packaged artifacts alone do not establish native completion or upload speed.
+One journal close-record barrier on the same reference establishes a positive
+FileID-bound revision with immediate readback equality. Full content, shape and
+original scope are checked again at that unchanged revision before durable
+acknowledgment. The close record is not a data flush or a substitute for writer
+exclusion. All failures retain protected recovery; the claim or journal barrier
+is never retried or rebased. Previously failed files and existing placeholders
+are not reopened or converted by this path.
+
+This is a different native primitive from a separate conditional in-sync update:
+there is no intervening marking gap and no zero/null conditional update. It does
+not establish that the previous conditional update succeeded or explain its
+platform refusal. Shared replacement and historical continuation retain their existing
+conversion and conditional-update paths; this change neither repairs nor proves
+those separate native workflows. Source review and compilation alone do not
+prove native completion or upload speed.
 
 When a native completion API refuses an update, the original typed HRESULT is
 latched together with the first fixed stage as one attempt-local fact. The

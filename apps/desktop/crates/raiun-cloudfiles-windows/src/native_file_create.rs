@@ -37,6 +37,7 @@ unsafe extern "system" {
         overlapped: *mut c_void,
     ) -> HResult;
 }
+const CF_CONVERT_FLAG_MARK_IN_SYNC: u32 = 1;
 /// Live same-owner native custody, never serializable or reconstructible.
 pub(crate) struct NativeFileCreateCompletion<'a> {
     _reference: &'a SourceReference<'a>,
@@ -1528,16 +1529,33 @@ impl ConfiguredRootConnection {
             trace.enter(CompletionStage::SourceReference);
             let final_reference = source.reference()?;
             complete(&final_reference)?;
+            trace.enter(CompletionStage::OriginalContext);
+            admission
+                .check(backend)
+                .map_err(|_| Error::ProviderUnavailable)?;
+            trace.enter(CompletionStage::RootIdentity);
+            root.verify_identity(true)?;
+            trace.enter(CompletionStage::RootRegistration);
+            root.verify_registered()?;
+            trace.enter(CompletionStage::OriginalContext);
+            if !inside_publication() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            trace.enter(CompletionStage::CompletionClaim);
+            if !ticket.claim_completion() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
             let mut converted_usn = 0i64;
-            // SAFETY: referenced WRITE_ACCESS Win32 borrow; synchronous NONE
-            // conversion retains all bytes, with a live 16-byte identity.
-            trace.enter(CompletionStage::Convert);
+            // SAFETY: same exclusive WRITE_ACCESS owner, continuously
+            // referenced across original proofs and this one convert-and-mark.
+            // All bytes remain resident; no dehydration, force or retry.
+            trace.enter(CompletionStage::ConvertAndMarkInSync);
             let hr = unsafe {
                 CfConvertToPlaceholder(
                     final_reference.raw,
                     identity.as_ptr().cast(),
                     16,
-                    0,
+                    CF_CONVERT_FLAG_MARK_IN_SYNC,
                     &mut converted_usn,
                     null_mut(),
                 )
@@ -1552,7 +1570,7 @@ impl ConfiguredRootConnection {
             trace.enter(CompletionStage::PlaceholderIdentity);
             verify_completion_identity(source.0, identity)?;
             trace.enter(CompletionStage::ConvertedShape);
-            validate_converted(&final_reference, snapshot, &expected, identity, false)?;
+            validate_converted(&final_reference, snapshot, &expected, identity, true)?;
             trace.enter(CompletionStage::SourceHashAfterConvert);
             hash_source(&final_reference, snapshot.file_size, &capture_job, &digest)?;
             trace.enter(CompletionStage::ConvertedUsnRead);
@@ -1574,11 +1592,11 @@ impl ConfiguredRootConnection {
                 return Err(Error::EditRecoveryUnavailable);
             }
             trace.enter(CompletionStage::ConversionJournal);
-            let mut compare_usn =
+            let compare_usn =
                 journal_converted_usn(&final_reference, snapshot.identity.file_index)?;
             trace.enter(CompletionStage::ConversionJournalStable);
             hash_source(&final_reference, snapshot.file_size, &capture_job, &digest)?;
-            validate_converted(&final_reference, snapshot, &expected, identity, false)?;
+            validate_converted(&final_reference, snapshot, &expected, identity, true)?;
             admission
                 .check(backend)
                 .map_err(|_| Error::ProviderUnavailable)?;
@@ -1589,17 +1607,6 @@ impl ConfiguredRootConnection {
             }
             if completion_usn(final_reference.raw, snapshot.identity.file_index)? != compare_usn {
                 return Err(Error::ConfiguredRootChanged);
-            }
-            trace.enter(CompletionStage::CompletionClaim);
-            if !ticket.claim_completion() {
-                return Err(Error::EditRecoveryUnavailable);
-            }
-            // SAFETY: same protected owner and a fresh positive compare USN.
-            // Never NULL/zero fallback; a mismatch is retained incomplete.
-            trace.enter(CompletionStage::SetInSync);
-            let hr = unsafe { CfSetInSyncState(source.0, 1, 0, &mut compare_usn) };
-            if hr < 0 {
-                return Err(native_error("complete fresh file-create", hr));
             }
             trace.enter(CompletionStage::InSyncShape);
             validate_converted(&final_reference, snapshot, &expected, identity, true)?;
@@ -1677,8 +1684,9 @@ impl ConfiguredRootConnection {
 
 // One journal phase for an already verified conversion on the SAME referenced
 // exclusive owner. Never repeat it to rebase a refused comparison or update.
-// The journal record is no data flush or writer fence: authority remains the
-// retained owner, exact metadata/content/current checks and positive USN CAS.
+// This is postproof, not a data flush, writer fence or completion authority.
+// Each caller retains its original conversion and completion protocol; this
+// helper grants no conversion, in-sync update or acknowledgment authority.
 fn journal_converted_usn(
     source: &SourceReference<'_>,
     expected_file_id: u64,
