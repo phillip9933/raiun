@@ -2207,7 +2207,7 @@ impl ProviderManager {
                             } else {producer.tick(active,backend,binding.identity,false)};
                             if let Err(message) = result {
                                 if let Ok(mut notice) = worker_rename_error.lock() {
-                                    notice.record(binding.generation,worker_generation.load(Ordering::Acquire),message);
+                                    notice.record_hresult(binding.generation,worker_generation.load(Ordering::Acquire),message,producer.failure_hresult());
                                 }
                             }
                         }
@@ -4358,7 +4358,7 @@ impl WindowsAgent {
             .provider
             .pause_snapshot(state.active_generation, state.online_authenticated);
         let rename_error = self.provider.rename_error.lock().ok().and_then(|notice| {
-            notice.get(
+            notice.rendered(
                 state.active_generation,
                 mounted
                     && state.active_generation
@@ -4385,7 +4385,7 @@ impl WindowsAgent {
                 "registration_state": value.registration_ownership.as_ref().map(|owner| owner.state.as_str()),
                 "recovery_scope_token": self.provider.configuration_recovery_scope_token(value, state.active_generation).ok(),
             })),
-            "error": state.error.as_deref().or(rename_error).or(folder_error.as_deref()).or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
+            "error": state.error.as_deref().or(rename_error.as_deref()).or(folder_error.as_deref()).or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
             "autostart": autostart,
             "recovery_folder": null,
             "encrypted_edit_recovery_available": false,

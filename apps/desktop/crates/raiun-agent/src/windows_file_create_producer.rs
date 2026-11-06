@@ -104,6 +104,27 @@ macro_rules! kind_hold {
         }
     };
 }
+#[derive(Clone, Copy)]
+pub(crate) struct FailureContext {
+    message: &'static str,
+    hresult: Option<u32>,
+}
+impl FailureContext {
+    pub(crate) fn new(message: &'static str, hresult: Option<u32>) -> Self {
+        Self { message, hresult }
+    }
+    pub(crate) fn message(self) -> &'static str {
+        self.message
+    }
+    pub(crate) fn hresult(self) -> Option<u32> {
+        self.hresult
+    }
+}
+impl From<&'static str> for FailureContext {
+    fn from(message: &'static str) -> Self {
+        Self::new(message, None)
+    }
+}
 enum Step {
     Task(Task),
     BusyFile,
@@ -111,6 +132,7 @@ enum Step {
     Ordinary,
     Completed,
     Held(&'static str),
+    HeldNative(&'static str, u32),
 }
 fn file_step(step: FileCreateStep, stage: Stage, failure: Option<&'static str>) -> Step {
     match step {
@@ -294,7 +316,7 @@ impl Lane {
         kind: CreateKind,
         workers: &mut Workers,
         collect_only: bool,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<bool, FailureContext> {
         let supported_leaf = match components.first().map(String::as_str) {
             Some("Personal") => components.len() >= 2,
             Some("Spaces") => components.len() >= 3,
@@ -316,13 +338,13 @@ impl Lane {
         if let Some(reason) = validation {
             self.stop(connection);
             self.drain_held(connection, workers);
-            return Err(reason);
+            return Err(reason.into());
         }
         if self.candidate.as_ref().is_some_and(|old| {
             old.components != components || old.generation != record_generation || old.kind != kind
         }) {
             self.stop(connection);
-            return Err(kind_hold!(kind, "candidate identity changed"));
+            return Err(kind_hold!(kind, "candidate identity changed").into());
         }
         if self.candidate.is_none() {
             // Capture the original backend transfer-cancel epoch BEFORE first prepare.
@@ -373,7 +395,7 @@ impl Lane {
             .ok_or(kind_hold!(kind, "candidate unavailable"))?;
         if candidate.job.is_stopped() {
             self.stop(connection);
-            return Err(kind_hold!(kind, "original job stopped"));
+            return Err(kind_hold!(kind, "original job stopped").into());
         }
         let step = if let Some(id) = self.flight {
             let Some(done) = workers.poll_for(id) else {
@@ -393,7 +415,7 @@ impl Lane {
                         Err(Failure::Panicked) => kind_hold!(kind, "executor panicked"),
                     };
                     self.stop(connection);
-                    return Err(reason);
+                    return Err(reason.into());
                 }
             };
             Some(match reply {
@@ -409,13 +431,18 @@ impl Lane {
                 }
                 Reply::File(reply) => {
                     let failure = reply.failure_context_after_advance();
-                    file_step(
+                    let hresult = reply.failure_hresult_after_advance();
+                    let step = file_step(
                         connection
                             .advance_fresh_personal_file_create(*reply)
-                            .map_err(|_| failure())?,
+                            .map_err(|_| FailureContext::new(failure(), hresult()))?,
                         Stage::Advance,
                         Some(failure()),
-                    )
+                    );
+                    match (step, hresult()) {
+                        (Step::Held(message), Some(code)) => Step::HeldNative(message, code),
+                        (step, _) => step,
+                    }
                 }
                 Reply::Directory(reply) => {
                     let failure = reply.failure_context();
@@ -536,14 +563,18 @@ impl Lane {
                 }
                 Step::Held(reason) => {
                     self.stop(connection);
-                    return Err(reason);
+                    return Err(reason.into());
+                }
+                Step::HeldNative(reason, code) => {
+                    self.stop(connection);
+                    return Err(FailureContext::new(reason, Some(code)));
                 }
             }
         }
         if let Some(task) = self.deferred.take() {
             if task.kind() != kind {
                 self.stop(connection);
-                return Err(kind_hold!(kind, "executor task kind mismatch"));
+                return Err(kind_hold!(kind, "executor task kind mismatch").into());
             }
             match workers.submit(task) {
                 Ok(id) => self.flight = Some(id),
@@ -667,7 +698,7 @@ impl Producer {
         record_generation: u64,
         kind: CreateKind,
         workers: &mut Workers,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<bool, FailureContext> {
         let index = self.lanes.iter().position(|lane| {
             lane.candidate
                 .as_ref()

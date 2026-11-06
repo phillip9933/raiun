@@ -610,6 +610,13 @@ impl FileCreateReply {
         let fallback = self.failure_context();
         move || trace.failure_context().unwrap_or(fallback)
     }
+    /// The original invocation's native HRESULT only, read after advance.
+    pub fn failure_hresult_after_advance(
+        &self,
+    ) -> impl Fn() -> Option<u32> + Send + 'static + use<> {
+        let trace = Arc::clone(&self.completion_trace);
+        move || trace.failure_hresult()
+    }
 }
 pub enum FileCreateStep {
     Task(FileCreateTask),
@@ -1399,8 +1406,8 @@ impl ConfiguredRootConnection {
         let trace = Arc::clone(&attempt.completion_trace);
         trace.enter(CompletionStage::OriginalContext);
         let result = self.finish_create_local_traced(attempt, local, admission, proof, &trace);
-        if result.is_err() {
-            trace.fail();
+        if let Err(error) = &result {
+            trace.fail_error(error);
         }
         result
     }
@@ -1624,8 +1631,8 @@ impl ConfiguredRootConnection {
                 }
                 reference
             }
-            Err(_) => {
-                trace.fail();
+            Err(error) => {
+                trace.fail_error(&error);
                 return Ok(RemoteVerifiedLocalIncomplete);
             }
         };

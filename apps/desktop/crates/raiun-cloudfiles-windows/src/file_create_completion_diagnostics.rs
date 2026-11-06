@@ -1,6 +1,6 @@
 //! Original-attempt diagnostic facts only. No paths, identities, revisions,
 //! credentials or native-completion authority are retained in this annotation.
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 macro_rules! stages {
     ($($name:ident => $description:literal),+ $(,)?) => {
@@ -58,30 +58,45 @@ stages! {
 
 pub(crate) struct Trace {
     current: AtomicU32,
-    failed: AtomicU32,
+    // One immutable first-failure fact: stage in the upper word and optional
+    // nonzero local HRESULT bits in the lower word. No error strings retained.
+    failed: AtomicU64,
 }
 impl Trace {
     pub(crate) fn new() -> Self {
         Self {
             current: AtomicU32::new(Stage::OriginalContext.code()),
-            failed: AtomicU32::new(0),
+            failed: AtomicU64::new(0),
         }
     }
     pub(crate) fn enter(&self, stage: Stage) {
         self.current.store(stage.code(), Ordering::Release);
     }
     pub(crate) fn fail(&self) {
-        self.latch(self.current.load(Ordering::Acquire));
+        self.latch(self.current.load(Ordering::Acquire), None);
     }
     pub(crate) fn fail_at(&self, stage: Stage) {
-        self.latch(stage.code());
+        self.latch(stage.code(), None);
     }
-    fn latch(&self, code: u32) {
+    pub(crate) fn fail_error(&self, error: &crate::Error) {
+        let hresult = match error {
+            crate::Error::Native { hresult, .. } if *hresult != 0 => Some(*hresult as u32),
+            _ => None,
+        };
+        self.latch(self.current.load(Ordering::Acquire), hresult);
+    }
+    fn latch(&self, code: u32, hresult: Option<u32>) {
+        let fact = (u64::from(code) << 32) | u64::from(hresult.unwrap_or(0));
         let _ = self
             .failed
-            .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
+            .compare_exchange(0, fact, Ordering::AcqRel, Ordering::Acquire);
     }
     pub(crate) fn failure_context(&self) -> Option<&'static str> {
-        Stage::context(self.failed.load(Ordering::Acquire))
+        Stage::context((self.failed.load(Ordering::Acquire) >> 32) as u32)
+    }
+    pub(crate) fn failure_hresult(&self) -> Option<u32> {
+        let fact = self.failed.load(Ordering::Acquire);
+        let code = fact as u32;
+        (fact >> 32 != 0 && code != 0).then_some(code)
     }
 }

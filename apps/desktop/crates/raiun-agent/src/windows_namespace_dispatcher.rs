@@ -394,8 +394,9 @@ mod connected {
         "File namespace sync paused: planner state unavailable. Recovery files have been kept.";
     const OWNER_HOLD: &str = "File namespace sync paused: native owner preflight needs attention. Recovery files have been kept.";
 
-    // Only fixed, nonsecret reasons cross the existing status boundary. Never
-    // format native error values, notification names, paths or server text.
+    // Only fixed, nonsecret reasons cross this boundary. The create consumer
+    // can also retain its exact local HRESULT; never notification names, paths,
+    // formatted OS errors or server text.
     fn plan_hold(reason: &'static str) -> &'static str {
         match reason {
             "Namespace batch limit" => BATCH_LIMIT,
@@ -462,7 +463,7 @@ mod connected {
         queued_hints: usize,
         queued_weight: usize,
         cursor: Cursor,
-        hold_reason: Option<&'static str>,
+        hold_reason: Option<create::FailureContext>,
         pending_files: Vec<(Vec<String>, u64)>,
         file_wave_started: bool,
         #[cfg(all(test, debug_assertions))]
@@ -580,7 +581,7 @@ mod connected {
             self.rename.as_deref()
         }
         pub(crate) fn hold(&mut self) {
-            self.hold_reason.get_or_insert(HOLD);
+            self.hold_reason.get_or_insert(HOLD.into());
             self.cursor.hold();
             self.batch = None;
             self.waiting_batches.clear();
@@ -634,16 +635,30 @@ mod connected {
             // A held owner is never polled or replayed. Preserve its original
             // fixed reason instead of replacing it with generic HOLD next tick.
             if let Some(reason) = self.hold_reason {
-                return Err(reason);
+                return Err(reason.message());
             }
             let result =
                 self.tick_inner(connection, backend, root, save_or_command_active, workers);
             if let Err(reason) = result {
-                self.hold_reason = Some(reason);
+                self.hold_reason.get_or_insert(reason.into());
                 self.stop_create(connection);
                 self.hold();
             }
             result
+        }
+        pub(crate) fn failure_hresult(&self) -> Option<u32> {
+            self.hold_reason.and_then(create::FailureContext::hresult)
+        }
+        // Preserve the same producer failure as one held fact before mapping
+        // its fixed text into the existing dispatcher result. No owner action.
+        fn create_result<T>(
+            result: Result<T, create::FailureContext>,
+            hold: &mut Option<create::FailureContext>,
+        ) -> Result<T, &'static str> {
+            result.map_err(|failure| {
+                hold.get_or_insert(failure);
+                failure.message()
+            })
         }
         /// Service transport even while an earlier batch waits on SDK/native
         /// work. Keep complete batches in order on this original owner only.
@@ -769,14 +784,17 @@ mod connected {
                     let workers = workers.as_deref_mut().ok_or(HOLD)?;
                     let pending = std::mem::take(&mut self.pending_files);
                     for (components, generation) in pending {
-                        if !create.step(
-                            connection,
-                            backend,
-                            root,
-                            &components,
-                            generation,
-                            CreateKind::File,
-                            workers,
+                        if !Self::create_result(
+                            create.step(
+                                connection,
+                                backend,
+                                root,
+                                &components,
+                                generation,
+                                CreateKind::File,
+                                workers,
+                            ),
+                            &mut self.hold_reason,
                         )? {
                             self.pending_files.push((components, generation));
                         }
@@ -925,14 +943,17 @@ mod connected {
                         // A plain destination has no original cloud MOVE
                         // admission. Reuse fresh create-only/If-None-Match;
                         // neither hint nor this path deletes the source.
-                        if self.create.as_mut().ok_or(HOLD)?.step(
-                            connection,
-                            backend,
-                            root,
-                            &components,
-                            generation,
-                            CreateKind::File,
-                            workers.ok_or(HOLD)?,
+                        if Self::create_result(
+                            self.create.as_mut().ok_or(HOLD)?.step(
+                                connection,
+                                backend,
+                                root,
+                                &components,
+                                generation,
+                                CreateKind::File,
+                                workers.ok_or(HOLD)?,
+                            ),
+                            &mut self.hold_reason,
                         )? {
                             self.cursor.complete().map_err(plan_hold)?;
                         }
@@ -973,14 +994,17 @@ mod connected {
                             .as_ref()
                             .and_then(|create| create.active_kind_for(generation))
                             .ok_or(HOLD)?;
-                        if self.create.as_mut().ok_or(HOLD)?.step(
-                            connection,
-                            backend,
-                            root,
-                            components,
-                            generation,
-                            kind,
-                            workers.as_deref_mut().ok_or(HOLD)?,
+                        if Self::create_result(
+                            self.create.as_mut().ok_or(HOLD)?.step(
+                                connection,
+                                backend,
+                                root,
+                                components,
+                                generation,
+                                kind,
+                                workers.as_deref_mut().ok_or(HOLD)?,
+                            ),
+                            &mut self.hold_reason,
                         )? {
                             self.cursor.complete().map_err(plan_hold)?;
                         } else if self
@@ -1038,14 +1062,17 @@ mod connected {
                                     .as_ref()
                                     .is_some_and(create::Producer::allows_directory)
                                 {
-                                    if self.create.as_mut().ok_or(HOLD)?.step(
-                                        connection,
-                                        backend,
-                                        root,
-                                        &components,
-                                        generation,
-                                        CreateKind::Directory,
-                                        workers.ok_or(HOLD)?,
+                                    if Self::create_result(
+                                        self.create.as_mut().ok_or(HOLD)?.step(
+                                            connection,
+                                            backend,
+                                            root,
+                                            &components,
+                                            generation,
+                                            CreateKind::Directory,
+                                            workers.ok_or(HOLD)?,
+                                        ),
+                                        &mut self.hold_reason,
                                     )? {
                                         self.cursor.complete().map_err(plan_hold)?;
                                     }
@@ -1091,14 +1118,17 @@ mod connected {
                             Selection::CreateFile => {
                                 let create = self.create.as_mut().ok_or(HOLD)?;
                                 let workers = workers.as_deref_mut().ok_or(HOLD)?;
-                                if create.step(
-                                    connection,
-                                    backend,
-                                    root,
-                                    &components,
-                                    generation,
-                                    CreateKind::File,
-                                    workers,
+                                if Self::create_result(
+                                    create.step(
+                                        connection,
+                                        backend,
+                                        root,
+                                        &components,
+                                        generation,
+                                        CreateKind::File,
+                                        workers,
+                                    ),
+                                    &mut self.hold_reason,
                                 )? {
                                     self.cursor.complete().map_err(plan_hold)?;
                                 } else if create.pipeline_ready(generation) {

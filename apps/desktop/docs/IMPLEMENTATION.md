@@ -4733,3 +4733,11 @@ Already-placeholder continuation retains its existing captured-revision path.
 
 This corrects a native completion stop observed after conversion. Compilation
 and packaged artifacts alone do not establish native completion or upload speed.
+
+When a native completion API refuses an update, the original typed HRESULT is
+latched together with the first fixed stage as one attempt-local fact. The
+existing failure display can append only its eight-digit hexadecimal code;
+operation strings, OS messages, paths, identities and file revisions are not
+included. This preserves the exact returned API code rather than guessing from
+the stage or reading a later global last-error value. It adds no native calls,
+RPCs, retries or completion authority; non-native errors retain fixed stages.
