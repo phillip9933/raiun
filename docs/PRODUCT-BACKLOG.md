@@ -47,28 +47,29 @@ saved backup cards now explain the Include filter, recursive subfolders and
 skipped symbolic links. Types are recognized from contents rather than filename
 extensions. This copy does not change filtering.
 
-Android local progress (6 November): Add backup and Manage backup now explain
+Android 1.6.0 (6 November): Add backup and Manage backup now explain
 the selected Photos, Videos or All files filter, recursive subfolders, skipped
 nonmatching files and exclusions. Android uses the source folder's reported
 file type; it does not inspect file contents or fall back to filename extensions
 for this filter. Filtering and queued uploads are unchanged. The copy is
-localized in the existing five translated languages; publication is pending.
+localized in the existing five translated languages.
 
 ## Android: native dependency provenance and advisory follow-up
 
-The local native checker now verifies the packaged library set against pinned
+The native checker now verifies the packaged library set against pinned
 artifacts and queries mapped source tags. See [native dependency checks](../apps/android/docs/NATIVE-DEPENDENCIES.md)
 for the current inventory and the dated initial review. This is separate from
-Maven-coordinate checks and does not change the bundled libraries.
+Maven-coordinate checks; the reviewed native backports are described below.
 
-- Local completion (6 November): fix the OpenCV `cv::split` dispatch mismatch
+- Completed in Android 1.6.0 (6 November): fix the OpenCV `cv::split` dispatch mismatch
   and backport the upstream libsodium point-validation fix. Source-bound builds,
   sanitizer and Android synthetic regressions support exact-artifact resolutions;
   the decoder matches concern excluded modules. Raw advisory matches remain visible.
 - Bind CameraX's embedded libyuv revision and improve vendored libffi/NDK and
   static-transitive provenance where available. Keep unknown revisions visible.
 
-The two native-only backport artifacts are local and unpublished. Remaining
+The two native-only backport artifacts ship with Android 1.6.0; their exact
+source, patches and checksums are retained in the repository. Remaining
 transitive-provenance work above is separate from these resolved findings.
 
 ## Desktop: GitHub release updates — completed for beta.2
