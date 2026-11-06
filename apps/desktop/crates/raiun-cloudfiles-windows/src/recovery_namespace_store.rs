@@ -195,6 +195,25 @@ pub(super) fn prepared_directory_store(
     authorization: CapturedAuthorization,
 ) -> Result<Option<Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>, BackendError>
 {
+    prepared_directory_store_with_mode(prepared, scope, authorization, false)
+}
+
+pub(super) fn prepared_existing_directory_store(
+    prepared: &DurablePreparedEditRecovery,
+    scope: &EditJournalScope,
+    authorization: CapturedAuthorization,
+) -> Result<Option<Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>, BackendError>
+{
+    prepared_directory_store_with_mode(prepared, scope, authorization, true)
+}
+
+fn prepared_directory_store_with_mode(
+    prepared: &DurablePreparedEditRecovery,
+    scope: &EditJournalScope,
+    authorization: CapturedAuthorization,
+    existing_only: bool,
+) -> Result<Option<Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>, BackendError>
+{
     let Some(context) = &prepared.namespace_rename else {
         return Ok(None);
     };
@@ -228,11 +247,22 @@ pub(super) fn prepared_directory_store(
         .state
         .verify_path()
         .map_err(|_| BackendError::Unavailable)?;
-    if context.admission.state_identity() != context.state.identity() {
+    if context.admission.state_identity() != context.state.identity()
+        || context.state.path() != prepared.catalog.state_directory
+    {
         return Err(BackendError::Unavailable);
     }
     // Constructed only from the ORIGINAL prepared namespace context; no
     // current_user/default state/protector/caller policy is rediscovered.
+    if existing_only {
+        return crate::streamed_store::namespace_store::DirectoryIntentStore::open_existing_admitted(
+            Arc::clone(&context.state),
+            scope.clone(),
+            Arc::clone(&prepared.catalog.protector),
+            context.policy,
+        )
+        .map_err(|_| BackendError::Unavailable);
+    }
     let store =
         crate::streamed_store::namespace_store::DirectoryIntentStore::create_or_open_admitted(
             Arc::clone(&context.state),

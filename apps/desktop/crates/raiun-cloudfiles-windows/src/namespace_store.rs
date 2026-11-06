@@ -146,6 +146,25 @@ impl DirectoryIntentStore {
             admission,
         }))
     }
+    /// Bind only an existing verified v2 root. No quota, catalog, scope or
+    /// journal entries are created; absence is distinct from unsafe evidence.
+    #[cfg(windows)]
+    pub(crate) fn open_existing_admitted(
+        state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        scope: EditJournalScope,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+    ) -> Result<Option<Arc<Self>>, StoreError> {
+        validate_scope(&scope)?;
+        policy.validate()?;
+        let Some(root) = windows::existing_root(Arc::clone(&state), V2_STORE_ROOT)? else {
+            return Ok(None);
+        };
+        let base = SnapshotStore::from_directory(root, scope, Arc::clone(&protector), policy)?;
+        let admission =
+            crate::recovery_admission::RecoveryAdmission::new_admitted(state, protector, policy)?;
+        Ok(Some(Arc::new(Self { base, admission })))
+    }
     fn reserve(&self, bytes: u64, entries: usize) -> Result<Box<dyn Send>, StoreError> {
         #[cfg(windows)]
         {

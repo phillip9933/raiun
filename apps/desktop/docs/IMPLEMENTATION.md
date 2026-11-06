@@ -5171,3 +5171,21 @@ observations and their ID/version comparison, the final parent check, verified
 result persistence before refresh, native custody and conditional mutation
 rules remain. No deadline extension, cached negative encryption/health result,
 old-record replay or owner scheduling-barrier exception is introduced.
+
+The following copy still reached the same deadline, so those request reductions
+are not claimed to resolve it. Preparation also performed two complete recovery
+health scans around store binding. An existing directory store can now be bound
+through an explicitly read-only constructor before the single final, unchanged
+full health scan. Native inspection pins and original scope/currentness checks
+span that scan. Verified absence retains the original initialize-between-two-
+scans path; access, reparse and malformed-state failures do not mean absence.
+No publication or quota/catalog creation occurs on the read-only path before
+the authoritative full scan. Generic unresolved/recovery policy is unchanged.
+
+Exact SDK root metadata also reuses the fresh root just inspected in that same
+call, retaining separate fresh root-before and root-after calls. This removes
+four more DAV requests per directory observation without cross-call caching.
+At refresh entry, fixed diagnostic labels record whether the original budget
+had under five or under fifteen seconds remaining. This neither extends that
+budget nor attributes the preceding cost to a particular operation. Actual
+completion and timing still require the same bounded basic file workflow.

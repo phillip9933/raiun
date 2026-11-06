@@ -326,6 +326,22 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Read-only binding to an existing directory journal root in this SAME
+    /// prepared account/root context. None means verified absence or an
+    /// unsupported implementation; unsafe/malformed storage must return Err.
+    /// This supplies no health, dispatch or native publication authority.
+    #[cfg(windows)]
+    fn existing_directory_intent_store(
+        &self,
+        _scope: &crate::EditJournalScope,
+        _authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>,
+        BackendError,
+    > {
+        Ok(None)
+    }
+
     /// A nonblocking cached count seeded by authenticated preflight. No disk,
     /// body decryption or network work is permitted here. Unsupported, poisoned
     /// or invalidated summaries return None, never a healthy zero.

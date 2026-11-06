@@ -784,25 +784,42 @@ impl DirectoryCreateTask {
                     inspection
                         .bind_space(&mut space)
                         .map_err(|_| BackendError::Unavailable)?;
-                    if wait_for_recovery_health(&job, &trace, &mut health_wait, || {
-                        trace.enter(PreparationStage::Job);
-                        job.check()?;
-                        trace.enter(PreparationStage::Current);
-                        if !current(self.key.authorization) {
+                    trace.enter(PreparationStage::RecoveryStore);
+                    let existing = recovery.existing_directory_intent_store(
+                        &session.captured.scope,
+                        self.key.authorization,
+                    )?;
+                    let store = if let Some(store) = existing {
+                        // Read-only binding creates no recovery evidence and
+                        // grants no health or dispatch authority. The complete
+                        // joint query below still admits this exact candidate.
+                        store
+                    } else {
+                        // Unsupported stores and verified absence retain the
+                        // original health/create/recheck initialization path.
+                        if wait_for_recovery_health(&job, &trace, &mut health_wait, || {
+                            trace.enter(PreparationStage::Job);
+                            job.check()?;
+                            trace.enter(PreparationStage::Current);
+                            if !current(self.key.authorization) {
+                                return Err(BackendError::Unavailable);
+                            }
+                            session.check()?;
+                            trace.enter(PreparationStage::RecoveryBefore);
+                            recovery.has_unresolved_for_fresh_create_in_space(&space)
+                        })? {
                             return Err(BackendError::Unavailable);
                         }
+                        trace.enter(PreparationStage::Current);
                         session.check()?;
-                        trace.enter(PreparationStage::RecoveryBefore);
-                        recovery.has_unresolved_for_fresh_create_in_space(&space)
-                    })? {
-                        return Err(BackendError::Unavailable);
-                    }
-                    trace.enter(PreparationStage::Current);
-                    session.check()?;
-                    trace.enter(PreparationStage::RecoveryStore);
-                    let store = recovery
-                        .directory_intent_store(&session.captured.scope, self.key.authorization)?
-                        .ok_or(BackendError::Unavailable)?;
+                        trace.enter(PreparationStage::RecoveryStore);
+                        recovery
+                            .directory_intent_store(
+                                &session.captured.scope,
+                                self.key.authorization,
+                            )?
+                            .ok_or(BackendError::Unavailable)?
+                    };
                     trace.enter(PreparationStage::Current);
                     session.check()?;
                     if wait_for_recovery_health(&job, &trace, &mut health_wait, || {
@@ -849,8 +866,17 @@ impl DirectoryCreateTask {
                 (Phase::Send, DirectoryReplyKind::Sent(session, result))
             }
             DirectoryTaskKind::Refresh(pair) => {
-                trace.enter(PreparationStage::DirectoryRefresh);
                 let (session, intent, report) = *pair;
+                let remaining = session.refresh_budget_remaining();
+                trace.enter(match remaining {
+                    Some(remaining) if remaining >= std::time::Duration::from_secs(15) => {
+                        PreparationStage::DirectoryRefresh
+                    }
+                    Some(remaining) if remaining >= std::time::Duration::from_secs(5) => {
+                        PreparationStage::DirectoryRefreshUnderFifteenSeconds
+                    }
+                    _ => PreparationStage::DirectoryRefreshUnderFiveSeconds,
+                });
                 let result = session.refresh(&intent, &report);
                 if result.is_ok() {
                     trace.enter(PreparationStage::DirectoryRefreshReplyReady);

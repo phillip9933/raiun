@@ -1330,6 +1330,11 @@ impl OwnedDirectorySession {
             },
         }
     }
+    /// Diagnostic observation of the original total job budget only.
+    /// It grants no authority and never starts or extends a deadline.
+    pub(crate) fn refresh_budget_remaining(&self) -> Option<Duration> {
+        self.job.cancellation().remaining()
+    }
     pub(crate) fn refresh(
         &self,
         intent: &NamespaceIntent,

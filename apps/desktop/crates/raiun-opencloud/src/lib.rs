@@ -2471,10 +2471,18 @@ impl OpenCloudClient {
                 ));
             }
             let url = append_logical_path(&root_url, path)?;
-            self.ensure_plain_ancestors_with_context(space, path, false, Some(context))?;
+            let root =
+                self.ordinary_ancestor_root_entry_with_context(space, path, false, Some(context))?;
             self.ensure_context_current(context)?;
             self.ensure_security_current(security)?;
-            self.stat_at_dav(&url, path)
+            // Exact root metadata was just read and fully validated by the
+            // ordinary ancestor guard. Reuse it only inside this call; another
+            // root-before/root-after invocation still performs its own DAV.
+            if path == "/" {
+                Ok(root)
+            } else {
+                self.stat_at_dav(&url, path)
+            }
         })();
         self.ensure_context_current(context)?;
         self.ensure_security_current(security)?;

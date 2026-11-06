@@ -1731,6 +1731,18 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         namespace_storage::prepared_directory_store(self, scope, authorization)
     }
 
+    #[cfg(windows)]
+    fn existing_directory_intent_store(
+        &self,
+        scope: &EditJournalScope,
+        authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>,
+        BackendError,
+    > {
+        namespace_storage::prepared_existing_directory_store(self, scope, authorization)
+    }
+
     fn append_edit(
         &self,
         binding: &PlaceholderEditBinding,
