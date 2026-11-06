@@ -1770,18 +1770,9 @@ impl ProviderManager {
                                         .map_err(|_| "Could not connect the Windows Cloud Files drive".to_owned())
                                 });
                                 match lease {
-                                    Ok((active, custody, composite))
+                                    Ok((mut active, custody, composite))
                                         if worker_generation.load(Ordering::Acquire) == generation =>
                                     {
-                                        last_vault_cleanup_error = None;
-                                        active_binding = Some(candidate_binding.clone());
-                                        if let Ok(mut status) = worker_ordinary_edits.lock() {
-                                            *status = Some(windows_headless_edits::CachedStatus {
-                                                binding: candidate_binding.clone(),
-                                                source: active.ordinary_edit_status_source(), last_outcome:None,
-                                            });
-                                        }
-                                        vault_custody = custody;
                                         // The separately opted-in legacy directory fixture remains exclusive.
                                         // Shared directory routing is held until typed classification is admitted.
                                         let shared_directory_ready = windows_namespace_dispatcher::DIRECTORY_ROUTING_READY;
@@ -1799,7 +1790,8 @@ impl ProviderManager {
                                                 Err(_)=>if let Ok(mut notice)=worker_rename_error.lock() {notice.record(generation,worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD);},
                                             }
                                         }
-                                        namespace_dispatcher = if namespace_producer.is_none() && (next_file_rename_producer.is_some() || shared_directory.is_some() || directory_phase_enabled) {
+                                        let dispatcher_required = namespace_producer.is_none() && (next_file_rename_producer.is_some() || shared_directory.is_some() || directory_phase_enabled);
+                                        namespace_dispatcher = if dispatcher_required {
                                             let make_dispatcher = || {
                                                 if directory_phase_enabled {
                                                     if create_workers.is_none() { return Err(windows_file_create_producer::HOLD); }
@@ -1823,16 +1815,70 @@ impl ProviderManager {
                                                 }
                                             }
                                         } else { None };
-                                        connection = Some(active);
-                                        backend = Some(next_backend);
-                                        worker_connected.store(true, Ordering::Release);
-                                        Ok(())
+                                        // Callers may mkdir/copy immediately after Connect
+                                        // readiness. Arm only the dispatcher route here;
+                                        // the exclusive legacy producer owns its own observer.
+                                        let observer_ready = if dispatcher_required {
+                                            match namespace_dispatcher.as_mut() {
+                                                Some(dispatcher) => dispatcher.arm_observer(&mut active, &next_backend, expected_identity),
+                                                None => Err("Windows namespace observation could not start; pending files have been kept."),
+                                            }
+                                        } else { Ok(()) };
+                                        let observer_ready = observer_ready.and_then(|()| {
+                                            if worker_generation.load(Ordering::Acquire) != generation || next_backend.is_revoked() {
+                                                Err("The account changed before Windows namespace readiness was published; pending files have been kept.")
+                                            } else { Ok(()) }
+                                        });
+                                        match observer_ready {
+                                            Ok(()) => {
+                                                last_vault_cleanup_error = None;
+                                                active_binding = Some(candidate_binding.clone());
+                                                if let Ok(mut status) = worker_ordinary_edits.lock() {
+                                                    *status = Some(windows_headless_edits::CachedStatus {
+                                                        binding: candidate_binding.clone(),
+                                                        source: active.ordinary_edit_status_source(), last_outcome:None,
+                                                    });
+                                                }
+                                                vault_custody = custody;
+                                                connection = Some(active);
+                                                backend = Some(next_backend);
+                                                worker_connected.store(true, Ordering::Release);
+                                                Ok(())
+                                            }
+                                            Err(message) => {
+                                                // A failed arm can still own pending native IO.
+                                                // Retain the whole original connection unless
+                                                // every cancel/join/disconnect is confirmed.
+                                                next_backend.begin_revocation();
+                                                let workers_drained = stop_create_workers(namespace_dispatcher.as_mut(), Some(&active), &mut create_workers).is_ok();
+                                                if let Some(dispatcher) = namespace_dispatcher.as_mut() { dispatcher.hold(); }
+                                                namespace_dispatcher = None;
+                                                namespace_producer = None;
+                                                let observer_drained = active.stop_namespace_observer(Duration::from_millis(250)).is_ok();
+                                                let delete_drained = active.cancel_file_delete_in_place().is_ok();
+                                                if workers_drained && delete_drained { next_backend.revoke(); }
+                                                if !workers_drained || !observer_drained || !delete_drained || active.disconnect_in_place().is_err() {
+                                                    active_binding = Some(candidate_binding.clone());
+                                                    vault_custody = custody;
+                                                    connection = Some(active);
+                                                    backend = Some(next_backend);
+                                                    // Physical connection retained for draining,
+                                                    // never a successful readiness receipt.
+                                                    worker_connected.store(true, Ordering::Release);
+                                                    Err("Windows namespace readiness failed and disconnect is still pending; pending files have been kept.".into())
+                                                } else {
+                                                    Err(message.to_owned())
+                                                }
+                                            }
+                                        }
                                     }
-                                    Ok((mut active, _custody, _composite)) => {
+                                    Ok((mut active, custody, _composite)) => {
                                         next_backend.begin_revocation();
                                         let delete_drained = active.cancel_file_delete_in_place().is_ok();
                                         if delete_drained { next_backend.revoke(); }
                                         if !delete_drained || active.disconnect_in_place().is_err() {
+                                            active_binding = Some(candidate_binding.clone());
+                                            vault_custody = custody;
                                             connection = Some(active);
                                             backend = Some(next_backend);
                                             worker_connected.store(true, Ordering::Release);
@@ -2177,6 +2223,16 @@ impl ProviderManager {
                         dispatched_initial = !matches!(&result, Ok(None));
                         if dispatched_initial {
                             windows_headless_edits::record_initial_outcome(&worker_ordinary_edits, active_binding.as_ref(), &result);
+                        }
+                        if result.is_err() {
+                            if let Some(binding) = active_binding.as_ref() {
+                                if let Ok(mut notice) = worker_rename_error.lock() {
+                                    let current_generation = worker_generation.load(Ordering::Acquire);
+                                    if notice.get(current_generation, true).is_none() {
+                                        notice.record(binding.generation, current_generation, "Fresh-save verification paused; pending files have been kept.");
+                                    }
+                                }
+                            }
                         }
                         #[cfg(all(test, debug_assertions))]
                         if dispatched_initial {

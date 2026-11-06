@@ -4811,3 +4811,30 @@ retires only its original uncaptured attempt; it neither spins nor cancels peers
 The Windows GUI and CLI use this same adapter. Linux scheduling is unchanged.
 This source correction does not establish a completed native upload or a speed
 increase until the bounded file workflow is actually exercised.
+
+
+### Windows namespace observer startup readiness — 6 November 2026
+
+The default shared namespace dispatcher now arms its original connected-root
+observer before Connect publishes the binding, mounted readiness and success.
+The initial receipt must be Pending with a nonzero instance and the exact live
+root, provider and current authorization. Later ticks poll that same instance;
+initial arming performs no hint routing, directory scan, adoption or replay.
+This closes a source-level interval in which a caller could create a folder
+after readiness was reported but before observation began. The retained case's
+actual missed-readiness cause was not established by its timed observations.
+
+An arm failure explicitly revokes admission and cancels/joins workers, observer
+and delete work before disconnect. An unconfirmed drain retains the complete
+original connection, backend, binding and custody and reports failure. A later
+stale-generation branch retains the same whole-owner state. Existing exclusive
+legacy and no-dispatcher modes keep their own lifecycle.
+
+An actual fresh-save error can already defer namespace dispatch. It now also
+records one fixed generation-scoped GUI notice when no more detailed current
+notice exists. No raw error string or new diagnostic RPC is exposed, and the
+existing priority and fail-closed behavior remain unchanged. Earlier folders
+created without a genuine observed event remain retained; this ordering fix
+cannot adopt or replay them. Windows GUI and CLI share the dispatcher; Linux
+startup is unchanged. Source review and compilation do not prove a completed
+native transfer or a speed improvement.

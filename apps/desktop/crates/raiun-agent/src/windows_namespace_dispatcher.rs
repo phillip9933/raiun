@@ -649,6 +649,35 @@ mod connected {
         pub(crate) fn failure_hresult(&self) -> Option<u32> {
             self.hold_reason.and_then(create::FailureContext::hresult)
         }
+        /// Initial readiness only: arm the original observer without polling,
+        /// routing hints or admitting any namespace operation. Connect publishes
+        /// success only after this exact instance reports pending native IO.
+        pub(crate) fn arm_observer(
+            &mut self,
+            connection: &mut ConfiguredRootConnection,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            root: ConfiguredRootIdentity,
+        ) -> Result<(), &'static str> {
+            if self.attached || self.instance.is_some() || !self.current(backend, root) {
+                return Err(CONTEXT_CHANGED);
+            }
+            let value = connection
+                .attach_namespace_observer()
+                .map_err(|_| OBSERVER_UNAVAILABLE)?;
+            if value.root_identity() != root
+                || value.provider_scope() != backend.scope()
+                || value.instance() == 0
+                || !self.current(backend, root)
+            {
+                return Err(CONTEXT_CHANGED);
+            }
+            if !matches!(value.poll(), ObserverPoll::Pending) {
+                return Err(OBSERVER_UNAVAILABLE);
+            }
+            self.attached = true;
+            self.instance = Some(value.instance());
+            Ok(())
+        }
         // Preserve the same producer failure as one held fact before mapping
         // its fixed text into the existing dispatcher result. No owner action.
         fn create_result<T>(
@@ -670,12 +699,12 @@ mod connected {
         ) -> Result<(), &'static str> {
             // Exactly one attach OR poll. The native wrapper rearms a valid
             // completion immediately; held/stopped instances are never replaced.
-            let value = if self.attached {
-                connection.poll_namespace_observer(Duration::ZERO)
-            } else {
-                connection.attach_namespace_observer()
+            if !self.attached {
+                return self.arm_observer(connection, backend, root);
             }
-            .map_err(|_| OBSERVER_UNAVAILABLE)?;
+            let value = connection
+                .poll_namespace_observer(Duration::ZERO)
+                .map_err(|_| OBSERVER_UNAVAILABLE)?;
             if value.root_identity() != root
                 || value.provider_scope() != backend.scope()
                 || value.instance() == 0
