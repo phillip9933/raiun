@@ -80,7 +80,10 @@ pub(super) fn qualify_create_target_with_trace(
             context.deadline,
         ),
     }
-    .map_err(|_| refusal(ErrorKind::Conflict))?;
+    // Scope validation fences authoritative denials and identity mismatches at
+    // their source. Its remaining opaque failures may be transient; they are
+    // not evidence of a conflicting account/root and must not revoke it here.
+    .map_err(|_| refusal(ErrorKind::Io))?;
     preparation_stage(trace, PreparationStage::TargetQualification);
     let mut targets = spaces.iter().filter(|space| space.id == scope.space_id);
     let target = targets.next().ok_or_else(|| refusal(ErrorKind::Conflict))?;

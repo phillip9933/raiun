@@ -7700,11 +7700,31 @@ fn dispatch_one_initial_edit_checked(
     let (Some(connection), Some(backend), Some(binding)) = (connection, backend, binding) else {
         return Ok(None);
     };
-    if binding.generation == 0
-        || generation.load(Ordering::Acquire) != binding.generation
-        || backend.is_revoked()
-    {
+    if binding.generation == 0 || generation.load(Ordering::Acquire) != binding.generation {
         return Err("Fresh-save verification paused: account currentness check failed; pending files have been kept.".into());
+    }
+    if backend.is_revoked() {
+        // Only the first typed cloud category is retained in memory; no raw
+        // server detail or later global error can replace the original fact.
+        use raiun_core::backend::ErrorKind;
+        let message = match backend.revoked_cloud_error_kind() {
+            Some(ErrorKind::Unauthorized) => {
+                "Fresh-save verification paused: cloud authentication failure fenced the drive; pending files have been kept."
+            }
+            Some(ErrorKind::Forbidden) => {
+                "Fresh-save verification paused: cloud permission denial fenced the drive; pending files have been kept."
+            }
+            Some(ErrorKind::NotFound) => {
+                "Fresh-save verification paused: a cloud item was not found and the drive was fenced; pending files have been kept."
+            }
+            Some(ErrorKind::Conflict) => {
+                "Fresh-save verification paused: cloud validation reported a conflict and the drive was fenced; pending files have been kept."
+            }
+            _ => {
+                "Fresh-save verification paused: the original drive backend was revoked; pending files have been kept."
+            }
+        };
+        return Err(message.into());
     }
     // Empty fresh-queue state is scheduling information only. A concurrent
     // enqueue waits for the next tick; nonempty work retains every root proof

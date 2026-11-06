@@ -4857,3 +4857,26 @@ notice priority and headless outcome recording remain intact. Windows GUI and
 CLI share this path; Linux runtime behavior is unchanged. The previous generic
 physical-laptop refusal does not establish its inner cause, and this source
 change does not prove completed uploads or a measured speed improvement.
+
+### Windows namespace failure classification — 6 November 2026
+
+Create qualification no longer treats every opaque namespace-validation failure
+as an authoritative conflict. A transient transport or local verification failure
+still refuses the current operation, using the existing nonauthoritative IO
+category, without inventing evidence of a changed account. Original cloud
+authentication, permission, removal and conflict failures retain their existing
+cached-backend fence. Invalid Space/Personal metadata and actual account,
+Personal-root identity, type or encryption mismatches are fenced at their source,
+before the opaque outer error is mapped. Target-root, permission, encryption,
+generation, conditional-write and expected fresh-child absence checks remain.
+
+The existing publication gate now retains only the first typed cloud category
+that actually wins backend revocation. Lifecycle-first revocation has no cloud
+category, and later failures cannot relabel either case. A memory-only Rust
+getter feeds fixed text in the existing generation-scoped notice; it grants no
+admission, exposes no raw server data and adds no control protocol. Currentness
+failure remains terminal. No backend is unrevoked, reauthenticated or retried by
+this change. GUI and CLI share the Windows adapter; Linux runtime is unchanged.
+This fixes a demonstrated source classification path, not the unobserved inner
+cause of the prior physical-laptop refusal. Native completion and speed still
+require the existing bounded file workflow to finish.

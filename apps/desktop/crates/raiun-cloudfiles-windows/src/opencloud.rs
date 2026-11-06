@@ -62,7 +62,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
 };
 
@@ -546,6 +546,7 @@ pub struct OpenCloudPlaceholderBackend {
     vault_routes: Option<Arc<crate::vault_routes::VaultRouteRegistry>>,
     token_generation: u64,
     revoked: AtomicBool,
+    revoked_cloud_error: AtomicU8,
     lease_gate: RwLock<()>,
     publish_gate: Mutex<()>,
     #[cfg(windows)]
@@ -635,6 +636,7 @@ impl OpenCloudPlaceholderBackend {
             catalog_scope: Mutex::new(None),
             token_generation,
             revoked: AtomicBool::new(false),
+            revoked_cloud_error: AtomicU8::new(0),
             lease_gate: RwLock::new(()),
             publish_gate: Mutex::new(()),
             #[cfg(windows)]
@@ -818,9 +820,9 @@ impl OpenCloudPlaceholderBackend {
         if spaces.iter().any(|space| {
             space.id.is_empty() || space.id.len() > 512 || space.id.chars().any(char::is_control)
         }) {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
-        verified_personal(&spaces)?;
+        verified_personal(&spaces).map_err(|_| self.reject_cached_namespace_mismatch())?;
         Ok(spaces)
     }
 
@@ -846,9 +848,9 @@ impl OpenCloudPlaceholderBackend {
         if spaces.iter().any(|space| {
             space.id.is_empty() || space.id.len() > 512 || space.id.chars().any(char::is_control)
         }) {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
-        verified_personal(&spaces)?;
+        verified_personal(&spaces).map_err(|_| self.reject_cached_namespace_mismatch())?;
         Ok(spaces)
     }
 
@@ -2515,6 +2517,19 @@ impl OpenCloudPlaceholderBackend {
         self.revoked.load(Ordering::Acquire)
     }
 
+    /// First authoritative cloud rejection that revoked this cached backend.
+    /// This memory-only category grants no authority and contains no server data.
+    /// Explicit lifecycle revocation does not manufacture a cloud rejection.
+    pub fn revoked_cloud_error_kind(&self) -> Option<raiun_core::backend::ErrorKind> {
+        match self.revoked_cloud_error.load(Ordering::Acquire) {
+            1 => Some(ErrorKind::Unauthorized),
+            2 => Some(ErrorKind::Forbidden),
+            3 => Some(ErrorKind::NotFound),
+            4 => Some(ErrorKind::Conflict),
+            _ => None,
+        }
+    }
+
     /// Publish fail-closed revocation without waiting for backend read leases
     /// or changing the retained vault cleanup inventory. Owners call this
     /// before any fallible worker join, then `revoke` for the existing barrier.
@@ -3151,17 +3166,18 @@ impl OpenCloudPlaceholderBackend {
         deadline: std::time::Instant,
     ) -> Result<Vec<raiun_core::backend::CloudSpace>, BackendError> {
         let spaces = self.discover_spaces(deadline)?;
-        let personal = verified_personal(&spaces)?;
+        let personal =
+            verified_personal(&spaces).map_err(|_| self.reject_cached_namespace_mismatch())?;
         if personal.id != expected_personal_space_id
             || derive_account_id(&self.client.configured_server_url(), &personal.id) != account_id
             || account_id != self.scope.account_id
         {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
         let personal = spaces
             .iter()
             .find(|space| space.id == expected_personal_space_id)
-            .ok_or(BackendError::Unavailable)?;
+            .ok_or_else(|| self.reject_cached_namespace_mismatch())?;
         let root = self
             .client
             .stat_discovered_space_root_with_context(
@@ -3173,7 +3189,7 @@ impl OpenCloudPlaceholderBackend {
             )
             .map_err(|error| self.reject_cached_cloud_error(error))?;
         if !root.directory || root.encrypted || root.id != expected_personal_root_id {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
         Ok(spaces)
     }
@@ -3190,17 +3206,18 @@ impl OpenCloudPlaceholderBackend {
         use crate::creation_preparation::Stage;
         trace.enter(Stage::AccountRoot);
         let spaces = self.discover_spaces_traced(deadline, trace)?;
-        let personal = verified_personal(&spaces)?;
+        let personal =
+            verified_personal(&spaces).map_err(|_| self.reject_cached_namespace_mismatch())?;
         if personal.id != expected_personal_space_id
             || derive_account_id(&self.client.configured_server_url(), &personal.id) != account_id
             || account_id != self.scope.account_id
         {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
         let personal = spaces
             .iter()
             .find(|space| space.id == expected_personal_space_id)
-            .ok_or(BackendError::Unavailable)?;
+            .ok_or_else(|| self.reject_cached_namespace_mismatch())?;
         let root = self
             .client
             .stat_discovered_space_root_with_context(
@@ -3216,15 +3233,15 @@ impl OpenCloudPlaceholderBackend {
             })?;
         trace.enter(Stage::RootKind);
         if !root.directory {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
         trace.enter(Stage::RootEncryption);
         if root.encrypted {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
         trace.enter(Stage::RootIdentity);
         if root.id != expected_personal_root_id {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
         Ok(spaces)
     }

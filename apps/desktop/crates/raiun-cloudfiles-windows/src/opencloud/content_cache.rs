@@ -1,7 +1,11 @@
 //! Complete verified ordinary-file versions; never persist callback fragments.
 use super::{BackendError, CancellationToken, FileBinding, OpenCloudPlaceholderBackend};
 use raiun_cache::{CacheScope, ContentProtection, ContentVersion, ScopeProtection};
-use std::io::{Read, Seek, SeekFrom};
+use raiun_core::backend::ErrorKind;
+use std::{
+    io::{Read, Seek, SeekFrom},
+    sync::atomic::Ordering,
+};
 
 impl OpenCloudPlaceholderBackend {
     /// Read the existing device-wide cache accounting, never an account total.
@@ -306,15 +310,16 @@ impl OpenCloudPlaceholderBackend {
         &self,
         error: raiun_core::backend::CloudError,
     ) -> BackendError {
-        if self.cache.is_some()
-            && matches!(
-                error.kind,
-                raiun_core::backend::ErrorKind::Unauthorized
-                    | raiun_core::backend::ErrorKind::Forbidden
-                    | raiun_core::backend::ErrorKind::NotFound
-                    | raiun_core::backend::ErrorKind::Conflict
-            )
-        {
+        // Zero means no authoritative cloud rejection. Keep this encoding
+        // paired with revoked_cloud_error_kind; never retain error text.
+        let kind = match error.kind {
+            ErrorKind::Unauthorized => 1,
+            ErrorKind::Forbidden => 2,
+            ErrorKind::NotFound => 3,
+            ErrorKind::Conflict => 4,
+            _ => 0,
+        };
+        if self.cache.is_some() && kind != 0 {
             // Do not acquire the write lease from inside a read callback.
             // Authoritative denial, removal or version/root conflict fences this
             // backend until the agent verifies and constructs a replacement.
@@ -324,10 +329,24 @@ impl OpenCloudPlaceholderBackend {
                 .publish_gate
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // An explicit lifecycle revocation may have won this gate first.
+            // A later in-flight error must not relabel its cause.
+            if !self.revoked.load(Ordering::Acquire)
+                && self.revoked_cloud_error.load(Ordering::Acquire) == 0
+            {
+                self.revoked_cloud_error.store(kind, Ordering::Release);
+            }
             self.revoked
                 .store(true, std::sync::atomic::Ordering::Release);
         }
         super::map_cloud_error(error)
+    }
+
+    pub(super) fn reject_cached_namespace_mismatch(&self) -> BackendError {
+        self.reject_cached_cloud_error(raiun_core::backend::CloudError::new(
+            ErrorKind::Conflict,
+            "namespace account or Personal root identity changed",
+        ))
     }
 
     pub(super) fn content_cache_key(
