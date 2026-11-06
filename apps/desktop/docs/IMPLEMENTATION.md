@@ -4905,3 +4905,40 @@ Windows GUI and CLI share this adapter; Linux runtime is unchanged. This removes
 a demonstrated all-Spaces request dependency from ordinary parent preparation.
 It does not establish which cloud item was missing in the previous physical
 run or prove a whole-folder speed improvement before native completion.
+
+### Windows continuous notification intake — 6 November 2026
+
+A dedicated hint-only transport worker now constructs and owns the existing
+non-Send/non-Sync directory observer. It starts from an owned duplicate of the
+already pinned original root handle and retains the same-object factory checks.
+No unsafe Send implementation or pathname-based replacement owner is introduced.
+The bridge stores the complete supervisor before requesting an armed read; a
+250 ms startup acknowledgment timeout refuses readiness and retains cancellation
+ownership rather than assuming construction succeeded.
+
+The worker reaps and rearms valid native completions independently of Agent
+commands and cloud work. Complete owned batches remain FIFO under a 4 MiB queue
+weight, 1,024 batch and 16,384 hint limits. The existing dispatcher keeps its own
+4 MiB queue allowance and original limits; it can dequeue up to 64 complete
+batches per owner tick before candidate work. These are separate bounded queue
+weights, not a whole-process memory measurement. No notification is merged,
+coalesced, replayed or promoted to mutation authority.
+
+Zero-byte completion, malformed data, native/root errors and queue exhaustion
+still end continuity. A terminal reason suppresses queued hints and is latched
+on the original connection before the existing one-way backend revocation
+fence closes its jobs. Requested lifecycle stop is separate. The owner uses
+the existing hold/cancel/drain path and preserves the first generation-scoped
+fixed reason before a generic save error can mask it. The diagnostic getter is
+memory-only, with no new control protocol or raw event/server data.
+
+The original instance, account, provider, root, registration and native operation
+proofs remain at the bridge and consumers. Actual native completion and worker
+exit must be confirmed before storage is released; a bounded stop timeout
+retains the original supervisor. Panic handling closes admission before the
+native observer's potentially blocking drain. No lost-continuity restart,
+rescan adoption, buffer enlargement, clean-flag repair or retry is introduced.
+Windows GUI and CLI share this transport; Linux runtime is unchanged. The prior
+physical stop proves a zero-byte completion, but not why the OS produced it.
+Compilation and source review do not establish completed copies or elapsed
+upload speed.

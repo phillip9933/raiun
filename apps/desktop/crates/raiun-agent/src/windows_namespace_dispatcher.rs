@@ -415,7 +415,7 @@ mod connected {
             _ => HOLD,
         }
     }
-    fn observer_hold(reason: RescanReason) -> &'static str {
+    pub(crate) fn observer_hold(reason: RescanReason) -> &'static str {
         match reason {
             RescanReason::Limit => BATCH_LIMIT,
             RescanReason::EmptyCompletion => OBSERVER_LOSS,
@@ -549,6 +549,17 @@ mod connected {
             if let Some(create) = &mut self.create {
                 create.stop(connection);
             }
+        }
+        /// A terminal transport fact grants no new dispatch authority. Cancel
+        /// the same original jobs and preserve the first fixed hold reason.
+        pub(crate) fn hold_observer_loss(
+            &mut self,
+            connection: &ConfiguredRootConnection,
+            reason: RescanReason,
+        ) {
+            self.hold_reason.get_or_insert(observer_hold(reason).into());
+            self.stop_create(connection);
+            self.hold();
         }
         pub(crate) fn drain_create(
             &mut self,
@@ -696,11 +707,11 @@ mod connected {
             connection: &mut ConfiguredRootConnection,
             backend: &Arc<OpenCloudPlaceholderBackend>,
             root: ConfiguredRootIdentity,
-        ) -> Result<(), &'static str> {
-            // Exactly one attach OR poll. The native wrapper rearms a valid
-            // completion immediately; held/stopped instances are never replaced.
+        ) -> Result<bool, &'static str> {
+            // One attach OR dequeue from the same original transport owner.
+            // Complete batches stay separate; held instances are never replaced.
             if !self.attached {
-                return self.arm_observer(connection, backend, root);
+                return self.arm_observer(connection, backend, root).map(|()| false);
             }
             let value = connection
                 .poll_namespace_observer(Duration::ZERO)
@@ -716,7 +727,7 @@ mod connected {
             self.attached = true;
             self.instance = Some(value.instance());
             match value.poll() {
-                ObserverPoll::Idle | ObserverPoll::Pending => Ok(()),
+                ObserverPoll::Idle | ObserverPoll::Pending => Ok(false),
                 ObserverPoll::Stopped => Err(OBSERVER_STOPPED),
                 ObserverPoll::Batch(NotificationBatch::RescanRequired(reason)) => {
                     Err(observer_hold(*reason))
@@ -752,7 +763,7 @@ mod connected {
                     self.waiting_batches.push_back((batch.clone(), weight));
                     self.queued_hints = queued_hints;
                     self.queued_weight = queued_weight;
-                    Ok(())
+                    Ok(true)
                 }
             }
         }
@@ -767,7 +778,13 @@ mod connected {
             if !self.current(backend, root) {
                 return Err(HOLD);
             }
-            self.pump_observer(connection, backend, root)?;
+            // Bound owner-side intake work without limiting transport to one
+            // completed batch per idle tick. No candidate/HTTP work runs here.
+            for _ in 0..64 {
+                if !self.pump_observer(connection, backend, root)? {
+                    break;
+                }
+            }
             if connection.namespace_file_operation_pending() {
                 return Ok(());
             }

@@ -237,6 +237,12 @@ pub use native::ObserverConstructionFailure;
 #[cfg(windows)]
 pub use native::{DirectoryObserver, ObserverPoll};
 
+#[cfg(windows)]
+#[path = "directory_notifications_pump.rs"]
+mod pump;
+#[cfg(windows)]
+pub use pump::DirectoryObserverPump;
+
 #[cfg(test)]
 #[path = "directory_notifications_tests.rs"]
 mod tests;

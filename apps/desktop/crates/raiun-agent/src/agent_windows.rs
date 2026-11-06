@@ -2211,11 +2211,29 @@ impl ProviderManager {
                         }
                     }
                     }
+                    // Transport loss is a sticky fact of this original owner.
+                    // Surface it before generic backend revocation can mask it,
+                    // and use the existing hold/cancel/drain path only.
+                    let observer_terminal = connection.as_ref()
+                        .and_then(|active| active.namespace_observer_terminal_reason());
+                    if let Some(reason) = observer_terminal {
+                        if let (Some(dispatcher), Some(active)) = (namespace_dispatcher.as_mut(), connection.as_ref()) {
+                            dispatcher.hold_observer_loss(active, reason);
+                        }
+                        if let Some(binding) = active_binding.as_ref() {
+                            if let Ok(mut notice) = worker_rename_error.lock() {
+                                let current_generation = worker_generation.load(Ordering::Acquire);
+                                if notice.get(current_generation, true).is_none() {
+                                    notice.record(binding.generation, current_generation, windows_namespace_dispatcher::observer_hold(reason));
+                                }
+                            }
+                        }
+                    }
                     if let (Some(dispatcher),Some(active),Some(workers))=(namespace_dispatcher.as_mut(),connection.as_ref(),create_workers.as_mut()) {
                         dispatcher.drain_create(active,workers);
                     }
-                    let mut dispatched_initial = false;
-                    if worker_initial_save_activation.load(Ordering::Acquire) {
+                    let mut dispatched_initial = observer_terminal.is_some();
+                    if !dispatched_initial && worker_initial_save_activation.load(Ordering::Acquire) {
                         // Fresh initial-save work retains priority; never scan recovery here.
                         let result = dispatch_one_initial_edit_checked(
                             connection.as_ref(), backend.as_ref(), active_binding.as_ref(),
@@ -2264,7 +2282,14 @@ impl ProviderManager {
                             } else {producer.tick(active,backend,binding.identity,false)};
                             if let Err(message) = result {
                                 if let Ok(mut notice) = worker_rename_error.lock() {
-                                    notice.record_hresult(binding.generation,worker_generation.load(Ordering::Acquire),message,producer.failure_hresult());
+                                    let current_generation = worker_generation.load(Ordering::Acquire);
+                                    if notice.get(current_generation, true).is_none() {
+                                        if let Some(reason) = active.namespace_observer_terminal_reason() {
+                                            notice.record(binding.generation, current_generation, windows_namespace_dispatcher::observer_hold(reason));
+                                        } else {
+                                            notice.record_hresult(binding.generation,current_generation,message,producer.failure_hresult());
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -7703,7 +7728,15 @@ fn dispatch_one_initial_edit_checked(
     if binding.generation == 0 || generation.load(Ordering::Acquire) != binding.generation {
         return Err("Fresh-save verification paused: account currentness check failed; pending files have been kept.".into());
     }
+    if let Some(reason) = connection.namespace_observer_terminal_reason() {
+        return Err(windows_namespace_dispatcher::observer_hold(reason).into());
+    }
     if backend.is_revoked() {
+        // A terminal transport latch precedes backend revocation. Recheck
+        // after observing it so a race cannot replace its original reason.
+        if let Some(reason) = connection.namespace_observer_terminal_reason() {
+            return Err(windows_namespace_dispatcher::observer_hold(reason).into());
+        }
         // Only the first typed cloud category is retained in memory; no raw
         // server detail or later global error can replace the original fact.
         use raiun_core::backend::ErrorKind;

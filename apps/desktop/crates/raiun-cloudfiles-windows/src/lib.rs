@@ -1172,6 +1172,14 @@ impl ConfiguredRootConnection {
     ) -> Result<NamespaceObservation, Error> {
         self.inner.poll_namespace_observer(wait)
     }
+
+    /// Fixed memory-only terminal transport reason for this original connection.
+    /// This observation grants no hint, inventory or mutation authority.
+    pub fn namespace_observer_terminal_reason(
+        &self,
+    ) -> Option<raiun_control_windows::directory_notifications::RescanReason> {
+        self.inner.namespace_observer_terminal_reason()
+    }
     /// Physical cancellation remains available after authentication revocation.
     /// A pending error retains the same observer/root/connection aggregate.
     pub fn stop_namespace_observer(&mut self, wait: std::time::Duration) -> Result<(), Error> {
