@@ -852,6 +852,9 @@ impl DirectoryCreateTask {
                 trace.enter(PreparationStage::DirectoryRefresh);
                 let (session, intent, report) = *pair;
                 let result = session.refresh(&intent, &report);
+                if result.is_ok() {
+                    trace.enter(PreparationStage::DirectoryRefreshReplyReady);
+                }
                 (
                     Phase::Refresh,
                     DirectoryReplyKind::Refreshed(session, result),

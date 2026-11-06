@@ -41,6 +41,18 @@ pub(super) fn qualify_create_target_with_trace(
     context: RangeReadContext,
     trace: Option<&PreparationTrace>,
 ) -> Result<RemoteEntry, CloudError> {
+    qualify_create_target_route(backend, scope, components, context, trace).map(|(_, root)| root)
+}
+
+/// Keep a freshly discovered route only within this metadata observation.
+/// Every subsequent observation rediscovers it; DAV ancestry remains fresh.
+fn qualify_create_target_route(
+    backend: &OpenCloudPlaceholderBackend,
+    scope: &crate::EditJournalScope,
+    components: &[String],
+    context: RangeReadContext,
+    trace: Option<&PreparationTrace>,
+) -> Result<(raiun_core::backend::CloudSpace, RemoteEntry), CloudError> {
     preparation_stage(trace, PreparationStage::TargetQualification);
     backend
         .ensure_active()
@@ -138,7 +150,7 @@ pub(super) fn qualify_create_target_with_trace(
     backend
         .ensure_active()
         .map_err(|_| refusal(ErrorKind::Unauthorized))?;
-    Ok(root)
+    Ok((target.clone(), root))
 }
 
 impl OpenCloudPlaceholderBackend {
@@ -281,22 +293,33 @@ impl LiveDirectoryCreate<'_> {
             .ok_or_else(|| refusal(ErrorKind::Conflict))?;
         Ok(relative.trim_start_matches('/'))
     }
-    fn check_parent(&self, captured_etag: bool) -> Result<(), CloudError> {
+    fn check_parent(
+        &self,
+        captured_etag: bool,
+    ) -> Result<raiun_core::backend::CloudSpace, CloudError> {
         let scope = &self.destination().parent.scope;
-        let root = qualify_create_target(
+        let (selected, root) = qualify_create_target_route(
             self.backend,
             scope,
             &self.destination().parent.local_components,
             self.context,
+            None,
         )?;
         if root.path.trim_end_matches('/') != self.root_path.trim_end_matches('/') {
             return Err(refusal(ErrorKind::Conflict));
         }
-        let parent = self.backend.client.stat_with_context(
-            &scope.space_id,
-            &self.parent.path,
-            self.context,
-        )?;
+        // The selected Space root was just freshly inspected above. When it
+        // is also the parent, apply the same parent checks to that observation.
+        // Nested parents still walk every ordinary ancestor with fresh DAV.
+        let parent = if self.parent.path == root.path {
+            root
+        } else {
+            self.backend.client.stat_discovered_ordinary_with_context(
+                &selected,
+                &self.parent.path,
+                self.context,
+            )?
+        };
         if !parent.directory
             || parent.encrypted
             || !parent.writable
@@ -306,17 +329,20 @@ impl LiveDirectoryCreate<'_> {
         {
             return Err(refusal(ErrorKind::Conflict));
         }
-        Ok(())
+        Ok(selected)
     }
-    fn child(&self) -> Result<RemoteEntry, CloudError> {
+    fn child(&self, selected: &raiun_core::backend::CloudSpace) -> Result<RemoteEntry, CloudError> {
         let scope = &self.destination().parent.scope;
-        let entry = self.backend.client.recovery_stat_with_context(
-            &scope.space_id,
-            &self.root_path,
-            &scope.root_resource_id,
-            self.relative_path()?,
-            self.context,
-        )?;
+        let entry = self
+            .backend
+            .client
+            .recovery_stat_discovered_space_with_context(
+                selected,
+                &self.root_path,
+                &scope.root_resource_id,
+                self.relative_path()?,
+                self.context,
+            )?;
         if entry.path.trim_end_matches('/') != self.path
             || !entry.directory
             || entry.encrypted
@@ -357,15 +383,18 @@ impl DirectoryCreateRemote for LiveDirectoryCreate<'_> {
     }
     fn preflight(&self, intent: &NamespaceIntent) -> Result<(), CloudError> {
         self.ensure_authorized(intent)?;
-        self.check_parent(true)?;
+        let selected = self.check_parent(true)?;
         let scope = &self.destination().parent.scope;
-        match self.backend.client.recovery_stat_with_context(
-            &scope.space_id,
-            &self.root_path,
-            &scope.root_resource_id,
-            self.relative_path()?,
-            self.context,
-        ) {
+        match self
+            .backend
+            .client
+            .recovery_stat_discovered_space_with_context(
+                &selected,
+                &self.root_path,
+                &scope.root_resource_id,
+                self.relative_path()?,
+                self.context,
+            ) {
             Err(error) if error.kind == ErrorKind::NotFound => (),
             Err(error) => return Err(error),
             Ok(_) => return Err(refusal(ErrorKind::Conflict)),
@@ -417,10 +446,10 @@ impl DirectoryCreateRemote for LiveDirectoryCreate<'_> {
     }
     fn observe(&self, intent: &NamespaceIntent) -> Result<NamespaceDestinationReport, CloudError> {
         self.ensure_authorized(intent)?;
-        self.check_parent(false)?;
-        let before = self.child()?;
-        self.check_parent(false)?;
-        let after = self.child()?;
+        let selected = self.check_parent(false)?;
+        let before = self.child(&selected)?;
+        let selected = self.check_parent(false)?;
+        let after = self.child(&selected)?;
         if before.id != after.id || before.etag != after.etag {
             return Err(refusal(ErrorKind::Conflict));
         }

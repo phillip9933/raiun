@@ -179,6 +179,7 @@ stages! {
     DirectoryPreflight => "directory cloud preflight did not finish",
     DirectorySend => "directory cloud creation did not finish",
     DirectoryRefresh => "directory result refresh did not finish",
+    DirectoryRefreshReplyReady => "directory result refresh finished but owner advancement did not finish",
     DirectoryResultPersistence => "directory result persistence did not finish",
     NativeDirectoryPublication => "directory native publication did not finish",
     LocalCompletionPersistence => "directory completion persistence did not finish",

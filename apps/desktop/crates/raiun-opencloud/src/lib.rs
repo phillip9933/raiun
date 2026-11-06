@@ -2247,6 +2247,36 @@ fn validate_recovery_entry(entry: &RemoteEntry, expected_path: &str) -> Result<(
     Ok(())
 }
 
+fn validate_recovery_root_with_stat(
+    remote_root_path: &str,
+    expected_root_id: &str,
+    stat: impl FnOnce() -> Result<RemoteEntry, CloudError>,
+) -> Result<(), CloudError> {
+    if expected_root_id.is_empty()
+        || expected_root_id.len() > MAX_DAV_ENTRY
+        || expected_root_id.chars().any(char::is_control)
+        || !remote_root_path.starts_with('/')
+        || remote_root_path.contains('\\')
+        || remote_root_path.chars().any(char::is_control)
+        || remote_root_path
+            .split('/')
+            .any(|part| matches!(part, "." | ".."))
+        || (remote_root_path != "/"
+            && remote_root_path
+                .trim_end_matches('/')
+                .split('/')
+                .skip(1)
+                .any(str::is_empty))
+    {
+        return Err(invalid("recovery root identity is invalid"));
+    }
+    let root = stat()?;
+    if root.id != expected_root_id || !root.directory || root.encrypted {
+        return Err(conflict("recovery root identity changed"));
+    }
+    Ok(())
+}
+
 fn ensure_operation_active(operation: Option<&OperationCancellation>) -> Result<(), CloudError> {
     if operation.is_some_and(OperationCancellation::is_cancelled) {
         Err(CloudError::new(
@@ -2411,6 +2441,46 @@ impl OpenCloudClient {
         Ok(entry)
     }
 
+    /// Stat ordinary metadata using a Space from this client's immediately
+    /// preceding fresh Graph discovery in the same bounded provider check.
+    /// Only the Graph route is reused: root and every ancestor are inspected
+    /// afresh through DAV on every call. Never retain this route across checks,
+    /// mutations, preflight, send or refresh phases.
+    pub fn stat_discovered_ordinary_with_context(
+        &self,
+        space: &CloudSpace,
+        path: &str,
+        context: RangeReadContext,
+    ) -> Result<RemoteEntry, CloudError> {
+        let _guard = RangeContextGuard::enter(context);
+        let security = self.security_generation.load(Ordering::Acquire);
+        self.ensure_context_current(context)?;
+        self.ensure_security_current(security)?;
+        let result = (|| {
+            let root_url = self.discovered_space_root_url(space, context)?;
+            if space.encrypted {
+                return Err(CloudError::new(
+                    ErrorKind::Unsupported,
+                    "encrypted Spaces are unavailable to ordinary DAV operations",
+                ));
+            }
+            if is_vault_path(path) {
+                return Err(CloudError::new(
+                    ErrorKind::Unsupported,
+                    "encrypted vault folders are unavailable to ordinary DAV operations",
+                ));
+            }
+            let url = append_logical_path(&root_url, path)?;
+            self.ensure_plain_ancestors_with_context(space, path, false, Some(context))?;
+            self.ensure_context_current(context)?;
+            self.ensure_security_current(security)?;
+            self.stat_at_dav(&url, path)
+        })();
+        self.ensure_context_current(context)?;
+        self.ensure_security_current(security)?;
+        result
+    }
+
     /// Send at most one ordinary MKCOL under an exact recovery root/context.
     /// `Err` means no MKCOL was sent. Once send begins, transport/unknown-status
     /// failures are uncertain. Bare 201 is not an atomic created-ID receipt.
@@ -2521,6 +2591,39 @@ impl OpenCloudClient {
         self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
         self.ensure_context_current(context)?;
         Ok(entry)
+    }
+
+    /// As `recovery_stat_with_context`, reusing only an immediately preceding
+    /// fresh Graph-discovered route from this same client/provider check.
+    /// Exact root-before, child and root-after DAV observations all remain.
+    pub fn recovery_stat_discovered_space_with_context(
+        &self,
+        space: &CloudSpace,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        context: RangeReadContext,
+    ) -> Result<RemoteEntry, CloudError> {
+        let _guard = RangeContextGuard::enter(context);
+        let security = self.security_generation.load(Ordering::Acquire);
+        self.ensure_context_current(context)?;
+        self.ensure_security_current(security)?;
+        let result = (|| {
+            let path = recovery_target_path(remote_root_path, relative_path)?;
+            let check_root = || {
+                validate_recovery_root_with_stat(remote_root_path, expected_root_id, || {
+                    self.stat_discovered_ordinary_with_context(space, remote_root_path, context)
+                })
+            };
+            check_root()?;
+            let entry = self.stat_discovered_ordinary_with_context(space, &path, context)?;
+            validate_recovery_entry(&entry, &path)?;
+            check_root()?;
+            Ok(entry)
+        })();
+        self.ensure_context_current(context)?;
+        self.ensure_security_current(security)?;
+        result
     }
 
     /// Conditionally upload a bounded recovered edit directly from memory.
@@ -2755,29 +2858,9 @@ impl OpenCloudClient {
         remote_root_path: &str,
         expected_root_id: &str,
     ) -> Result<(), CloudError> {
-        if expected_root_id.is_empty()
-            || expected_root_id.len() > MAX_DAV_ENTRY
-            || expected_root_id.chars().any(char::is_control)
-            || !remote_root_path.starts_with('/')
-            || remote_root_path.contains('\\')
-            || remote_root_path.chars().any(char::is_control)
-            || remote_root_path
-                .split('/')
-                .any(|part| matches!(part, "." | ".."))
-            || (remote_root_path != "/"
-                && remote_root_path
-                    .trim_end_matches('/')
-                    .split('/')
-                    .skip(1)
-                    .any(str::is_empty))
-        {
-            return Err(invalid("recovery root identity is invalid"));
-        }
-        let root = CloudBackend::stat(self, space, remote_root_path)?;
-        if root.id != expected_root_id || !root.directory || root.encrypted {
-            return Err(conflict("recovery root identity changed"));
-        }
-        Ok(())
+        validate_recovery_root_with_stat(remote_root_path, expected_root_id, || {
+            CloudBackend::stat(self, space, remote_root_path)
+        })
     }
 
     fn ensure_context_current(&self, context: RangeReadContext) -> Result<(), CloudError> {
@@ -2802,17 +2885,11 @@ impl OpenCloudClient {
         Ok(())
     }
 
-    /// Inspect the root of a Space returned by this client's immediately
-    /// preceding `spaces_with_context` call. This metadata-only operation
-    /// deliberately returns encryption markers instead of routing through
-    /// ordinary plaintext DAV guards, so a trusted provider can exclude an
-    /// encrypted Space without ever listing its contents.
-    pub fn stat_discovered_space_root_with_context(
+    fn discovered_space_root_url(
         &self,
         space: &CloudSpace,
         context: RangeReadContext,
-    ) -> Result<RemoteEntry, CloudError> {
-        let _guard = RangeContextGuard::enter(context);
+    ) -> Result<Url, CloudError> {
         if !self.provider_generation_is_current(context.token_generation)
             || space.id.is_empty()
             || space.id.len() > MAX_DAV_ENTRY
@@ -2836,6 +2913,21 @@ impl OpenCloudClient {
                 "Graph drive WebDAV URL is outside the configured origin",
             ));
         }
+        Ok(root_url)
+    }
+
+    /// Inspect the root of a Space returned by this client's immediately
+    /// preceding `spaces_with_context` call. This metadata-only operation
+    /// deliberately returns encryption markers instead of routing through
+    /// ordinary plaintext DAV guards, so a trusted provider can exclude an
+    /// encrypted Space without ever listing its contents.
+    pub fn stat_discovered_space_root_with_context(
+        &self,
+        space: &CloudSpace,
+        context: RangeReadContext,
+    ) -> Result<RemoteEntry, CloudError> {
+        let _guard = RangeContextGuard::enter(context);
+        let root_url = self.discovered_space_root_url(space, context)?;
         let mut found = None;
         self.propfind_with_context(
             &root_url,

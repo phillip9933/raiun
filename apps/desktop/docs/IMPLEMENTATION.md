@@ -5144,3 +5144,30 @@ completion or a measured speed improvement for the replacement candidate.
 The shared path-correspondence helper also compiles on the host because the
 Windows crate's read-only metadata code is checked in the Linux workspace.
 This changes no path policy or Linux/Windows runtime selection.
+
+### Directory readback metadata work — 7 November 2026
+
+The subsequent Windows copy reached uploads but stopped with the original
+directory deadline observed at result refresh. That boundary alone does not
+prove that HTTP was still running: a successful worker reply could also be
+waiting for owner advancement. A separate fixed reply-ready stage now makes
+that distinction without exposing paths, server errors or private values.
+
+Directory preflight and readback now reuse only the freshly discovered Graph
+route within each parent check and its immediately following child lookup.
+Each next parent check discovers the route again. SDK metadata calls retain
+fresh DAV checks of the root and every ancestor, exact root-before/child/root-
+after correspondence, same-origin URL validation and the original deadline,
+credential generation and security fences. For a Space-root parent, the
+freshly qualified root also supplies the parent observation, with identical
+identity, permission, encryption and strong version-tag checks. Nested parents
+still receive their full fresh ancestry inspection.
+
+At a root-parent target, source counting reduces one directory observation
+from a minimum of 12 Graph requests and 24 DAV requests to 3 Graph requests
+and 18 DAV requests, before pagination or retries. These are source-derived
+counts, not captured requests or measured copy acceleration. Both child
+observations and their ID/version comparison, the final parent check, verified
+result persistence before refresh, native custody and conditional mutation
+rules remain. No deadline extension, cached negative encryption/health result,
+old-record replay or owner scheduling-barrier exception is introduced.
