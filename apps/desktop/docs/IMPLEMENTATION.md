@@ -4709,3 +4709,27 @@ queries share one allowance bounded by the original job and the existing
 task stays in flight, preserving the all-Prepare barrier and independent file
 workers. No SDK request, capture, publication, upload or old-record action is
 retried. Other failures and unresolved recovery results still stop preparation.
+
+### Original Windows file conversion journal phase — 6 November 2026
+
+New ordinary files and plain-file replacements establish a separate journal
+revision after their own successful placeholder conversion. The original
+exclusive owner, referenced file, pre-conversion metadata/revision and full
+content proof remain pinned. Conversion is attempted once without dehydration
+or marking the file in sync. A negative returned conversion revision refuses
+completion; a positive returned revision must match the same file's current
+journal before proceeding. A zero conversion output alone grants no authority.
+
+After checking the exact placeholder identity, full resident shape, path and
+known content, the same referenced file receives one journal close-record
+barrier. Its positive output must immediately match a FileID-bound journal read.
+The full content, shape and original scope are checked again at that unchanged
+positive revision before the original one-use completion claim and conditional
+in-sync update. The in-sync update never receives a zero or null revision;
+post-update content, identity, journal and scope verification remain required.
+Any failure keeps protected recovery. The barrier is not retried or used to
+rebase a failed update, reopen a file, replay an upload or adopt old history.
+Already-placeholder continuation retains its existing captured-revision path.
+
+This corrects a native completion stop observed after conversion. Compilation
+and packaged artifacts alone do not establish native completion or upload speed.

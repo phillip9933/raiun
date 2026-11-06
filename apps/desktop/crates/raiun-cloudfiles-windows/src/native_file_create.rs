@@ -453,19 +453,32 @@ impl ReplacementBody {
                 null_mut(),
             )
         };
-        if hr < 0 {
+        if hr != 0 {
             return Err(native_error("convert admitted replacement", hr));
         }
-        if converted_usn <= 0 {
+        if converted_usn < 0 {
             return Err(Error::EditRecoveryUnavailable);
         }
         verify_completion_identity(self.source.0, identity)?;
+        validate_converted(&reference, self.snapshot, &self.path, identity, false)?;
         hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
-        let mut usn = completion_usn(reference.raw, self.snapshot.identity.file_index)?;
-        if usn <= 0 || usn != converted_usn || stopped() {
+        let observed_usn = completion_usn(reference.raw, self.snapshot.identity.file_index)?;
+        if observed_usn <= 0
+            || (converted_usn > 0 && observed_usn != converted_usn)
+            || stopped()
+            || job.is_stopped()
+        {
             return Err(Error::ConfiguredRootChanged);
         }
+        let mut usn = journal_converted_usn(&reference, self.snapshot.identity.file_index)?;
+        hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
         validate_converted(&reference, self.snapshot, &self.path, identity, false)?;
+        if stopped()
+            || job.is_stopped()
+            || completion_usn(reference.raw, self.snapshot.identity.file_index)? != usn
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
         if !claim() {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -1522,26 +1535,54 @@ impl ConfiguredRootConnection {
                     null_mut(),
                 )
             };
-            if hr < 0 {
+            if hr != 0 {
                 return Err(native_error("convert fresh file-create", hr));
             }
             trace.enter(CompletionStage::ConvertedUsn);
-            if converted_usn <= 0 {
+            if converted_usn < 0 {
                 return Err(Error::EditRecoveryUnavailable);
             }
             trace.enter(CompletionStage::PlaceholderIdentity);
             verify_completion_identity(source.0, identity)?;
+            trace.enter(CompletionStage::ConvertedShape);
+            validate_converted(&final_reference, snapshot, &expected, identity, false)?;
             trace.enter(CompletionStage::SourceHashAfterConvert);
             hash_source(&final_reference, snapshot.file_size, &capture_job, &digest)?;
             trace.enter(CompletionStage::ConvertedUsnRead);
-            let mut compare_usn =
-                completion_usn(final_reference.raw, snapshot.identity.file_index)?;
+            let observed_usn = completion_usn(final_reference.raw, snapshot.identity.file_index)?;
             trace.enter(CompletionStage::ConvertedUsnCompare);
-            if compare_usn <= 0 || compare_usn != converted_usn {
+            if observed_usn <= 0 || (converted_usn > 0 && observed_usn != converted_usn) {
                 return Err(Error::ConfiguredRootChanged);
             }
-            trace.enter(CompletionStage::ConvertedShape);
+            trace.enter(CompletionStage::OriginalContext);
+            admission
+                .check(backend)
+                .map_err(|_| Error::ProviderUnavailable)?;
+            trace.enter(CompletionStage::RootIdentity);
+            root.verify_identity(true)?;
+            trace.enter(CompletionStage::RootRegistration);
+            root.verify_registered()?;
+            trace.enter(CompletionStage::OriginalContext);
+            if !inside_publication() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            trace.enter(CompletionStage::ConversionJournal);
+            let mut compare_usn =
+                journal_converted_usn(&final_reference, snapshot.identity.file_index)?;
+            trace.enter(CompletionStage::ConversionJournalStable);
+            hash_source(&final_reference, snapshot.file_size, &capture_job, &digest)?;
             validate_converted(&final_reference, snapshot, &expected, identity, false)?;
+            admission
+                .check(backend)
+                .map_err(|_| Error::ProviderUnavailable)?;
+            root.verify_identity(true)?;
+            root.verify_registered()?;
+            if !inside_publication() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            if completion_usn(final_reference.raw, snapshot.identity.file_index)? != compare_usn {
+                return Err(Error::ConfiguredRootChanged);
+            }
             trace.enter(CompletionStage::CompletionClaim);
             if !ticket.claim_completion() {
                 return Err(Error::EditRecoveryUnavailable);
@@ -1625,6 +1666,41 @@ impl ConfiguredRootConnection {
             RemoteVerifiedLocalIncomplete
         })
     }
+}
+
+// One journal phase for an already verified conversion on the SAME referenced
+// exclusive owner. Never repeat it to rebase a refused comparison or update.
+// The journal record is no data flush or writer fence: authority remains the
+// retained owner, exact metadata/content/current checks and positive USN CAS.
+fn journal_converted_usn(
+    source: &SourceReference<'_>,
+    expected_file_id: u64,
+) -> Result<i64, Error> {
+    const FSCTL_WRITE_USN_CLOSE_RECORD: u32 = 0x0009_00ef;
+    let mut usn = 0_i64;
+    let mut io = CompletionIo::new()?;
+    // SAFETY: the original referenced raw handle, exact aligned output and
+    // owned OVERLAPPED/event remain live until definitive I/O completion.
+    // This appends a close record without changing file data or permissions.
+    let result = unsafe {
+        DeviceIoControl(
+            source.raw,
+            FSCTL_WRITE_USN_CLOSE_RECORD,
+            null(),
+            0,
+            (&mut usn as *mut i64).cast(),
+            size_of::<i64>() as u32,
+            null_mut(),
+            (&mut io.overlapped as *mut CompletionOverlapped).cast(),
+        )
+    };
+    if io.finish(source.raw, result)? != size_of::<i64>() as u32
+        || usn <= 0
+        || completion_usn(source.raw, expected_file_id)? != usn
+    {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    Ok(usn)
 }
 
 fn hash_source(
