@@ -3396,6 +3396,18 @@ impl ConfiguredRootConnection {
             check_job()
         })
     }
+    pub(super) fn has_pending_initial_edit(&self) -> Result<bool, Error> {
+        if !self.connected {
+            return Err(Error::ConnectionStateInvalid);
+        }
+        // Advisory empty-queue scheduling only; every actual take retains its
+        // original root/path/registration checks before removing a receipt.
+        self.state
+            .initial_edits
+            .has_pending()
+            .map_err(|_| Error::EditRecoveryUnavailable)
+    }
+
     pub(super) fn take_initial_edit(&self) -> Result<Option<crate::PendingInitialEdit>, Error> {
         if !self.connected {
             return Err(Error::ConnectionStateInvalid);

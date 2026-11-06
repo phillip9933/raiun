@@ -1676,6 +1676,13 @@ impl ConfiguredRootConnection {
             .acknowledge_verified_edit(local_components, publication)
     }
 
+    /// Current memory-only scheduling hint; never a dispatch or root proof.
+    /// An empty queue avoids idle inspection. Every nonempty take must still
+    /// pass all existing root, identity, registration and receipt checks.
+    pub fn has_pending_initial_edit(&self) -> Result<bool, Error> {
+        self.inner.has_pending_initial_edit()
+    }
+
     /// Take one newly captured close receipt from this exact live connection.
     /// This never scans recovered edits or authorizes a remote mutation.
     pub fn take_initial_edit(&self) -> Result<Option<PendingInitialEdit>, Error> {

@@ -2217,19 +2217,20 @@ impl ProviderManager {
                     let mut dispatched_initial = false;
                     if worker_initial_save_activation.load(Ordering::Acquire) {
                         // Fresh initial-save work retains priority; never scan recovery here.
-                        let result = dispatch_one_initial_edit(
+                        let result = dispatch_one_initial_edit_checked(
                             connection.as_ref(), backend.as_ref(), active_binding.as_ref(),
                             &worker_generation);
                         dispatched_initial = !matches!(&result, Ok(None));
                         if dispatched_initial {
-                            windows_headless_edits::record_initial_outcome(&worker_ordinary_edits, active_binding.as_ref(), &result);
+                            let summary = result.map_err(|failure| failure.message().to_owned());
+                            windows_headless_edits::record_initial_outcome(&worker_ordinary_edits, active_binding.as_ref(), &summary);
                         }
-                        if result.is_err() {
+                        if let Err(failure) = result {
                             if let Some(binding) = active_binding.as_ref() {
                                 if let Ok(mut notice) = worker_rename_error.lock() {
                                     let current_generation = worker_generation.load(Ordering::Acquire);
                                     if notice.get(current_generation, true).is_none() {
-                                        notice.record(binding.generation, current_generation, "Fresh-save verification paused; pending files have been kept.");
+                                        notice.record_hresult(binding.generation, current_generation, failure.message(), failure.hresult());
                                     }
                                 }
                             }
@@ -2238,7 +2239,7 @@ impl ProviderManager {
                         if dispatched_initial {
                             if let Ok(mut observation) = worker_initial_save_test_observation.lock() {
                                 *observation = Some(match &result {
-                                    Err(message) => format!("error: {message}"),
+                                    Err(failure) => format!("error: {}", failure.message()),
                                     Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { .. })) => "verified_applied".into(),
                                     Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Conflict(_))) => "conflict".into(),
                                     Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Ambiguous)) => "ambiguous".into(),
@@ -7662,12 +7663,40 @@ fn verified_account_roots(
     ))
 }
 
+// Preserve the existing test/convenience result surface. Production uses the
+// typed helper so fixed phase/HRESULT context survives into the existing Notice.
+#[cfg(test)]
 fn dispatch_one_initial_edit(
     connection: Option<&raiun_cloudfiles_windows::ConfiguredRootConnection>,
     backend: Option<&Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>>,
     binding: Option<&ActiveProviderBinding>,
     generation: &Arc<AtomicU64>,
 ) -> Result<Option<raiun_cloudfiles_windows::ReconciliationOutcome>, String> {
+    dispatch_one_initial_edit_checked(connection, backend, binding, generation)
+        .map_err(|failure| failure.message().to_owned())
+}
+
+fn initial_save_native_failure(
+    message: &'static str,
+    error: raiun_cloudfiles_windows::Error,
+) -> windows_file_create_producer::FailureContext {
+    let hresult = match error {
+        raiun_cloudfiles_windows::Error::Native { hresult, .. } => Some(hresult as u32),
+        _ => None,
+    };
+    windows_file_create_producer::FailureContext::new(message, hresult)
+}
+
+fn dispatch_one_initial_edit_checked(
+    connection: Option<&raiun_cloudfiles_windows::ConfiguredRootConnection>,
+    backend: Option<&Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>>,
+    binding: Option<&ActiveProviderBinding>,
+    generation: &Arc<AtomicU64>,
+) -> Result<
+    Option<raiun_cloudfiles_windows::ReconciliationOutcome>,
+    windows_file_create_producer::FailureContext,
+> {
+    use windows_file_create_producer::FailureContext;
     let (Some(connection), Some(backend), Some(binding)) = (connection, backend, binding) else {
         return Ok(None);
     };
@@ -7675,21 +7704,29 @@ fn dispatch_one_initial_edit(
         || generation.load(Ordering::Acquire) != binding.generation
         || backend.is_revoked()
     {
-        return Err("The account changed before initial save".into());
+        return Err("Fresh-save verification paused: account currentness check failed; pending files have been kept.".into());
+    }
+    // Empty fresh-queue state is scheduling information only. A concurrent
+    // enqueue waits for the next tick; nonempty work retains every root proof
+    // before take/pop and never gains mutation authority from this hint.
+    if !connection.has_pending_initial_edit().map_err(|error| {
+        initial_save_native_failure("Fresh-save verification paused: fresh queue availability check failed; pending files have been kept.", error)
+    })? {
+        return Ok(None);
     }
     let root_lease = pin_registered_configured_root(&binding.path, binding.identity)
-        .map_err(|_| "The connected Windows root changed".to_owned())?;
+        .map_err(|error| initial_save_native_failure("Fresh-save verification paused: registered root lease check failed; pending files have been kept.", error))?;
     if root_lease.identity() != binding.identity {
-        return Err("The Windows root changed".into());
+        return Err("Fresh-save verification paused: root identity check failed; pending files have been kept.".into());
     }
     let Some(mut pending) = connection
         .take_initial_edit()
-        .map_err(|_| "The fresh edit handoff is unavailable".to_owned())?
+        .map_err(|error| initial_save_native_failure("Fresh-save verification paused: fresh handoff inspection failed; pending files have been kept.", error))?
     else {
         return Ok(None);
     };
     if !pending.matches_provider(backend.scope(), binding.identity) {
-        return Err("The fresh edit belongs to a different provider".into());
+        return Err("Fresh-save verification paused: fresh receipt provider check failed; pending files have been kept.".into());
     }
     let expected = binding.generation;
     let generation_check = Arc::clone(generation);
@@ -7711,42 +7748,41 @@ fn dispatch_one_initial_edit(
             };
             let dispatched = pending
                 .dispatch_verified(&remote)
-                .map_err(|_| "The initial save requires recovery review".to_owned())?;
+                .map_err(|_| FailureContext::from("Fresh-save verification paused: fresh receipt dispatch failed; pending files have been kept."))?;
             if let Some(proof) = dispatched.proof {
                 let location = dispatched.location.ok_or_else(|| {
                     #[cfg(all(test, debug_assertions))]
                     eprintln!("synthetic_save_completion_missing_location");
-                    "The saved edit needs local recovery review".to_owned()
+                    FailureContext::from("Fresh-save verification paused: verified result has no local location; pending files have been kept.")
                 })?;
                 if generation.load(Ordering::Acquire) != binding.generation
                     || location.root_identity() != binding.identity
                     || location.local_file_identity() != proof.metadata().local_file
                 {
-                    return Err("The local save binding changed".to_owned());
+                    return Err(FailureContext::from("Fresh-save verification paused: local completion binding check failed; pending files have been kept."));
                 }
                 let publication = session
                     .prepare_verified_edit(location.identity(), &proof)
-                    .map_err(|_| "The saved cloud version changed".to_owned())?;
+                    .map_err(|_| FailureContext::from("Fresh-save verification paused: verified publication preparation failed; pending files have been kept."))?;
                 let components: Vec<&str> =
                     location.components().iter().map(String::as_str).collect();
                 connection
                     .acknowledge_verified_edit(&components, &publication)
                     .map_err(|error| {
+                        let failure = initial_save_native_failure("Fresh-save verification paused: native completion failed; pending files have been kept.", error);
                         #[cfg(all(test, debug_assertions))]
-                        eprintln!("synthetic_save_completion_rejected: {error}");
-                        #[cfg(not(all(test, debug_assertions)))]
-                        let _ = error;
-                        "The saved edit needs local recovery review".to_owned()
+                        eprintln!("synthetic_save_completion_rejected: {}", failure.message());
+                        failure
                     })?;
             } else if matches!(
                 dispatched.outcome,
                 raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { .. }
             ) {
-                return Err("The saved edit needs fresh verification".to_owned());
+                return Err(FailureContext::from("Fresh-save verification paused: verified outcome has no readback proof; pending files have been kept."));
             }
             Ok(Some(dispatched.outcome))
         })
-        .map_err(|_| "Could not verify the fresh edit's current Space root".to_owned())?
+        .map_err(|_| FailureContext::from("Fresh-save verification paused: current Space session check failed; pending files have been kept."))?
 }
 
 enum RecoveryRemoteHandle<'a> {

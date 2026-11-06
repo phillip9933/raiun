@@ -4838,3 +4838,22 @@ created without a genuine observed event remain retained; this ordering fix
 cannot adopt or replay them. Windows GUI and CLI share the dispatcher; Linux
 startup is unchanged. Source review and compilation do not prove a completed
 native transfer or a speed improvement.
+
+### Windows idle fresh-save scheduling — 6 November 2026
+
+The initial-save dispatcher checks the current in-memory queue before inspecting
+the registered root. An empty queue yields the owner tick to namespace work; a
+concurrent enqueue waits for the next tick. This hint removes no receipt and
+grants no root, file or mutation authority. Every nonempty take retains the
+original root identity, path, registration, account and receipt checks before
+popping work, followed by the same dispatch, readback and completion proofs.
+Queue unavailability still refuses work. No persistent cache or recovered-record
+adoption, replay, acknowledgment or flag repair is introduced.
+
+Initial-save failures now preserve a fixed source-selected phase in the existing
+generation-scoped notice. Only a typed native failure can append its actual
+HRESULT; raw messages, paths, URLs and provider data are not displayed. Existing
+notice priority and headless outcome recording remain intact. Windows GUI and
+CLI share this path; Linux runtime behavior is unchanged. The previous generic
+physical-laptop refusal does not establish its inner cause, and this source
+change does not prove completed uploads or a measured speed improvement.
