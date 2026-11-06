@@ -123,6 +123,15 @@ impl<T: Send + 'static, R: Send + 'static> Executor<T, R> {
         self.collect();
         self.ready.len() == self.outstanding.len()
     }
+    /// Scheduling observation only. Every outstanding task must have an actual
+    /// collected reply unless its exact accepted ID is explicitly exempted.
+    /// No reply is consumed and no outstanding capacity is released here.
+    pub(crate) fn all_completed_except(&mut self, exempt: &[u64]) -> bool {
+        self.collect();
+        self.outstanding.iter().all(|id| {
+            exempt.contains(id) || self.ready.iter().any(|completion| completion.id == *id)
+        })
+    }
     pub(crate) fn poll_for(&mut self, id: u64) -> Option<Completion<R>> {
         self.collect();
         let index = self.ready.iter().position(|result| result.id == id)?;

@@ -23,6 +23,12 @@ pub(crate) enum Reply {
     Directory(Box<DirectoryCreateReply>),
 }
 impl Task {
+    fn requires_pre_capture_barrier(&self) -> bool {
+        match self {
+            Self::File(task) => task.requires_pre_capture_barrier(),
+            Self::Vault(_) | Self::Directory(_) => true,
+        }
+    }
     fn kind(&self) -> CreateKind {
         match self {
             Self::File(_) => CreateKind::File,
@@ -222,6 +228,11 @@ struct Candidate {
     job: StreamedRecoveryJob,
     current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
 }
+#[derive(Clone, Copy)]
+struct Flight {
+    id: u64,
+    requires_pre_capture_barrier: bool,
+}
 struct Lane {
     backend: Weak<OpenCloudPlaceholderBackend>,
     generation: Arc<AtomicU64>,
@@ -230,7 +241,7 @@ struct Lane {
     candidate: Option<Candidate>,
     cancel_on_drop: Option<CancelOnDrop>,
     deferred: Option<Task>,
-    flight: Option<u64>,
+    flight: Option<Flight>,
     held: bool,
     allow_file: bool,
     allow_directory: bool,
@@ -405,7 +416,8 @@ impl Lane {
             self.stop(connection);
             return Err(kind_hold!(kind, "original job stopped").into());
         }
-        let step = if let Some(id) = self.flight {
+        let step = if let Some(flight) = self.flight {
+            let id = flight.id;
             let Some(done) = workers.poll_for(id) else {
                 return Ok(false);
             };
@@ -599,9 +611,15 @@ impl Lane {
                 self.stop(connection);
                 return Err(kind_hold!(kind, "executor task kind mismatch").into());
             }
+            let requires_pre_capture_barrier = task.requires_pre_capture_barrier();
             match workers.submit(task) {
                 Ok(id) => {
-                    self.flight = Some(id);
+                    // Retain classification only with this exact accepted ID.
+                    // A refused submission retains its original task instead.
+                    self.flight = Some(Flight {
+                        id,
+                        requires_pre_capture_barrier,
+                    });
                     self.prepare_retry_after = None;
                 }
                 Err(task) => self.deferred = Some(task),
@@ -755,14 +773,34 @@ impl Producer {
         {
             return Ok(false);
         }
+        let reply_ready = match self.lanes[index].flight {
+            Some(flight) if flight.requires_pre_capture_barrier => self.round_ready,
+            Some(_) => {
+                // Only accepted ordinary-file Send/Refresh flights may overlap.
+                // Recompute from the current lanes on every step: any newly
+                // submitted Prepare or unknown executor task must really finish
+                // before an owner advance can contend for its quota/custody.
+                let post_capture = self
+                    .lanes
+                    .iter()
+                    .filter_map(|lane| {
+                        lane.flight
+                            .filter(|flight| !flight.requires_pre_capture_barrier)
+                            .map(|flight| flight.id)
+                    })
+                    .collect::<Vec<_>>();
+                workers.all_completed_except(&post_capture)
+            }
+            None => true,
+        };
         let lane = &mut self.lanes[index];
         lane.retry_after_wave = false;
         if inherit {
             lane.ordinary_candidate = true;
         }
-        // Prepare's unresolved-recovery preflight is unchanged. Collect every
-        // reply in the wave before the owner captures any sibling body.
-        if lane.flight.is_some() && !self.round_ready {
+        // Prepare, Directory and Vault keep the exact original full barrier.
+        // Post-capture advancement still waits for every metadata/health task.
+        if !reply_ready {
             return Ok(false);
         }
         lane.step(

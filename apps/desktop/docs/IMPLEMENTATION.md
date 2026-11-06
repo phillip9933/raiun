@@ -4942,3 +4942,28 @@ Windows GUI and CLI share this transport; Linux runtime is unchanged. The prior
 physical stop proves a zero-byte completion, but not why the OS produced it.
 Compilation and source review do not establish completed copies or elapsed
 upload speed.
+
+### Windows post-capture reply scheduling — 6 November 2026
+
+An ordinary file's completed Send or Refresh reply can advance while other
+post-capture workers continue, instead of waiting for every worker in the wave.
+The producer records a scheduling-only classification alongside the exact
+accepted flight ID. File Prepare, Directory, Vault and unclassified tasks retain
+the original full completion barrier. A declined submission keeps its original
+task and creates no exempt flight.
+
+Before each post-capture advance, the executor collects but does not consume
+replies or release capacity. Every outstanding ID must either have an actual
+ready reply or be an explicitly classified current post-capture flight. The
+producer recomputes that set each step, so new or unknown metadata work blocks
+advancement immediately. Executing preparation/health scans cannot race the
+owner's temporary quota mutations. Existing reply identity/phase/disposal,
+account/root/job, custody, source hashing, native acknowledgment and conditional
+cloud-write checks remain unchanged. Wire PUTs remain ordered per Space root;
+this change neither enlarges the four-worker pool nor removes health scans.
+
+A ready Refresh reply does not itself hold the global quota lock; this change
+does not claim to repair such a deadlock. It removes demonstrated scheduling
+head-of-line waiting. The phase responsible for the previous incomplete physical
+copy and the elapsed improvement still require actual observation. Windows GUI
+and CLI share this producer; Linux runtime behavior is unchanged.

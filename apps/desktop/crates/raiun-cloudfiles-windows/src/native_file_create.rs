@@ -638,6 +638,16 @@ impl ReplyKind {
     }
 }
 impl FileCreateTask {
+    /// Scheduling classification only. Prepare must retain the complete wave
+    /// barrier before any native capture. No result or mutation authority is
+    /// exposed, and an absent/unclassified task retains that barrier.
+    pub fn requires_pre_capture_barrier(&self) -> bool {
+        !matches!(
+            self.kind.as_ref(),
+            Some(TaskKind::Send(_) | TaskKind::Refresh(_))
+        )
+    }
+
     /// No worker is spawned here. Every SDK source worker is joined before return.
     pub fn execute(mut self) -> FileCreateReply {
         let kind = match self.kind.take().expect("private single-use create task") {
