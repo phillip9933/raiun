@@ -492,8 +492,8 @@ impl FileCreateStore {
         if cancelled() {
             return Err(StoreError::Snapshot(SnapshotError::Cancelled));
         }
-        let _quota = self.reserve((META_LIMIT as u64) * 4, 7)?;
-        let prior = self.discover_all()?;
+        let quota = self.reserve((META_LIMIT as u64) * 4, 7)?;
+        let prior = self.discover_all_while_locked(&*quota)?;
         let desired = destination(&draft)?;
         for record in prior {
             let old = destination(record.intent())?;
@@ -578,12 +578,51 @@ impl FileCreateStore {
                 .collect())
         })
     }
-    fn discover_all(&self) -> Result<Vec<StoredFileJoin>, StoreError> {
-        self.discover_all_bounded(&mut Budget::new(self.base.policy))
+    /// Existing-only discovery under this exact root's persistent quota lease.
+    /// Startup metadata readers may reuse scope listings only while retaining
+    /// this lease. Callers outside an existing quota lease keep their independent discovery.
+    #[cfg(windows)]
+    pub(crate) fn discover_existing_locked_bounded(
+        &self,
+        budget: &mut DiscoveryBudget,
+    ) -> Result<Vec<StoredFileJoin>, StoreError> {
+        self.base.root.verify()?;
+        // Do not use acquire_lock: missing historical evidence must not create
+        // a replacement quota file, catalog, directory or writer context.
+        let mut quota = self.base.root.open_quota_lock()?;
+        if quota.len()? != 0 {
+            return Err(StoreError::CorruptEvidence);
+        }
+        quota.lock_exclusive()?;
+        quota.verify()?;
+        self.base.root.verify()?;
+        let result = budget.within_policy(self.base.policy, |budget| {
+            Ok(self
+                .discover_all_bounded_with_history(budget, Some(&*quota))?
+                .into_iter()
+                .filter(|r| r.key.scope == self.base.scope)
+                .collect())
+        });
+        quota.verify()?;
+        self.base.root.verify()?;
+        result
+    }
+    fn discover_all_while_locked(
+        &self,
+        quota: &dyn PinnedRead,
+    ) -> Result<Vec<StoredFileJoin>, StoreError> {
+        self.discover_all_bounded_with_history(&mut Budget::new(self.base.policy), Some(quota))
     }
     fn discover_all_bounded(
         &self,
         budget: &mut DiscoveryBudget,
+    ) -> Result<Vec<StoredFileJoin>, StoreError> {
+        self.discover_all_bounded_with_history(budget, None)
+    }
+    fn discover_all_bounded_with_history(
+        &self,
+        budget: &mut DiscoveryBudget,
+        quota: Option<&dyn PinnedRead>,
     ) -> Result<Vec<StoredFileJoin>, StoreError> {
         let names = self.base.root.entries(budget.remaining_entries())?;
         budget.entries(names.len())?;
@@ -616,11 +655,44 @@ impl FileCreateStore {
             if result.len() + ids.len() > MAX_RECORDS {
                 return Err(StoreError::ScanLimit);
             }
-            for id in ids {
-                result.push(
-                    self.load_names(&*directory, &id, &scope, &names, budget)?
-                        .record,
-                );
+            if let Some(quota) = quota {
+                quota.verify()?;
+                // Catalogs authenticated this actual scope before filtering.
+                // Keep its decoder/view local to the retained original-root
+                // lease; foreign joins retain all reference/body validations.
+                let decoder = FileCreateStore {
+                    base: SnapshotStore::from_directory(
+                        Arc::clone(&self.base.root),
+                        scope.clone(),
+                        Arc::clone(&self.base.protector),
+                        self.base.policy,
+                    )?,
+                };
+                let history = decoder.base.namespace_snapshot_histories();
+                for id in ids {
+                    result.push(
+                        decoder
+                            .load_names_with_history(
+                                &*directory,
+                                &id,
+                                &scope,
+                                &names,
+                                budget,
+                                true,
+                                Some(&history),
+                            )?
+                            .record,
+                    );
+                }
+                directory.verify()?;
+                quota.verify()?;
+            } else {
+                for id in ids {
+                    result.push(
+                        self.load_names(&*directory, &id, &scope, &names, budget)?
+                            .record,
+                    );
+                }
             }
         }
         Ok(result)

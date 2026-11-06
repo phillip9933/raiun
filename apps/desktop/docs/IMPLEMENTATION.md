@@ -4769,8 +4769,19 @@ intent, event chain, dispatch lock, body-length pin and continued/superseded lin
 is still authenticated. Missing, unknown, staged, duplicate or corrupt evidence
 still refuses admission. The shared entry/metadata budgets, record/scope/event
 ceilings, whole-state accounting and later snapshot/legacy checks are unchanged.
-Standalone readers continue to enumerate independently; this is neither a
-persistent cache nor permission to adopt, replay, acknowledge or delete history.
+Readers without a retained quota lease continue to enumerate independently;
+this is neither a persistent cache nor permission to adopt, replay, acknowledge
+or delete history.
+
+Startup's bounded join discovery explicitly opens and verifies the original
+existing quota lock before reusing per-scope listings. A missing lock refuses
+discovery; it does not create or repair storage. All foreign-scope joins remain
+authenticated before filtering the selected scope. Startup's preceding snapshot
+listing remains a separate observation, without a joint-atomicity claim.
+Fresh-file publication uses its already-held quota lease for the same bounded
+join scan, without acquiring a second lock or resetting its original allowance.
+Unleased historical continuation discovery and single-record reads keep their
+existing independent checks.
 
 Windows GUI and CLI consume this shared adapter with their existing separate
 state and credential policies. Linux uses its existing recovery path; no Linux

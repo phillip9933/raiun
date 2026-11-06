@@ -1414,7 +1414,7 @@ fn streamed_unresolved_metadata(
         // or permission to replay the original create.
         let joins =
             crate::streamed_store::namespace_file_store::FileCreateStore::new(store.clone())
-                .and_then(|store| store.discover_bounded(&mut budget))
+                .and_then(|store| store.discover_existing_locked_bounded(&mut budget))
                 .map_err(crate::edit_journal::admission_error)?;
         let mut records_by_key = std::collections::HashMap::new();
         for record in &records {
