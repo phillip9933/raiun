@@ -23,6 +23,12 @@ pub(crate) enum Reply {
     Directory(Box<DirectoryCreateReply>),
 }
 impl Task {
+    fn directory_deadline_context(&self) -> Option<Arc<dyn Fn() -> &'static str + Send + Sync>> {
+        match self {
+            Self::Directory(task) => Some(task.deadline_context()),
+            Self::File(_) | Self::Vault(_) => None,
+        }
+    }
     fn requires_pre_capture_barrier(&self) -> bool {
         match self {
             Self::File(task) => task.requires_pre_capture_barrier(),
@@ -242,6 +248,7 @@ struct Lane {
     cancel_on_drop: Option<CancelOnDrop>,
     deferred: Option<Task>,
     flight: Option<Flight>,
+    directory_deadline_context: Option<Arc<dyn Fn() -> &'static str + Send + Sync>>,
     held: bool,
     allow_file: bool,
     allow_directory: bool,
@@ -267,6 +274,7 @@ impl Lane {
             cancel_on_drop: None,
             deferred: None,
             flight: None,
+            directory_deadline_context: None,
             held: false,
             allow_file,
             allow_directory,
@@ -309,6 +317,12 @@ impl Lane {
                 candidate.kind,
                 "original job cancellation observed"
             )),
+            (false, true) if candidate.kind == CreateKind::Directory => Some(
+                self.directory_deadline_context
+                    .as_ref()
+                    .map(|context| context())
+                    .unwrap_or(kind_hold!(candidate.kind, "original job deadline elapsed")),
+            ),
             (false, true) => Some(kind_hold!(candidate.kind, "original job deadline elapsed")),
             (true, true) => Some(kind_hold!(
                 candidate.kind,
@@ -385,6 +399,7 @@ impl Lane {
             return Err(kind_hold!(kind, "candidate identity changed").into());
         }
         if self.candidate.is_none() {
+            self.directory_deadline_context = None;
             // Capture the original backend transfer-cancel epoch BEFORE first prepare.
             let cancelled = backend
                 .recovery_transfer_cancellation()
@@ -489,7 +504,7 @@ impl Lane {
                     directory_step(
                         connection
                             .advance_fresh_personal_directory_create(*reply)
-                            .map_err(|_| failure)?,
+                            .map_err(|_| self.original_job_stop_reason().unwrap_or(failure))?,
                         Stage::Advance,
                     )
                 }
@@ -580,7 +595,12 @@ impl Lane {
         };
         if let Some(step) = step {
             match step {
-                Step::Task(task) => self.deferred = Some(task),
+                Step::Task(task) => {
+                    // Diagnostic observation follows this exact original task;
+                    // it neither changes its deadline nor supplies authority.
+                    self.directory_deadline_context = task.directory_deadline_context();
+                    self.deferred = Some(task);
+                }
                 Step::DeferredFileTask(task) => {
                     // Retain the exact original Prepare and candidate deadline.
                     // Sibling captures drain first; never immediately re-submit
@@ -591,6 +611,7 @@ impl Lane {
                     return Ok(false);
                 }
                 Step::BusyVaultTask(task) => {
+                    self.directory_deadline_context = task.directory_deadline_context();
                     self.deferred = Some(task);
                     return Ok(false);
                 }
@@ -607,6 +628,7 @@ impl Lane {
                 Step::Completed => {
                     self.ordinary_candidate = false;
                     self.candidate = None;
+                    self.directory_deadline_context = None;
                     self.cancel_on_drop.take();
                     return Ok(true);
                 }

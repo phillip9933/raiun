@@ -5064,3 +5064,33 @@ pins, fresh qualification and conditional writes remain. These observations
 authorize no old retry, send, adoption, acknowledgement, clearing or completion.
 The Windows GUI and CLI share the fix; Linux behavior and old files are unchanged.
 Source compilation does not establish physical copy completion or throughput.
+
+### Windows directory admission work and deadline context — 6 November 2026
+
+The 787 candidate installed and started successfully, but the next isolated
+folder creation reached its original deadline before Paste. That observation
+does not identify the expired phase or prove a transfer-speed result. Source
+tracing found that fresh directory publication and immediate dispatch admission
+each independently inventoried the protected state under a quota reservation.
+Inventory checks protected file lengths/policies and catalog/reservation
+authentication; it does not decrypt every namespace intent and event.
+
+Fresh directory creation now combines those two reservations. One full current
+accounting pass admits the sum of their original metadata-byte and entry bounds,
+then retains that quota lease through publication, authenticated reopen and
+zero-length dispatch-lock creation. The quota lease is dropped before acquiring
+the operation dispatch lock, preserving lock ordering and later append admission.
+A duplicate remains retained history and receives no dispatch lease. Existing
+standalone publication and recovery-dispatch APIs keep their previous behavior.
+The original attempt is checked again before scheduling cloud preflight.
+
+The same original directory attempt also carries a fixed-stage atomic trace
+through worker queuing, SDK preparation and native publication. Only when the
+owner independently observes its original deadline has elapsed may its error
+include that current boundary. It supplies no paths, values, private contents,
+timing attribution, retry authority or deadline extension. Both cancellation
+and expiry remain explicitly distinguished; file and vault behavior is unchanged.
+These changes remove one source-confirmed redundant accounting pass per fresh
+directory and improve the next actual failure report. Their physical timing
+benefit remains unmeasured. Accounts, pending files, all old histories, complete
+health verification, conditional mutations and native binding remain preserved.

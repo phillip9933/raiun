@@ -640,12 +640,14 @@ struct DirectoryAttempt {
     lease: Option<DirectoryIntentLease>,
     submitted: bool,
     verified: bool,
+    trace: Arc<Trace>,
 }
 /// Move-only SDK task; no native handle, owner ticket or record lease.
 pub struct DirectoryCreateTask {
     key: Arc<ReplyKey>,
     kind: Option<Box<DirectoryTaskKind>>,
     _flight: TaskFlight,
+    trace: Arc<Trace>,
 }
 /// Original invocation reply. No public constructor or serializable proof.
 pub struct DirectoryCreateReply {
@@ -715,8 +717,15 @@ enum DirectoryReplyKind {
     ),
 }
 impl DirectoryCreateTask {
+    /// Fixed progress observation only. The caller must independently observe
+    /// its ORIGINAL job expiry; this grants no dispatch or completion authority.
+    pub fn deadline_context(&self) -> Arc<dyn Fn() -> &'static str + Send + Sync> {
+        let trace = Arc::clone(&self.trace);
+        Arc::new(move || trace.deadline_message("Folder"))
+    }
     /// Run on a joined SDK worker. The original deadline/epoch is never renewed.
     pub fn execute(mut self) -> DirectoryCreateReply {
+        let trace = Arc::clone(&self.trace);
         let (phase, kind) = match *self
             .kind
             .take()
@@ -730,7 +739,6 @@ impl DirectoryCreateTask {
                 current,
                 recovery,
             } => {
-                let trace = Arc::new(Trace::new());
                 let result = (|| {
                     let mut health_wait = None;
                     trace.enter(PreparationStage::Job);
@@ -795,6 +803,7 @@ impl DirectoryCreateTask {
                 (Phase::Prepare, DirectoryReplyKind::Prepared(result))
             }
             DirectoryTaskKind::Preflight(session, intent) => {
+                trace.enter(PreparationStage::DirectoryPreflight);
                 let result = session.preflight(&intent);
                 (
                     Phase::Preflight,
@@ -802,6 +811,7 @@ impl DirectoryCreateTask {
                 )
             }
             DirectoryTaskKind::Send(session, intent, progress) => {
+                trace.enter(PreparationStage::DirectorySend);
                 let result = match crate::namespace_reconcile::submitted_directory_dispatch(
                     &intent, progress,
                 ) {
@@ -811,6 +821,7 @@ impl DirectoryCreateTask {
                 (Phase::Send, DirectoryReplyKind::Sent(session, result))
             }
             DirectoryTaskKind::Refresh(pair) => {
+                trace.enter(PreparationStage::DirectoryRefresh);
                 let (session, intent, report) = *pair;
                 let result = session.refresh(&intent, &report);
                 (
@@ -831,10 +842,17 @@ impl DirectoryAttempt {
         let (done, flight) = TaskFlight::new();
         self.done = done;
         self.phase = phase;
+        self.trace.enter(match phase {
+            Phase::Prepare => PreparationStage::QueuedPrepare,
+            Phase::Preflight => PreparationStage::QueuedPreflight,
+            Phase::Send => PreparationStage::QueuedSend,
+            Phase::Refresh => PreparationStage::QueuedRefresh,
+        });
         DirectoryCreateStep::Task(DirectoryCreateTask {
             key: self.key.clone(),
             kind: Some(Box::new(kind)),
             _flight: flight,
+            trace: Arc::clone(&self.trace),
         })
     }
     fn incomplete(&self) -> DirectoryCreateOutcome {
@@ -938,6 +956,7 @@ impl ConfiguredRootConnection {
             lease: None,
             submitted: false,
             verified: false,
+            trace: Arc::new(Trace::new()),
         };
         self.check_directory_attempt(&attempt)?;
         // Store the dispatch-ready bit only in owner/SDK currentness; the ticket
@@ -1017,6 +1036,7 @@ impl ConfiguredRootConnection {
             return Err(Error::ConnectionStateInvalid);
         }
         let mut attempt = slot.attempt.take().ok_or(Error::ConnectionStateInvalid)?;
+        attempt.trace.enter(PreparationStage::NativeContext);
         if disposition == ReplyDisposition::Retire
             || self.check_directory_attempt(&attempt).is_err()
         {
@@ -1029,6 +1049,7 @@ impl ConfiguredRootConnection {
                     return Err(Error::ProviderUnavailable);
                 }
                 let refs: Vec<_> = attempt.components.iter().map(String::as_str).collect();
+                attempt.trace.enter(PreparationStage::NativeParentPin);
                 let prepared = self.pin_admitted_directory(
                     &attempt.backend,
                     &refs,
@@ -1039,8 +1060,11 @@ impl ConfiguredRootConnection {
                 )?;
                 let pins = prepared.pins;
                 self.check_directory_attempt(&attempt)?;
-                let published = store
-                    .publish_intent(NamespaceIntent {
+                attempt
+                    .trace
+                    .enter(PreparationStage::DirectoryIntentAdmission);
+                let (published, lease) = store
+                    .publish_intent_for_dispatch(NamespaceIntent {
                         schema_version: 1,
                         record_id: "0".repeat(32),
                         record_generation: attempt.key.generation,
@@ -1054,9 +1078,8 @@ impl ConfiguredRootConnection {
                         DirectoryCreateOutcome::Retained,
                     ));
                 }
-                let lease = store
-                    .acquire_dispatch(&published.record.key)
-                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                let lease = lease.ok_or(Error::EditRecoveryUnavailable)?;
+                self.check_directory_attempt(&attempt)?;
                 let intent = lease.intent().clone();
                 attempt.pins = Some(pins);
                 attempt.lease = Some(lease);
@@ -1066,6 +1089,9 @@ impl ConfiguredRootConnection {
                 )
             }
             DirectoryReplyKind::Preflight(session, result) => {
+                attempt
+                    .trace
+                    .enter(PreparationStage::DirectoryResultPersistence);
                 if !session.original_backend(&attempt.backend) {
                     return Err(Error::ProviderUnavailable);
                 }
@@ -1114,6 +1140,9 @@ impl ConfiguredRootConnection {
                 )
             }
             DirectoryReplyKind::Sent(session, result) => {
+                attempt
+                    .trace
+                    .enter(PreparationStage::DirectoryResultPersistence);
                 if !session.original_backend(&attempt.backend) {
                     return Err(Error::ProviderUnavailable);
                 }
@@ -1162,6 +1191,9 @@ impl ConfiguredRootConnection {
                 }
             }
             DirectoryReplyKind::Refreshed(session, result) => {
+                attempt
+                    .trace
+                    .enter(PreparationStage::NativeDirectoryPublication);
                 if !session.original_backend(&attempt.backend) {
                     return Err(Error::ProviderUnavailable);
                 }
@@ -1207,6 +1239,9 @@ impl ConfiguredRootConnection {
                 if pins.converted_identity.is_none() {
                     return Err(Error::EditRecoveryUnavailable);
                 }
+                attempt
+                    .trace
+                    .enter(PreparationStage::LocalCompletionPersistence);
                 attempt
                     .lease
                     .as_mut()

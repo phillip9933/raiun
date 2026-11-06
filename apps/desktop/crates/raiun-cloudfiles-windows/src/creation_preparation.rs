@@ -27,6 +27,7 @@ pub(crate) enum Category {
     PublicationUncertain,
     Snapshot,
     Pending,
+    DeadlineElapsed,
 }
 impl Category {
     fn from_code(code: u16) -> Self {
@@ -52,6 +53,7 @@ impl Category {
             Category::PublicationUncertain,
             Category::Snapshot,
             Category::Pending,
+            Category::DeadlineElapsed,
         ];
         ALL.get(usize::from(code))
             .copied()
@@ -105,6 +107,9 @@ macro_rules! category_message {
             }
             Category::Snapshot => fixed_message!($prefix, $stage, "snapshot verification"),
             Category::Pending => fixed_message!($prefix, $stage, "pending recovery"),
+            Category::DeadlineElapsed => {
+                fixed_message!($prefix, $stage, "original deadline elapsed")
+            }
         }
     };
 }
@@ -164,6 +169,19 @@ stages! {
     NamespacePending => "namespace recovery remains pending",
     SnapshotPending => "other saved-file recovery remains pending",
     LegacyPending => "legacy recovery remains pending",
+    QueuedPrepare => "directory preparation is queued",
+    QueuedPreflight => "directory cloud preflight is queued",
+    QueuedSend => "directory upload dispatch is queued",
+    QueuedRefresh => "directory result refresh is queued",
+    NativeContext => "directory native context verification did not finish",
+    NativeParentPin => "directory parent pinning did not finish",
+    DirectoryIntentAdmission => "directory intent and dispatch admission did not finish",
+    DirectoryPreflight => "directory cloud preflight did not finish",
+    DirectorySend => "directory cloud creation did not finish",
+    DirectoryRefresh => "directory result refresh did not finish",
+    DirectoryResultPersistence => "directory result persistence did not finish",
+    NativeDirectoryPublication => "directory native publication did not finish",
+    LocalCompletionPersistence => "directory completion persistence did not finish",
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,5 +323,15 @@ impl Trace {
             stage: Stage::from_code((value >> 16) as u16),
             category: Category::from_code(value as u16),
         }
+    }
+    /// Read-only current boundary when the original owner has independently
+    /// observed expiry. This reports no elapsed-phase timing or cause.
+    #[cfg(windows)]
+    pub(crate) fn deadline_message(&self, prefix: &'static str) -> &'static str {
+        Failure {
+            stage: self.failure().stage,
+            category: Category::DeadlineElapsed,
+        }
+        .message(prefix)
     }
 }

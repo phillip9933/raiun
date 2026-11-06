@@ -217,11 +217,39 @@ impl DirectoryIntentStore {
     /// admission or change any captured authorization.
     pub fn publish_intent(
         self: &Arc<Self>,
-        mut intent: NamespaceIntent,
+        intent: NamespaceIntent,
     ) -> Result<PublishedDirectoryIntent, StoreError> {
         self.check_intent(&intent)?;
         let _quota = self.reserve((META_LIMIT as u64) * 2, 6)?;
         let directory = self.directory(true)?;
+        self.publish_intent_while_reserved(intent, directory)
+    }
+
+    /// Admit only this new publication and its dispatch-lock entry together.
+    /// A duplicate remains retained history and never gains a dispatch lease.
+    #[cfg(windows)]
+    pub(crate) fn publish_intent_for_dispatch(
+        self: &Arc<Self>,
+        intent: NamespaceIntent,
+    ) -> Result<(PublishedDirectoryIntent, Option<DirectoryIntentLease>), StoreError> {
+        self.check_intent(&intent)?;
+        let quota = self.reserve((META_LIMIT as u64) * 2, 7)?;
+        let directory = self.directory(true)?;
+        let published = self.publish_intent_while_reserved(intent, Arc::clone(&directory))?;
+        if !published.created {
+            return Ok((published, None));
+        }
+        let lease =
+            self.acquire_dispatch_while_reserved(&published.record.key, directory, quota)?;
+        Ok((published, Some(lease)))
+    }
+
+    /// The caller retains the full publication quota lease for this body.
+    fn publish_intent_while_reserved(
+        self: &Arc<Self>,
+        mut intent: NamespaceIntent,
+        directory: Arc<dyn Directory>,
+    ) -> Result<PublishedDirectoryIntent, StoreError> {
         for loaded in self.load_all(&*directory)? {
             if same_entry(&loaded.record.intent, &intent) {
                 return Ok(PublishedDirectoryIntent {
@@ -506,6 +534,16 @@ impl DirectoryIntentStore {
                 }
             }
         };
+        self.acquire_dispatch_while_reserved(key, directory, quota)
+    }
+
+    /// The caller has admitted this dispatch-lock entry under the quota lease.
+    fn acquire_dispatch_while_reserved(
+        self: &Arc<Self>,
+        key: &DirectoryIntentKey,
+        directory: Arc<dyn Directory>,
+        quota: Box<dyn Send>,
+    ) -> Result<DirectoryIntentLease, StoreError> {
         let name = format!("{}.dispatch.lock", key.id);
         if let Ok((file, _)) = directory.create(&name) {
             file.sync()?;
