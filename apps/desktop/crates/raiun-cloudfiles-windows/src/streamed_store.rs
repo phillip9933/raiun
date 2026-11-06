@@ -550,7 +550,7 @@ impl SnapshotStore {
             // directory whose child is outside its complete fresh ancestry.
             let remaining_directories = summary
                 .directory_unresolved
-                .checked_sub(summary.directory_fresh_create_independent)
+                .checked_sub(summary.directory_fresh_create_additive)
                 .ok_or(StoreError::CorruptEvidence)?;
             let namespace_pending = summary.unresolved != 0
                 || remaining_directories != 0

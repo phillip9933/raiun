@@ -1,9 +1,78 @@
 //! Read-only target binding for one original, SDK-qualified fresh create.
 //! This is no authority to retry, complete or alter retained recovery records.
 
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum FreshCreateTargetKind {
     File,
     Directory,
+}
+
+/// Immutable join facts only, never a cached health result or native authority.
+/// Mint only from actual worker-local metadata pins, retain those pins during
+/// the health query, then join ALL facts to the owner's later actual pins.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct NativeCreateFacts {
+    root: crate::ConfiguredRootIdentity,
+    components: Vec<String>,
+    kind: FreshCreateTargetKind,
+    leaf: crate::LocalFileIdentity,
+    parents: Vec<crate::LocalFileIdentity>,
+}
+impl NativeCreateFacts {
+    #[cfg(windows)]
+    pub(crate) fn from_checked_pins(
+        root: crate::ConfiguredRootIdentity,
+        components: Vec<String>,
+        kind: FreshCreateTargetKind,
+        leaf: crate::LocalFileIdentity,
+        parents: Vec<crate::LocalFileIdentity>,
+    ) -> Option<Self> {
+        if root.file_index == 0
+            || components.is_empty()
+            || components.len() > 256
+            || components
+                .iter()
+                .any(|p| !crate::opencloud::valid_windows_component(p))
+            || parents.len() != components.len()
+            || parents.first()
+                != Some(&crate::LocalFileIdentity {
+                    volume_serial: root.volume_serial,
+                    file_index: root.file_index,
+                })
+        {
+            return None;
+        }
+        let mut unique = std::collections::HashSet::new();
+        if parents.iter().chain(std::iter::once(&leaf)).any(|id| {
+            id.volume_serial != root.volume_serial
+                || id.file_index == 0
+                || !unique.insert((id.volume_serial, id.file_index))
+        }) {
+            return None;
+        }
+        Some(Self {
+            root,
+            components,
+            kind,
+            leaf,
+            parents,
+        })
+    }
+    #[cfg(windows)]
+    pub(crate) fn matches(
+        &self,
+        root: crate::ConfiguredRootIdentity,
+        components: &[String],
+        kind: FreshCreateTargetKind,
+        leaf: crate::LocalFileIdentity,
+        parents: &[crate::LocalFileIdentity],
+    ) -> bool {
+        self.root == root
+            && self.components == components
+            && self.kind == kind
+            && self.leaf == leaf
+            && self.parents == parents
+    }
 }
 
 pub(crate) struct FreshCreateTarget {
@@ -11,6 +80,7 @@ pub(crate) struct FreshCreateTarget {
     components: Vec<String>,
     // One original SDK capture only; absent proof keeps directory history held.
     verified_ancestry: Option<(String, Vec<String>)>,
+    native_custody: Option<NativeCreateFacts>,
     // Retain the original operation kind even though both kinds use the same
     // conservative overlap rule against an uncertain historical file create.
     _kind: FreshCreateTargetKind,
@@ -53,8 +123,67 @@ impl FreshCreateTarget {
             parent_remote_id: parent_remote_id.to_owned(),
             components,
             verified_ancestry: None,
+            native_custody: None,
             _kind: kind,
         })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn bind_native_custody(
+        &mut self,
+        scope: &crate::EditJournalScope,
+        facts: &NativeCreateFacts,
+    ) -> Option<()> {
+        let (leaf, parent) = facts.components.split_last()?;
+        let parent: Vec<_> = parent.iter().map(String::as_str).collect();
+        let relative = crate::personal_create_relative(&parent, leaf)?;
+        if facts.root.volume_serial != scope.root_volume_serial
+            || facts.root.file_index != scope.root_file_index
+            || facts.kind != self._kind
+            || self
+                .components
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                != relative.split('/').collect::<Vec<_>>()
+        {
+            return None;
+        }
+        self.native_custody = Some(facts.clone());
+        Some(())
+    }
+
+    /// Add-only isolation for an authenticated unfinished directory. This is
+    /// not a claim that its unknown remote child is outside the remote tree.
+    /// Every other health/native/conditional-create gate remains required.
+    pub(crate) fn permits_additive_beside_directory(
+        &self,
+        old_parent_components: &[String],
+        old_parent_remote_id: &str,
+        old_name: &str,
+        old_native: crate::LocalFileIdentity,
+        root_resource_id: &str,
+    ) -> bool {
+        let Some(facts) = self.native_custody.as_ref() else {
+            return false;
+        };
+        let Some((root, _)) = self.verified_ancestry.as_ref() else {
+            return false;
+        };
+        if root != root_resource_id
+            || old_native.file_index == 0
+            || old_native.volume_serial != facts.root.volume_serial
+            || facts.leaf == old_native
+            || facts.parents.contains(&old_native)
+        {
+            return false;
+        }
+        self.disjoint_directory_spelling(
+            old_parent_components,
+            old_parent_remote_id,
+            old_name,
+            root_resource_id,
+        )
     }
 
     /// Bind the complete freshly stat-verified remote chain from Space root
@@ -103,6 +232,21 @@ impl FreshCreateTarget {
         {
             return false;
         }
+        self.disjoint_directory_spelling(
+            old_parent_components,
+            old_parent_remote_id,
+            old_name,
+            root_resource_id,
+        )
+    }
+
+    fn disjoint_directory_spelling(
+        &self,
+        old_parent_components: &[String],
+        old_parent_remote_id: &str,
+        old_name: &str,
+        root_resource_id: &str,
+    ) -> bool {
         let parent: Vec<_> = old_parent_components.iter().map(String::as_str).collect();
         let prefix = match parent.first().copied() {
             Some("Personal") => 1,

@@ -4,6 +4,7 @@ use super::*;
 use crate::creation_preparation::{
     Failure, Stage as PreparationStage, Trace, wait_for_recovery_health,
 };
+use crate::fresh_create_target::{FreshCreateTargetKind, NativeCreateFacts};
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceIntent, NamespaceObjectKind,
     NamespaceOperation, NamespaceParent, StorageClassification,
@@ -11,6 +12,7 @@ use crate::namespace_intent::{
 use crate::namespace_reconcile::{
     DirectoryCompletionError, DirectoryCreateLocal, DirectoryCreateReadback,
 };
+use crate::native::native_fresh_create_inspection::FreshNativeInspection;
 use crate::{DirectoryCreateSession, VerifiedDirectoryPublication};
 use raiun_core::backend::{CloudError, ErrorKind};
 
@@ -684,6 +686,7 @@ pub enum DirectoryCreateStep {
 enum DirectoryTaskKind {
     Prepare {
         backend: Arc<crate::OpenCloudPlaceholderBackend>,
+        root_path: PathBuf,
         components: Vec<String>,
         name: String,
         job: crate::StreamedRecoveryJob,
@@ -705,7 +708,16 @@ enum DirectoryTaskKind {
     ),
 }
 enum DirectoryReplyKind {
-    Prepared(Result<(OwnedDirectorySession, Arc<DirectoryIntentStore>), Failure>),
+    Prepared(
+        Result<
+            (
+                OwnedDirectorySession,
+                Arc<DirectoryIntentStore>,
+                NativeCreateFacts,
+            ),
+            Failure,
+        >,
+    ),
     Preflight(
         OwnedDirectorySession,
         Result<(), raiun_core::backend::CloudError>,
@@ -733,6 +745,7 @@ impl DirectoryCreateTask {
         {
             DirectoryTaskKind::Prepare {
                 backend,
+                root_path,
                 components,
                 name,
                 job,
@@ -755,9 +768,22 @@ impl DirectoryCreateTask {
                     )?;
                     trace.enter(PreparationStage::Current);
                     session.check()?;
-                    let space = session
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    let inspection = FreshNativeInspection::inspect(
+                        &root_path,
+                        self.key.root,
+                        &session.captured,
+                        &components,
+                        &name,
+                        FreshCreateTargetKind::Directory,
+                    )
+                    .map_err(|_| BackendError::Unavailable)?;
+                    let mut space = session
                         .fresh_create_space_for_child(&components, &name)?
                         .with_preparation_trace(Arc::clone(&trace));
+                    inspection
+                        .bind_space(&mut space)
+                        .map_err(|_| BackendError::Unavailable)?;
                     if wait_for_recovery_health(&job, &trace, &mut health_wait, || {
                         trace.enter(PreparationStage::Job);
                         job.check()?;
@@ -792,9 +818,11 @@ impl DirectoryCreateTask {
                     })? {
                         return Err(BackendError::Unavailable);
                     }
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    inspection.verify().map_err(|_| BackendError::Unavailable)?;
                     trace.enter(PreparationStage::Current);
                     session.check()?;
-                    Ok((session, store))
+                    Ok((session, store, inspection.facts().clone()))
                 })()
                 .map_err(|error| {
                     trace.backend(error);
@@ -963,6 +991,7 @@ impl ConfiguredRootConnection {
         // probe is armed by the actual successful one-use owner claim.
         let kind = DirectoryTaskKind::Prepare {
             backend: backend.clone(),
+            root_path: root.path.clone(),
             components: attempt.components.clone(),
             name: attempt.name.clone(),
             job,
@@ -1044,7 +1073,8 @@ impl ConfiguredRootConnection {
         }
         let step = match reply.kind {
             DirectoryReplyKind::Prepared(result) => {
-                let (session, store) = result.map_err(|_| Error::EditRecoveryUnavailable)?;
+                let (session, store, native_facts) =
+                    result.map_err(|_| Error::EditRecoveryUnavailable)?;
                 if !session.original_backend(&attempt.backend) {
                     return Err(Error::ProviderUnavailable);
                 }
@@ -1060,6 +1090,35 @@ impl ConfiguredRootConnection {
                 )?;
                 let pins = prepared.pins;
                 self.check_directory_attempt(&attempt)?;
+                let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+                let mut parents = Vec::with_capacity(pins.ancestors.len() + 2);
+                parents.push(LocalFileIdentity {
+                    volume_serial: root.identity.volume_serial,
+                    file_index: root.identity.file_index,
+                });
+                parents.extend(
+                    pins.ancestors
+                        .iter()
+                        .map(|(_, snapshot)| LocalFileIdentity {
+                            volume_serial: snapshot.identity.volume_serial,
+                            file_index: snapshot.identity.file_index,
+                        }),
+                );
+                parents.push(LocalFileIdentity {
+                    volume_serial: pins.parent_snapshot.identity.volume_serial,
+                    file_index: pins.parent_snapshot.identity.file_index,
+                });
+                let mut original_components = attempt.components.clone();
+                original_components.push(attempt.name.clone());
+                if !native_facts.matches(
+                    attempt.key.root,
+                    &original_components,
+                    FreshCreateTargetKind::Directory,
+                    pins.entry.local_file,
+                    &parents,
+                ) {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
                 attempt
                     .trace
                     .enter(PreparationStage::DirectoryIntentAdmission);

@@ -5094,3 +5094,41 @@ These changes remove one source-confirmed redundant accounting pass per fresh
 directory and improve the next actual failure report. Their physical timing
 benefit remains unmeasured. Accounts, pending files, all old histories, complete
 health verification, conditional mutations and native binding remain preserved.
+
+### Additive creation beside unverified directory history — 7 November 2026
+
+A subsequent production inspection reports both a Submitted/sequence-1 and a
+Verified/sequence-2 unfinished directory history. Counts do not identify a
+particular attempt or establish the unverified remote outcome. Neither record
+is cleared, acknowledged, adopted or replayed to unblock a new copy.
+
+For one original fresh file or folder create, the SDK worker now opens actual
+metadata-only native pins for the registered physical root, complete managed
+parent route and plain leaf. It checks registration, no-follow paths, Cloud
+Files opaque parent identities, volume/FileIDs, leaf kind and current paths.
+These handles remain on that worker through both unchanged authenticated health
+scans and are checked again before returning. Only immutable identity facts
+cross the reply. The owner must join the same root, ordered parent chain, leaf,
+path and kind to its own actual pins before capture or publication. No native
+connection owner, dispatch permission or cached healthy result is fabricated.
+
+An exact-scope closed Submitted/sequence-1 directory row with no attention,
+local completion, continuation or source removal can permit this add-only
+operation when conservative path separation and native custody exclusions pass.
+The old directory's FileID must differ from the fresh leaf and every actual
+parent. Verified/sequence-2 rows additionally retain the prior remote child-ID
+and ancestry checks. Unknown phases, partial scope matches, absent native facts,
+identity changes and other content/delete/unknown-format blockers still hold.
+Every old row stays in generic unresolved counts. A renamed unfinished directory
+with the same FileID is refused before a second publication or dispatch lease.
+
+This is an additive-preservation rule, not proof that an unknown remote child
+is outside a remote subtree. Existing creation only adds an absent destination;
+directory conversion uses no FORCE, dehydration or MARK_IN_SYNC, and population
+does not request SUPERSEDE of existing children. Existing child collisions remain
+failures. Pending descendants and their records are preserved even when a fresh
+container contains them. All original conditional writes, snapshot custody,
+root/account/epoch validation, deadlines and cancellation rules remain. No
+cross-Space exception or remotely inferred creation provenance is introduced.
+Physical preservation, completion and speed still require the existing bounded
+folder-copy check; compilation and this source analysis do not establish them.

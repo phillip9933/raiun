@@ -182,6 +182,7 @@ stages! {
     DirectoryResultPersistence => "directory result persistence did not finish",
     NativeDirectoryPublication => "directory native publication did not finish",
     LocalCompletionPersistence => "directory completion persistence did not finish",
+    NativeCreateInspection => "original create native custody inspection failed",
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

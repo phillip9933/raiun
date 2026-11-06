@@ -57,7 +57,7 @@ pub(crate) struct NamespaceHistorySummary {
     pub(crate) directory_evidence: bool,
     pub(crate) directory_records: usize,
     pub(crate) directory_unresolved: usize,
-    pub(crate) directory_fresh_create_independent: usize,
+    pub(crate) directory_fresh_create_additive: usize,
     pub(crate) directory_pending_classifications:
         Vec<namespace_store::PendingDirectoryCreateClassification>,
     pub(crate) other_namespace_evidence: bool,
@@ -105,7 +105,7 @@ pub(crate) fn history_unresolved_for_fresh_create(
     let _ = history_unresolved(summary, configured)?;
     if summary.unresolved > summary.records
         || summary.directory_unresolved > summary.directory_records
-        || summary.directory_fresh_create_independent > summary.directory_unresolved
+        || summary.directory_fresh_create_additive > summary.directory_unresolved
         || summary.file_unresolved > summary.file_records
         || summary.delete_unresolved > summary.delete_records
     {
@@ -360,7 +360,7 @@ fn history_summary_existing_locked(
             };
             result.directory_records += records;
             result.directory_unresolved += unresolved;
-            result.directory_fresh_create_independent += independent;
+            result.directory_fresh_create_additive += independent;
             directory.verify()?;
         }
         directories.verify()?;

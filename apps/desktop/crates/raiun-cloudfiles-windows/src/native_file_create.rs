@@ -8,10 +8,12 @@ use crate::file_create_completion_diagnostics::{
     Stage as CompletionStage, Trace as CompletionTrace,
 };
 use crate::file_create_phase::{Phase, ReplyDisposition, ReplyKey, TaskFlight};
+use crate::fresh_create_target::{FreshCreateTargetKind, NativeCreateFacts};
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceFileContent, NamespaceIntent,
     NamespaceObjectKind, NamespaceOperation, NamespaceParent, StorageClassification,
 };
+use crate::native::native_fresh_create_inspection::FreshNativeInspection;
 use crate::opencloud::file_create::{Admission, RefreshedCreateReadback, VerifiedCreateReadback};
 use crate::streamed_snapshot::SnapshotBinding;
 use crate::streamed_store::namespace_file_store::{CapturedCreatePath, FileCreateStore};
@@ -549,6 +551,7 @@ pub struct FileCreateTask {
     _flight: TaskFlight, // LAST: all owned network/body data drops before done.
 }
 struct Preparation {
+    root_path: PathBuf,
     parent_components: Vec<String>,
     name: String,
     recovery: Arc<dyn PreparedEditRecovery>,
@@ -564,6 +567,7 @@ enum TaskKind {
 struct Prepared {
     admission: Admission,
     rename: Arc<FileRenameStore>,
+    native_facts: NativeCreateFacts,
 }
 enum ReplyKind {
     Prepared(Result<Box<Prepared>, Failure>),
@@ -675,9 +679,23 @@ impl FileCreateTask {
                     )?;
                     trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
-                    let space = admission
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    let inspection = FreshNativeInspection::inspect(
+                        &prep.root_path,
+                        self.key.root,
+                        &admission.parent,
+                        &prep.parent_components,
+                        &prep.name,
+                        FreshCreateTargetKind::File,
+                    )
+                    .map_err(|_| BackendError::Unavailable)?;
+                    let mut space = admission
                         .fresh_create_space_for_child(&self.backend, &prep.name)?
                         .with_preparation_trace(Arc::clone(&trace));
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    inspection
+                        .bind_space(&mut space)
+                        .map_err(|_| BackendError::Unavailable)?;
                     if wait_for_recovery_health(&prep.job, &trace, &mut health_wait, || {
                         trace.enter(PreparationStage::Job);
                         prep.job.check()?;
@@ -715,9 +733,15 @@ impl FileCreateTask {
                     })? {
                         return Err(BackendError::Unavailable);
                     }
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    inspection.verify().map_err(|_| BackendError::Unavailable)?;
                     trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
-                    Ok(Box::new(Prepared { admission, rename }))
+                    Ok(Box::new(Prepared {
+                        admission,
+                        rename,
+                        native_facts: inspection.facts().clone(),
+                    }))
                 })()
                 .map_err(|error| {
                     trace.backend(error);
@@ -919,6 +943,7 @@ impl ConfiguredRootConnection {
         let task = attempt.task(
             Phase::Prepare,
             TaskKind::Prepare(Box::new(Preparation {
+                root_path: root.path.clone(),
                 parent_components: attempt.parent_components.clone(),
                 name: attempt.name.clone(),
                 recovery,
@@ -1008,6 +1033,10 @@ impl ConfiguredRootConnection {
                     || !attempt.flight_done.load(Ordering::Acquire)
                     || attempt.local.is_some()
                     || attempt.dispatched.load(Ordering::Acquire)
+                    || self
+                        .root
+                        .as_ref()
+                        .is_none_or(|root| preparation.root_path != root.path)
                     || preparation.parent_components != attempt.parent_components
                     || preparation.name != attempt.name
                     || !Arc::ptr_eq(&preparation.recovery, &attempt.recovery)
@@ -1042,6 +1071,7 @@ impl ConfiguredRootConnection {
                     &attempt,
                     &prepared.admission,
                     &prepared.rename,
+                    &prepared.native_facts,
                     &slot.attempts,
                 )? {
                     CaptureResult::Busy => {
@@ -1218,6 +1248,7 @@ impl ConfiguredRootConnection {
         attempt: &OwnerAttempt,
         admission: &Admission,
         rename: &Arc<FileRenameStore>,
+        native_facts: &NativeCreateFacts,
         siblings: &[OwnerAttempt],
     ) -> Result<CaptureResult, Error> {
         use sha2::Digest;
@@ -1355,6 +1386,33 @@ impl ConfiguredRootConnection {
             volume_serial: snapshot.identity.volume_serial,
             file_index: snapshot.identity.file_index,
         };
+        let mut native_parents = Vec::with_capacity(_ancestors.len() + 2);
+        native_parents.push(LocalFileIdentity {
+            volume_serial: physical.volume_serial,
+            file_index: physical.file_index,
+        });
+        native_parents.extend(_ancestors.iter().map(|(_, snapshot)| LocalFileIdentity {
+            volume_serial: snapshot.identity.volume_serial,
+            file_index: snapshot.identity.file_index,
+        }));
+        native_parents.push(LocalFileIdentity {
+            volume_serial: parent_snapshot.identity.volume_serial,
+            file_index: parent_snapshot.identity.file_index,
+        });
+        let mut full_components = attempt.parent_components.clone();
+        full_components.push(attempt.name.clone());
+        // Worker classification grants no capture authority. Match its native
+        // facts against this owner's freshly pinned chain and protected source
+        // before reserving or publishing any snapshot or dispatching a send.
+        if !native_facts.matches(
+            physical,
+            &full_components,
+            FreshCreateTargetKind::File,
+            local_file,
+            &native_parents,
+        ) {
+            return Err(Error::ConfiguredRootChanged);
+        }
         let entry = LocalNamespaceEntry {
             parent: NamespaceParent {
                 scope: captured.scope.clone(),

@@ -66,6 +66,8 @@ pub(crate) use native_file_create::NativeFileCreateCompletion;
 pub(crate) use native_file_create::NativeFileCreateContinuation;
 #[path = "native_file_rename.rs"]
 pub(super) mod native_file_rename;
+#[path = "native_fresh_create_inspection.rs"]
+pub(super) mod native_fresh_create_inspection;
 #[path = "native_namespace_directory.rs"]
 pub(super) mod native_namespace_directory;
 #[path = "native_namespace_observer.rs"]

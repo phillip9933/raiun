@@ -251,6 +251,22 @@ impl DirectoryIntentStore {
         directory: Arc<dyn Directory>,
     ) -> Result<PublishedDirectoryIntent, StoreError> {
         for loaded in self.load_all(&*directory)? {
+            // A renamed or reparented unfinished native directory still owns
+            // its original recovery record; a new spelling cannot republish it.
+            if !loaded.record.progress.recorded_complete
+                && matches!(
+                    (&intent.operation, &loaded.record.intent.operation),
+                    (
+                        NamespaceOperation::CreateDirectory { destination: incoming },
+                        NamespaceOperation::CreateDirectory { destination: prior },
+                    ) if incoming.local_file == prior.local_file
+                )
+            {
+                return Ok(PublishedDirectoryIntent {
+                    record: recovered(loaded.record),
+                    created: false,
+                });
+            }
             if same_entry(&loaded.record.intent, &intent) {
                 return Ok(PublishedDirectoryIntent {
                     record: recovered(loaded.record),
@@ -916,8 +932,13 @@ fn history_counts_existing_inner(
         let row = decoder.load_scoped(directory, id, budget, scope, &names)?;
         unresolved += usize::from(!row.record.progress.recorded_complete);
         let progress = row.record.progress;
-        if progress.remote == NamespacePhase::Verified
+        let closed_submitted = progress.remote == NamespacePhase::Submitted
+            && progress.sequence == 1
+            && row.remote_verified_child_id.is_none();
+        let closed_verified = progress.remote == NamespacePhase::Verified
             && progress.sequence == 2
+            && row.remote_verified_child_id.is_some();
+        if (closed_submitted || closed_verified)
             && progress.attention.is_none()
             && !progress.local_completed
             && !progress.continued
@@ -925,16 +946,28 @@ fn history_counts_existing_inner(
             && !progress.recorded_complete
             && let Some((candidate_scope, target)) = fresh_create
             && scope == candidate_scope
-            && let Some(child_id) = row.remote_verified_child_id.as_deref()
             && let NamespaceOperation::CreateDirectory { destination } =
                 &row.record.intent.operation
-            && target.definitely_disjoint_from_verified_directory(
+            && target.permits_additive_beside_directory(
                 &destination.parent.local_components,
                 &destination.parent.remote.resource_id,
                 &destination.name,
-                child_id,
+                destination.local_file,
                 &scope.root_resource_id,
             )
+            && (closed_submitted
+                || row
+                    .remote_verified_child_id
+                    .as_deref()
+                    .is_some_and(|child_id| {
+                        target.definitely_disjoint_from_verified_directory(
+                            &destination.parent.local_components,
+                            &destination.parent.remote.resource_id,
+                            &destination.name,
+                            child_id,
+                            &scope.root_resource_id,
+                        )
+                    }))
         {
             independent += 1;
         }
