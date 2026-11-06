@@ -298,6 +298,25 @@ impl Lane {
     pub(crate) fn active(&self) -> bool {
         self.candidate.is_some()
     }
+    fn original_job_stop_reason(&self) -> Option<&'static str> {
+        let candidate = self.candidate.as_ref()?;
+        // Observe both original facts before stop() sets cancellation itself.
+        // Cancellation includes owner revocation; it does not identify a cause.
+        let cancelled = candidate.job.cancellation().is_cancelled();
+        let expired = candidate.job.cancellation().is_expired();
+        match (cancelled, expired) {
+            (true, false) => Some(kind_hold!(
+                candidate.kind,
+                "original job cancellation observed"
+            )),
+            (false, true) => Some(kind_hold!(candidate.kind, "original job deadline elapsed")),
+            (true, true) => Some(kind_hold!(
+                candidate.kind,
+                "original job cancellation and elapsed deadline observed"
+            )),
+            (false, false) => None,
+        }
+    }
     pub(crate) fn stop(&mut self, connection: &ConfiguredRootConnection) {
         self.held = true;
         self.cancel_on_drop.take();
@@ -408,14 +427,15 @@ impl Lane {
         if collect_only {
             return Ok(false);
         }
+        if let Some(reason) = self.original_job_stop_reason() {
+            self.stop(connection);
+            self.drain_held(connection, workers);
+            return Err(reason.into());
+        }
         let candidate = self
             .candidate
             .as_ref()
             .ok_or(kind_hold!(kind, "candidate unavailable"))?;
-        if candidate.job.is_stopped() {
-            self.stop(connection);
-            return Err(kind_hold!(kind, "original job stopped").into());
-        }
         let step = if let Some(flight) = self.flight {
             let id = flight.id;
             let Some(done) = workers.poll_for(id) else {
@@ -764,6 +784,14 @@ impl Producer {
                     .ok_or(HOLD)?
             }
         };
+        // A scheduling barrier cannot hide a stopped original job. This only
+        // closes/drains its existing owner; no reply is advanced here.
+        if let Some(reason) = self.lanes[index].original_job_stop_reason() {
+            let lane = &mut self.lanes[index];
+            lane.stop(connection);
+            lane.drain_held(connection, workers);
+            return Err(reason.into());
+        }
         if self.lanes[index].retry_after_wave
             && self
                 .lanes

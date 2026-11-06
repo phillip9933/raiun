@@ -37,6 +37,9 @@ mod retention;
 #[cfg(windows)]
 pub(crate) use events::CreateSnapshotAcknowledged;
 #[cfg(windows)]
+#[path = "streamed_metadata_memo.rs"]
+mod metadata_memo;
+#[cfg(windows)]
 mod windows;
 pub use events::{
     MAX_STREAMED_HISTORY, StreamedAttemptOutcome, StreamedAttemptState, StreamedDispatchLease,
@@ -502,6 +505,13 @@ impl SnapshotStore {
             root.verify()?;
             admitted_state.verify_path().map_err(io_error)?;
 
+            // This one retained-quota v2 metadata traversal may reread the same
+            // sealed scope, manifest, reservation or event several times. Keep
+            // every fresh file/read/budget/join check, reusing only a successful
+            // decode of byte-identical ciphertext + AAD under this protector.
+            // The legacy callback captures its original protector separately.
+            let protector = metadata_memo::MetadataOpenMemo::scoped(protector);
+
             if let Some(trace) = trace {
                 trace.enter(crate::creation_preparation::Stage::NamespaceScan);
             }
@@ -594,6 +604,9 @@ impl SnapshotStore {
             if matched.iter().any(|matched| !matched) {
                 return Err(StoreError::IncompleteEvidence);
             }
+            // No decoded v2 metadata survives into the separate legacy/full-body
+            // authentication callback, which retains its original protector.
+            drop(protector);
             if let Some(trace) = trace {
                 trace.enter(crate::creation_preparation::Stage::LegacyScan);
             }

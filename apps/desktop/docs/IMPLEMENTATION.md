@@ -4967,3 +4967,39 @@ does not claim to repair such a deadlock. It removes demonstrated scheduling
 head-of-line waiting. The phase responsible for the previous incomplete physical
 copy and the elapsed improvement still require actual observation. Windows GUI
 and CLI share this producer; Linux runtime behavior is unchanged.
+
+
+### Windows recovery metadata preparation and stopped jobs — 6 November 2026
+
+A fresh-create recovery query now reuses successful decryption of identical
+protected v2 metadata within its one retained quota lease. Every scope, manifest,
+reservation and event still passes through the existing fresh file open/read,
+length, identity, cumulative budget and authenticated reference/history checks.
+A digest selects candidates only: both the freshly read ciphertext and associated
+data must match exactly under the same original protector. Changed bytes are
+authenticated normally. This removes duplicate platform decryption within the
+query without caching file absence, cloud metadata, permissions or clean-state
+authority between queries.
+
+The private memo retains at most 4,096 entries and 8 MiB of charged entry storage;
+map allocation overhead and current decoder buffers are additional memory.
+Capacity exhaustion falls back to normal authentication. Retained associated
+data, ciphertext and plaintext are zeroized on disposal. The adapter is dropped
+before the separate legacy/full-body query, whose original protection and
+validation remain unchanged. No memo survives into a later health query,
+operation, account, admission or publication phase. Existing seal and directory
+protection calls delegate to the original implementation.
+
+The create producer also checks the exact lane's original job before scheduling
+or sibling-completion barriers can defer it. Cancellation, an elapsed deadline,
+or both are recorded before the existing stop path itself cancels the job.
+These fixed messages report observed conditions, not whether a user, revocation
+or elapsed time caused a historical stop. No reply advances at this boundary;
+existing ownership, cancellation and drain retention apply. The original job
+budget is unchanged, including all queue and phase time. An individual blocking
+OS/DPAPI call is not made interruptible by this change.
+
+These source corrections apply to the shared Windows GUI/CLI provider. The prior
+physical copy stopped with a generic original-directory-job message; it does not
+establish which condition occurred or how much time these corrections save.
+Linux runtime behavior and all retained recovery files remain unchanged.
