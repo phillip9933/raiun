@@ -57,6 +57,8 @@ pub(crate) struct NamespaceHistorySummary {
     pub(crate) directory_evidence: bool,
     pub(crate) directory_records: usize,
     pub(crate) directory_unresolved: usize,
+    pub(crate) directory_pending_classifications:
+        Vec<namespace_store::PendingDirectoryCreateClassification>,
     pub(crate) other_namespace_evidence: bool,
     pub(crate) file_evidence: bool,
     pub(crate) file_records: usize,
@@ -180,6 +182,15 @@ fn history_summary_existing_inner(
     }
     lock.lock_exclusive()?;
     lock.verify()?;
+    // Only this explicit support query reuses byte-identical decoded metadata.
+    // The adapter and every local decoder drop under this same quota lease;
+    // file reads, budgets and all validation remain unchanged.
+    #[cfg(windows)]
+    let protector = if include_details {
+        super::metadata_memo::MetadataOpenMemo::scoped(protector)
+    } else {
+        protector
+    };
     let (result, _) = history_summary_existing_locked(
         Arc::clone(&root),
         protector,
@@ -291,6 +302,7 @@ fn history_summary_existing_locked(
     }
     if result.directory_evidence {
         let directories = root.child(namespace_store::ROOT, false)?;
+        let mut classifications = include_details.then(std::collections::BTreeMap::new);
         for scope in catalogs.directories {
             let directory = directories.child(&scope_key(&scope)?, false)?;
             let remaining = MAX_RECORDS
@@ -306,20 +318,42 @@ fn history_summary_existing_locked(
             // Borrowed metadata decoder only. The outer quota lock and this
             // same remaining budget cover both formats; no writer, admission,
             // body access or second independently observed snapshot is made.
-            let (records, unresolved) = namespace_store::history_counts_existing(
-                &*directory,
-                &*protector,
-                &scope,
-                provider,
-                physical_root,
-                budget,
-                remaining,
-            )?;
+            let (records, unresolved) = if let Some(classifications) = classifications.as_mut() {
+                namespace_store::history_counts_existing_with_classifications(
+                    &*directory,
+                    &*protector,
+                    &scope,
+                    provider,
+                    physical_root,
+                    budget,
+                    remaining,
+                    Some(classifications),
+                )?
+            } else {
+                namespace_store::history_counts_existing(
+                    &*directory,
+                    &*protector,
+                    &scope,
+                    provider,
+                    physical_root,
+                    budget,
+                    remaining,
+                )?
+            };
             result.directory_records += records;
             result.directory_unresolved += unresolved;
             directory.verify()?;
         }
         directories.verify()?;
+        if let Some(classifications) = classifications {
+            result.directory_pending_classifications = classifications
+                .into_iter()
+                .map(|(mut row, count)| {
+                    row.count = count;
+                    row
+                })
+                .collect();
+        }
     }
     if result.file_evidence {
         let remaining = MAX_RECORDS

@@ -5003,3 +5003,32 @@ These source corrections apply to the shared Windows GUI/CLI provider. The prior
 physical copy stopped with a generic original-directory-job message; it does not
 establish which condition occurred or how much time these corrections save.
 Linux runtime behavior and all retained recovery files remain unchanged.
+
+
+### Windows support inspection completion — 6 November 2026
+
+Explicit support diagnostics now wait up to 25 seconds for the existing
+account-bound metadata inspection. Windows GUI response handling uses 30
+seconds, matching the existing Agent client response budget. File-operation,
+authentication, native callback and recovery-job deadlines are unchanged.
+The nullable support result is accompanied by a fixed availability status:
+available, timed_out, unavailable, context_changed or not_connected. A failed
+or missing inspection remains unknown and never becomes zero pending records.
+The namespace-history status is separate from overall support availability.
+
+The explicit diagnostic query reuses identical successful v2 metadata decodes
+only under its one retained quota lease, with the same bounded, zeroized memo
+and all original reads, budgets and authentication checks. Pending directory
+histories are grouped into static phase, sequence, attention and completion
+counts while the existing rows are already authenticated. The output contains
+no paths, names, resource/record IDs, historical report contents or authority to
+retry, acknowledge or alter an operation. Routine health checks do not collect
+this histogram or relax pending-history refusals. The original full binding is
+checked before and after the worker inspection, and the Agent rechecks its
+original generation and root configuration before returning the result.
+
+The physical folder preparation refusal still requires classification of its
+retained blocker. The previous two-second request yielded no usable counts;
+its record-family counts remain unknown. These diagnostics do not resolve old
+operations, clear recovery or establish file-copy completion or speed. Windows
+GUI and CLI share the production command; Linux runtime behavior is unchanged.

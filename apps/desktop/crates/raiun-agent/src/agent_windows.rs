@@ -842,7 +842,7 @@ enum ProviderCommand {
     },
     VaultCleanupDiagnostics {
         binding: ActiveProviderBinding,
-        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+        response: std::sync::mpsc::SyncSender<Result<Value, &'static str>>,
     },
     VaultLockCleanupStatus {
         binding: ActiveProviderBinding,
@@ -1523,7 +1523,7 @@ impl ProviderManager {
                         }
                         ProviderCommand::VaultCleanupDiagnostics { binding, response } => {
                             let result = if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
-                                Err("The Windows drive changed before support inspection".to_owned())
+                                Err("context_changed")
                             } else if let Some(active) = connection.as_ref() {
                                 let observation = active.vault_cleanup_diagnostics();
                                 let namespace_history = active.namespace_recovery_summary().ok().map(|summary| {
@@ -1540,6 +1540,7 @@ impl ProviderManager {
                                     "rename_unresolved": summary.rename_unresolved,
                                     "directory_records": summary.directory_records,
                                     "directory_unresolved": summary.directory_unresolved,
+                                    "directory_pending_classifications": summary.directory_pending_classifications,
                                     "file_records": summary.file_records,
                                     "file_unresolved": summary.file_unresolved,
                                     "file_acknowledged_join_gaps": summary.file_acknowledged_join_gaps,
@@ -1563,9 +1564,9 @@ impl ProviderManager {
                                     "inventory_complete": observation.inventory_complete,
                                     "last_cleanup_error": last_vault_cleanup_error.map(|error| format!("{error:?}")),
                                 }))
-                            } else { Err("The Windows drive is not connected".to_owned()) };
-                            let result = if worker_generation.load(Ordering::Acquire) == binding.generation { result }
-                                else { Err("The Windows drive changed during support inspection".to_owned()) };
+                            } else { Err("not_connected") };
+                            let result = if vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) { result }
+                                else { Err("context_changed") };
                             let _ = response.send(result);
                         }
                         ProviderCommand::VaultLockCleanupStatus { binding, space_id, root_resource_id, root_path, response } => {
@@ -2830,14 +2831,20 @@ impl ProviderManager {
             .map_err(|_| "Vault pending inspection did not complete within its bound".to_owned())?
     }
 
-    fn vault_cleanup_diagnostics(&self, binding: ActiveProviderBinding) -> Result<Value, String> {
+    fn vault_cleanup_diagnostics(
+        &self,
+        binding: ActiveProviderBinding,
+    ) -> Result<Value, &'static str> {
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
             .try_send(ProviderCommand::VaultCleanupDiagnostics { binding, response })
-            .map_err(|_| "Windows support inspection is unavailable")?;
+            .map_err(|_| "unavailable")?;
         result
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| "Windows support inspection was unavailable within its bound".to_owned())?
+            .recv_timeout(Duration::from_secs(25))
+            .map_err(|error| match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => "timed_out",
+                std::sync::mpsc::RecvTimeoutError::Disconnected => "unavailable",
+            })?
     }
 
     // true = exact pending cleanup; false = unknown, never complete.
@@ -4212,8 +4219,16 @@ impl WindowsAgent {
                     },
                 });
                 drop(state);
-                let mut cleanup = binding
-                    .and_then(|binding| self.provider.vault_cleanup_diagnostics(binding).ok());
+                let (mut cleanup_status, mut cleanup) = if !mounted {
+                    ("not_connected", None)
+                } else if let Some(binding) = binding {
+                    match self.provider.vault_cleanup_diagnostics(binding) {
+                        Ok(value) => ("available", Some(value)),
+                        Err(status) => (status, None),
+                    }
+                } else {
+                    ("unavailable", None)
+                };
                 let state = self
                     .state
                     .lock()
@@ -4223,7 +4238,9 @@ impl WindowsAgent {
                     || state.root_configuration != configuration
                 {
                     cleanup = None;
+                    cleanup_status = "context_changed";
                 }
+                value["runtime"]["vault_cleanup_status"] = json!(cleanup_status);
                 value["runtime"]["vault_cleanup"] = cleanup.unwrap_or(Value::Null);
                 Ok((value, false))
             }

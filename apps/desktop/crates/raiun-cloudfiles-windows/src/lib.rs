@@ -366,6 +366,8 @@ impl FreshCreateSpace {
 
 #[cfg(windows)]
 pub use streamed_store::namespace_file_store::PendingFileCreateClassification;
+#[cfg(windows)]
+pub use streamed_store::namespace_store::PendingDirectoryCreateClassification;
 
 /// Authenticated namespace metadata counts; no bodies or recovery authority.
 #[cfg(windows)]
@@ -375,6 +377,8 @@ pub struct NamespaceRecoverySummary {
     pub rename_unresolved: usize,
     pub directory_records: usize,
     pub directory_unresolved: usize,
+    /// Static authenticated pending-directory phases, explicit diagnostics only.
+    pub directory_pending_classifications: Vec<PendingDirectoryCreateClassification>,
     pub file_records: usize,
     pub file_unresolved: usize,
     /// Historical original native ACK0/0, with the join event still incomplete.

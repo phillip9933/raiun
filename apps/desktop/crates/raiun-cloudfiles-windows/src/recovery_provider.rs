@@ -2056,6 +2056,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             rename_unresolved: summary.unresolved,
             directory_records: summary.directory_records,
             directory_unresolved: summary.directory_unresolved,
+            directory_pending_classifications: summary.directory_pending_classifications,
             file_records: summary.file_records,
             file_unresolved: summary.file_unresolved,
             file_acknowledged_join_gaps: summary.file_acknowledged_join_gaps,

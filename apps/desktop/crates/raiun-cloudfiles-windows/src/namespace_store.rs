@@ -31,6 +31,46 @@ pub struct StoredDirectoryIntent {
     pub progress: NamespaceProgressSnapshot,
     pub commitment: [u8; 32],
 }
+
+/// Static authenticated pending-history histogram only. No identifier, path,
+/// historical report or recovery/mutation capability is retained or exposed.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+pub struct PendingDirectoryCreateClassification {
+    pub phase: &'static str,
+    pub sequence: u64,
+    pub attention: &'static str,
+    pub local_completed: bool,
+    pub continued: bool,
+    pub source_removal: Option<&'static str>,
+    pub recorded_complete: bool,
+    pub count: usize,
+}
+impl PendingDirectoryCreateClassification {
+    fn from_progress(progress: NamespaceProgressSnapshot) -> Self {
+        fn phase(value: NamespacePhase) -> &'static str {
+            match value {
+                NamespacePhase::Pending => "pending",
+                NamespacePhase::Submitted => "submitted",
+                NamespacePhase::Verified => "verified",
+            }
+        }
+        Self {
+            phase: phase(progress.remote),
+            sequence: progress.sequence,
+            attention: match progress.attention {
+                None => "none",
+                Some(NamespaceAttention::Conflict) => "conflict",
+                Some(NamespaceAttention::Deferred) => "deferred",
+                Some(NamespaceAttention::Uncertain) => "uncertain",
+            },
+            local_completed: progress.local_completed,
+            continued: progress.continued,
+            source_removal: progress.source_removal.map(phase),
+            recorded_complete: progress.recorded_complete,
+            count: 0,
+        }
+    }
+}
 pub struct PublishedDirectoryIntent {
     pub record: StoredDirectoryIntent,
     pub created: bool,
@@ -731,6 +771,27 @@ pub(super) fn history_counts_existing(
     budget: &mut Budget,
     remaining: usize,
 ) -> Result<(usize, usize), StoreError> {
+    history_counts_existing_with_classifications(
+        directory, protector, scope, provider, physical, budget, remaining, None,
+    )
+}
+
+/// Explicit diagnostics may aggregate static progress inline from the exact
+/// rows already authenticated by the existing count scan. None is the normal
+/// health path, with no additional classification or IO.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn history_counts_existing_with_classifications(
+    directory: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    scope: &EditJournalScope,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+    mut classifications: Option<
+        &mut std::collections::BTreeMap<PendingDirectoryCreateClassification, usize>,
+    >,
+) -> Result<(usize, usize), StoreError> {
     validate_scope(scope)?;
     directory.verify()?;
     let decoder = DirectoryHistoryDecoder { protector };
@@ -751,6 +812,14 @@ pub(super) fn history_counts_existing(
     for id in &ids {
         let row = decoder.load_scoped(directory, id, budget, scope, &names)?;
         unresolved += usize::from(!row.record.progress.recorded_complete);
+        if !row.record.progress.recorded_complete
+            && let Some(classifications) = classifications.as_deref_mut()
+        {
+            let classification =
+                PendingDirectoryCreateClassification::from_progress(row.record.progress);
+            let count = classifications.entry(classification).or_insert(0usize);
+            *count = count.checked_add(1).ok_or(StoreError::ScanLimit)?;
+        }
     }
     directory.verify()?;
     Ok((ids.len(), unresolved))
