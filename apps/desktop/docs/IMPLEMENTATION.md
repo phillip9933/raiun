@@ -5249,6 +5249,9 @@ identity, type, owner and DACL checks around its size observation, and returns
 only a complete validated size result. A missing or unsafe entry remains a
 failure. The default adapter follows the original per-file path; no accounting
 index, negative result or authorization is retained across quota operations.
+These size queries retain the original immutable reader's `GENERIC_READ`
+access and read-only sharing; attribute-only opens cannot supply the required
+sharing exclusion. The batch does not read file contents or expose handles.
 
 These changes remove confirmed duplicate work. Catalog savings depend on scope
 count and size-accounting savings depend on retained history; neither establishes

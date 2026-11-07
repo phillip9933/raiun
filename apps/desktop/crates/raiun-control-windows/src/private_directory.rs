@@ -867,7 +867,7 @@ pub enum PinnedPrivateFileAccess {
 #[derive(Clone, Copy)]
 enum PrivateChildAccess {
     Pinned(PinnedPrivateFileAccess),
-    MetadataOnly,
+    MetadataSizing,
 }
 
 impl PrivateDirectory {
@@ -1161,11 +1161,12 @@ impl PrivateDirectory {
         name: &OsStr,
         access: PrivateChildAccess,
     ) -> io::Result<(File, PinnedFileIdentity)> {
-        const FILE_READ_ATTRIBUTES_ACCESS: u32 = 0x80;
-        const READ_CONTROL_ACCESS: u32 = 0x0002_0000;
         validate_component(name)?;
         let desired_access = match access {
-            PrivateChildAccess::MetadataOnly => FILE_READ_ATTRIBUTES_ACCESS | READ_CONTROL_ACCESS,
+            // Attribute-only access does not establish the sharing exclusion
+            // needed for immutable sizes. Retain the original reader's access
+            // and sharing mode even though this batch never reads file data.
+            PrivateChildAccess::MetadataSizing => GENERIC_READ,
             PrivateChildAccess::Pinned(
                 PinnedPrivateFileAccess::ReadOnly | PinnedPrivateFileAccess::ImmutableRead,
             ) => GENERIC_READ,
@@ -1174,7 +1175,7 @@ impl PrivateDirectory {
             }
         };
         let share = match access {
-            PrivateChildAccess::MetadataOnly
+            PrivateChildAccess::MetadataSizing
             | PrivateChildAccess::Pinned(PinnedPrivateFileAccess::ImmutableRead) => FILE_SHARE_READ,
             _ => FILE_SHARE_READ | FILE_SHARE_WRITE,
         };
@@ -1447,7 +1448,7 @@ impl<'a> PrivateMetadataSizeParent<'a> {
     }
     fn open(&self, name: &OsStr) -> io::Result<(File, PinnedFileIdentity)> {
         self.directory
-            .open_private_child(name, PrivateChildAccess::MetadataOnly)
+            .open_private_child(name, PrivateChildAccess::MetadataSizing)
     }
     fn verify(&self) -> io::Result<()> {
         self.directory.verify_path()?;
