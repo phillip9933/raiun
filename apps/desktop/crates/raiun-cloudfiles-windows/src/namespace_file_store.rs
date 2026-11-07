@@ -1997,8 +1997,8 @@ pub(super) fn accounted_usage(
             .entries
             .checked_add(names.len())
             .ok_or(StoreError::ScanLimit)?;
-        for name in names {
-            usage.add(directory.open(&name)?.len()?)?;
+        for length in metadata_sizes_checked(&*directory, &names)? {
+            usage.add(length)?;
         }
         directory.verify()?;
     }

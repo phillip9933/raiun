@@ -5218,3 +5218,38 @@ busy store, scan limit or other local refusal. Aggregate reconnect uncertainty
 and incomplete historical inventory are not evidence of a current close failure.
 The incomplete native copy did not establish which of these conditions occurred,
 and these source changes do not establish a completed copy or speed improvement.
+
+### Directory cloud-creation preparation — 7 November 2026
+
+The installed Windows candidate subsequently stopped while creating the fresh
+copy destination, before Paste. Its cloud-creation phase covers send-time
+preflight, SDK admission, MKCOL and readback, so that label alone does not
+identify an HTTP delay. Fixed labels now observe the original remaining budget
+at Send entry and whether its worker has returned a result. A returned worker
+result can be rejected or uncertain; the label grants no remote-success or
+publication authority. Original deadlines and outcome handling remain.
+
+For an exact `/` recovery root, SDK mkdir and recovery-stat validate the
+expected root identity inside that same call's fresh ancestor walk, before
+reading descendants. This removes a separate generic root lookup. Fresh Graph
+routing, ordinary/writable ancestry, target checks and final cancellation and
+security checks remain. Other root forms retain the original path, and separate
+preflight, readback and root-after observations remain separate fresh calls.
+
+Quota inventories retain authenticated snapshot-scope catalogs with immutable
+reader pins for that inventory only. Scope correspondence, repeated original
+budget debits, accounting and final reader/root verification remain. The
+separate global inventories around cloud preflight cannot be combined because
+the quota lease is released between them.
+
+Size-only accounting also batches repeated verification of the same protected
+directory and its retained ancestor chain. It verifies the chain before and
+after the batch, keeps each file's original no-follow immutable handle,
+identity, type, owner and DACL checks around its size observation, and returns
+only a complete validated size result. A missing or unsafe entry remains a
+failure. The default adapter follows the original per-file path; no accounting
+index, negative result or authorization is retained across quota operations.
+
+These changes remove confirmed duplicate work. Catalog savings depend on scope
+count and size-accounting savings depend on retained history; neither establishes
+the cause of the earlier deadline or a measured whole-copy speed improvement.

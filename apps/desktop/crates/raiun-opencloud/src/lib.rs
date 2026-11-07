@@ -1383,6 +1383,16 @@ impl OpenCloudClient {
         target_url: &Url,
         logical_path: &str,
     ) -> Result<(RemoteEntry, RemoteEntry), CloudError> {
+        self.ensure_writable_target_with_root_observed(space, target_url, logical_path, None)
+    }
+
+    fn ensure_writable_target_with_root_observed(
+        &self,
+        space: &CloudSpace,
+        target_url: &Url,
+        logical_path: &str,
+        root_observer: Option<&dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>>,
+    ) -> Result<(RemoteEntry, RemoteEntry), CloudError> {
         if space.encrypted {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
@@ -1396,8 +1406,13 @@ impl OpenCloudClient {
             ));
         }
         let context = ACTIVE_RANGE_CONTEXT.with(Cell::get);
-        let (root, parent) =
-            self.ordinary_ancestor_root_and_last_with_context(space, logical_path, false, context)?;
+        let (root, parent) = self.ordinary_ancestor_root_and_last_observed_with_context(
+            space,
+            logical_path,
+            false,
+            context,
+            root_observer,
+        )?;
         let mut entry = None;
         let target_result = self.propfind(target_url, "0", logical_path, &mut |value| {
             if entry.is_some() {
@@ -2252,6 +2267,18 @@ fn validate_recovery_root_with_stat(
     expected_root_id: &str,
     stat: impl FnOnce() -> Result<RemoteEntry, CloudError>,
 ) -> Result<(), CloudError> {
+    validate_recovery_root_input(remote_root_path, expected_root_id)?;
+    let root = stat()?;
+    if root.id != expected_root_id || !root.directory || root.encrypted {
+        return Err(conflict("recovery root identity changed"));
+    }
+    Ok(())
+}
+
+fn validate_recovery_root_input(
+    remote_root_path: &str,
+    expected_root_id: &str,
+) -> Result<(), CloudError> {
     if expected_root_id.is_empty()
         || expected_root_id.len() > MAX_DAV_ENTRY
         || expected_root_id.chars().any(char::is_control)
@@ -2269,10 +2296,6 @@ fn validate_recovery_root_with_stat(
                 .any(str::is_empty))
     {
         return Err(invalid("recovery root identity is invalid"));
-    }
-    let root = stat()?;
-    if root.id != expected_root_id || !root.directory || root.encrypted {
-        return Err(conflict("recovery root identity changed"));
     }
     Ok(())
 }
@@ -2452,6 +2475,16 @@ impl OpenCloudClient {
         path: &str,
         context: RangeReadContext,
     ) -> Result<RemoteEntry, CloudError> {
+        self.stat_discovered_ordinary_observed_with_context(space, path, context, None)
+    }
+
+    fn stat_discovered_ordinary_observed_with_context(
+        &self,
+        space: &CloudSpace,
+        path: &str,
+        context: RangeReadContext,
+        root_observer: Option<&dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>>,
+    ) -> Result<RemoteEntry, CloudError> {
         let _guard = RangeContextGuard::enter(context);
         let security = self.security_generation.load(Ordering::Acquire);
         self.ensure_context_current(context)?;
@@ -2471,8 +2504,13 @@ impl OpenCloudClient {
                 ));
             }
             let url = append_logical_path(&root_url, path)?;
-            let root =
-                self.ordinary_ancestor_root_entry_with_context(space, path, false, Some(context))?;
+            let (root, _) = self.ordinary_ancestor_root_and_last_observed_with_context(
+                space,
+                path,
+                false,
+                Some(context),
+                root_observer,
+            )?;
             self.ensure_context_current(context)?;
             self.ensure_security_current(security)?;
             // Exact root metadata was just read and fully validated by the
@@ -2530,10 +2568,31 @@ impl OpenCloudClient {
         if path.trim_end_matches('/') == remote_root_path.trim_end_matches('/') {
             return Err(invalid("cannot create a Space root"));
         }
-        self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
-        ensure_not_cancelled(&is_cancelled)?;
-        let (selected, url) = self.transfer_url(space, &path)?;
-        self.ensure_writable_target(&selected, &url, &path)?;
+        let url = if remote_root_path == "/" {
+            validate_recovery_root_input(remote_root_path, expected_root_id)?;
+            ensure_not_cancelled(&is_cancelled)?;
+            let (selected, url) = self.transfer_url(space, &path)?;
+            // This fresh write-admission walk checks the exact root before
+            // any descendant lookup. No observation crosses an SDK call.
+            self.ensure_writable_target_with_root_observed(
+                &selected,
+                &url,
+                &path,
+                Some(&|_, root| {
+                    validate_recovery_root_with_stat(remote_root_path, expected_root_id, || {
+                        Ok(root.clone())
+                    })?;
+                    ensure_not_cancelled(&is_cancelled)
+                }),
+            )?;
+            url
+        } else {
+            self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
+            ensure_not_cancelled(&is_cancelled)?;
+            let (selected, url) = self.transfer_url(space, &path)?;
+            self.ensure_writable_target(&selected, &url, &path)?;
+            url
+        };
         self.ensure_context_current(context)?;
         let (request, token) =
             self.request(Method::from_bytes(b"MKCOL").expect("static method"), &url)?;
@@ -2623,8 +2682,24 @@ impl OpenCloudClient {
                     self.stat_discovered_ordinary_with_context(space, remote_root_path, context)
                 })
             };
-            check_root()?;
-            let entry = self.stat_discovered_ordinary_with_context(space, &path, context)?;
+            let entry = if remote_root_path == "/" {
+                validate_recovery_root_input(remote_root_path, expected_root_id)?;
+                // Root-before is the actual fresh ancestor observation from
+                // this lookup; reject its identity before reading descendants.
+                self.stat_discovered_ordinary_observed_with_context(
+                    space,
+                    &path,
+                    context,
+                    Some(&|_, root| {
+                        validate_recovery_root_with_stat(remote_root_path, expected_root_id, || {
+                            Ok(root.clone())
+                        })
+                    }),
+                )?
+            } else {
+                check_root()?;
+                self.stat_discovered_ordinary_with_context(space, &path, context)?
+            };
             validate_recovery_entry(&entry, &path)?;
             check_root()?;
             Ok(entry)

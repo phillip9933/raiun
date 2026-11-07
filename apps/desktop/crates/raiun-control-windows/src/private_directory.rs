@@ -864,7 +864,45 @@ pub enum PinnedPrivateFileAccess {
     ReadWrite,
 }
 
+#[derive(Clone, Copy)]
+enum PrivateChildAccess {
+    Pinned(PinnedPrivateFileAccess),
+    MetadataOnly,
+}
+
 impl PrivateDirectory {
+    /// Maximum simultaneous immutable file pins in one metadata-only batch.
+    pub const MAX_METADATA_SIZE_BATCH: usize = 64;
+
+    /// Measure exactly these direct children without reading their contents.
+    /// Parent/ancestor pins remain owned throughout; no partial sizes or
+    /// handles escape if any file or final parent verification fails.
+    pub fn metadata_sizes_checked(&self, names: &[&OsStr]) -> io::Result<Vec<u64>> {
+        if names.len() > Self::MAX_METADATA_SIZE_BATCH {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Private metadata batch exceeds its bound",
+            ));
+        }
+        let parent = PrivateMetadataSizeParent::new(self)?;
+        let mut files = Vec::with_capacity(names.len());
+        let mut sizes = Vec::with_capacity(names.len());
+        for name in names {
+            let (file, expected) = parent.open(name)?;
+            let size = file.metadata()?.len();
+            files.push((file, expected, size));
+            sizes.push(size);
+        }
+        for (file, expected, size) in &files {
+            validate_private_handle(file, PrivateEntryKind::File)?;
+            if identity(file)? != *expected || file.metadata()?.len() != *size {
+                return Err(private_policy_error());
+            }
+        }
+        parent.verify()?;
+        Ok(sizes)
+    }
+
     /// Publish a private staged file without replacing an existing child.
     /// Close the staging writer first. The same rename handle is checked for
     /// private ownership/ACL and expected identity before publication.
@@ -1105,15 +1143,39 @@ impl PrivateDirectory {
         access: PinnedPrivateFileAccess,
     ) -> io::Result<PinnedPrivateFile<'_>> {
         self.verify_path()?;
+        let (file, identity) = self.open_private_child(name, PrivateChildAccess::Pinned(access))?;
+        self.verify_path()?;
+        Ok(PinnedPrivateFile {
+            directory: self,
+            file,
+            identity,
+            delete_authorized: false,
+        })
+    }
+
+    // Shared component, access, no-follow, type, owner/DACL and FileID checks.
+    // Only the original before/after checked open or the private batch-parent
+    // proof below may call this; it is not an unchecked public entrypoint.
+    fn open_private_child(
+        &self,
+        name: &OsStr,
+        access: PrivateChildAccess,
+    ) -> io::Result<(File, PinnedFileIdentity)> {
+        const FILE_READ_ATTRIBUTES_ACCESS: u32 = 0x80;
+        const READ_CONTROL_ACCESS: u32 = 0x0002_0000;
         validate_component(name)?;
         let desired_access = match access {
-            PinnedPrivateFileAccess::ReadOnly | PinnedPrivateFileAccess::ImmutableRead => {
-                GENERIC_READ
+            PrivateChildAccess::MetadataOnly => FILE_READ_ATTRIBUTES_ACCESS | READ_CONTROL_ACCESS,
+            PrivateChildAccess::Pinned(
+                PinnedPrivateFileAccess::ReadOnly | PinnedPrivateFileAccess::ImmutableRead,
+            ) => GENERIC_READ,
+            PrivateChildAccess::Pinned(PinnedPrivateFileAccess::ReadWrite) => {
+                GENERIC_READ | GENERIC_WRITE
             }
-            PinnedPrivateFileAccess::ReadWrite => GENERIC_READ | GENERIC_WRITE,
         };
         let share = match access {
-            PinnedPrivateFileAccess::ImmutableRead => FILE_SHARE_READ,
+            PrivateChildAccess::MetadataOnly
+            | PrivateChildAccess::Pinned(PinnedPrivateFileAccess::ImmutableRead) => FILE_SHARE_READ,
             _ => FILE_SHARE_READ | FILE_SHARE_WRITE,
         };
         let file = open_file_handle_with_share(
@@ -1124,13 +1186,7 @@ impl PrivateDirectory {
         )?;
         validate_private_handle(&file, PrivateEntryKind::File)?;
         let identity = identity(&file)?;
-        self.verify_path()?;
-        Ok(PinnedPrivateFile {
-            directory: self,
-            file,
-            identity,
-            delete_authorized: false,
-        })
+        Ok((file, identity))
     }
 
     /// Open an immutable reader that owns its validated directory lifetime.
@@ -1356,6 +1412,65 @@ pub struct OwnedPrivateReader {
     file: File,
     directory: Arc<PrivateDirectory>,
     identity: PinnedFileIdentity,
+}
+
+/// Private, nonescaping proof for one bounded metadata observation. The
+/// borrowed directory owns every original no-delete-sharing ancestor pin.
+struct PrivateMetadataSizeParent<'a> {
+    directory: &'a PrivateDirectory,
+    ancestors: Vec<PinnedFileIdentity>,
+}
+impl<'a> PrivateMetadataSizeParent<'a> {
+    fn new(directory: &'a PrivateDirectory) -> io::Result<Self> {
+        directory.verify_path()?;
+        let ancestors = directory
+            .directory
+            ._handles
+            .iter()
+            .map(|file| {
+                let info = file_info(file)?;
+                if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                    || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                {
+                    return Err(private_policy_error());
+                }
+                identity(file)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        if ancestors.last().copied() != Some(directory.identity()) {
+            return Err(private_policy_error());
+        }
+        Ok(Self {
+            directory,
+            ancestors,
+        })
+    }
+    fn open(&self, name: &OsStr) -> io::Result<(File, PinnedFileIdentity)> {
+        self.directory
+            .open_private_child(name, PrivateChildAccess::MetadataOnly)
+    }
+    fn verify(&self) -> io::Result<()> {
+        self.directory.verify_path()?;
+        if self.ancestors.len() != self.directory.directory._handles.len() {
+            return Err(private_policy_error());
+        }
+        for (file, expected) in self
+            .directory
+            .directory
+            ._handles
+            .iter()
+            .zip(&self.ancestors)
+        {
+            let info = file_info(file)?;
+            if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || identity(file)? != *expected
+            {
+                return Err(private_policy_error());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl OwnedPrivateReader {

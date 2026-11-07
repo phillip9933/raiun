@@ -65,6 +65,9 @@ pub(super) fn existing_root(
     })))
 }
 impl Directory for WindowsDirectory {
+    fn immutable_metadata_reads(&self) -> bool {
+        true
+    }
     fn verify(&self) -> Result<(), StoreError> {
         self._admitted_state.verify_path().map_err(io_error)?;
         self.directory.verify_path().map_err(io_error)
@@ -123,6 +126,20 @@ impl Directory for WindowsDirectory {
             .open_owned_immutable_file(OsStr::new(name))
             .map_err(io_error)?;
         Ok(Box::new(file))
+    }
+    fn metadata_sizes(&self, names: &[String]) -> Result<Vec<u64>, StoreError> {
+        self.verify()?;
+        let mut sizes = Vec::with_capacity(names.len());
+        for chunk in names.chunks(PrivateDirectory::MAX_METADATA_SIZE_BATCH) {
+            let names: Vec<_> = chunk.iter().map(OsStr::new).collect();
+            sizes.extend(
+                self.directory
+                    .metadata_sizes_checked(&names)
+                    .map_err(io_error)?,
+            );
+        }
+        self.verify()?;
+        Ok(sizes)
     }
     fn open_quota_lock(&self) -> Result<Box<dyn PinnedRead>, StoreError> {
         self.verify()?;

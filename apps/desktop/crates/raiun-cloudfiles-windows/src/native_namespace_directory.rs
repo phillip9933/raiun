@@ -856,18 +856,29 @@ impl DirectoryCreateTask {
                 )
             }
             DirectoryTaskKind::Send(session, intent, progress) => {
-                trace.enter(PreparationStage::DirectorySend);
+                trace.enter(match session.original_budget_remaining() {
+                    Some(remaining) if remaining >= std::time::Duration::from_secs(15) => {
+                        PreparationStage::DirectorySend
+                    }
+                    Some(remaining) if remaining >= std::time::Duration::from_secs(5) => {
+                        PreparationStage::DirectorySendUnderFifteenSeconds
+                    }
+                    _ => PreparationStage::DirectorySendUnderFiveSeconds,
+                });
                 let result = match crate::namespace_reconcile::submitted_directory_dispatch(
                     &intent, progress,
                 ) {
                     Ok(dispatch) => session.send(&dispatch),
                     Err(_) => OwnedDirectorySend::Uncertain,
                 };
+                // This marks a returned worker result, not remote success.
+                // Rejected and uncertain outcomes retain their original rules.
+                trace.enter(PreparationStage::DirectorySendReplyReady);
                 (Phase::Send, DirectoryReplyKind::Sent(session, result))
             }
             DirectoryTaskKind::Refresh(pair) => {
                 let (session, intent, report) = *pair;
-                let remaining = session.refresh_budget_remaining();
+                let remaining = session.original_budget_remaining();
                 trace.enter(match remaining {
                     Some(remaining) if remaining >= std::time::Duration::from_secs(15) => {
                         PreparationStage::DirectoryRefresh

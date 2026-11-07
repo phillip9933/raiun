@@ -166,6 +166,11 @@ trait StageWrite: Write {
     fn sync(&self) -> Result<(), StoreError>;
 }
 trait Directory: Send + Sync {
+    /// Only production adapters with no-write/no-delete-sharing reader pins
+    /// may reuse authenticated metadata within one retained quota observation.
+    fn immutable_metadata_reads(&self) -> bool {
+        false
+    }
     fn verify(&self) -> Result<(), StoreError>;
     /// Metadata-only accounting; default is for injected synthetic storage.
     fn external_recovery_usage(&self, _policy: StorePolicy) -> Result<(u64, usize), StoreError> {
@@ -175,12 +180,28 @@ trait Directory: Send + Sync {
     fn child(&self, name: &str, create: bool) -> Result<Arc<dyn Directory>, StoreError>;
     fn create(&self, name: &str) -> Result<(Box<dyn StageWrite>, Identity), StoreError>;
     fn open(&self, name: &str) -> Result<Box<dyn PinnedRead>, StoreError>;
+    /// Complete metadata-only size observation. Injected adapters keep the
+    /// original per-file open/length path, with no partial result.
+    fn metadata_sizes(&self, names: &[String]) -> Result<Vec<u64>, StoreError> {
+        names.iter().map(|name| self.open(name)?.len()).collect()
+    }
     /// Open only the persistent admission lock. Injected stores retain the
     /// previous generic-open behavior unless they provide a native adapter.
     fn open_quota_lock(&self) -> Result<Box<dyn PinnedRead>, StoreError> {
         self.open(V2_QUOTA_LOCK)
     }
     fn publish(&self, stage: &str, final_name: &str, identity: Identity) -> Result<(), StoreError>;
+}
+
+fn metadata_sizes_checked(
+    directory: &dyn Directory,
+    names: &[String],
+) -> Result<Vec<u64>, StoreError> {
+    let sizes = directory.metadata_sizes(names)?;
+    if sizes.len() != names.len() {
+        return Err(StoreError::CorruptEvidence);
+    }
+    Ok(sizes)
 }
 
 /// Owns the admitted state's entire v2 root. It cannot open arbitrary paths.
@@ -1015,18 +1036,30 @@ fn v2_inventory_state(
     policy.validate()?;
     root.verify()?;
     let expected_key = expected_scope.map(scope_key).transpose()?;
+    let mut budget = Budget::new(policy);
+    let root_names = root.entries(policy.max_entries)?;
+    budget.entries(root_names.len())?;
+    let mut pinned_catalogs = std::collections::BTreeMap::new();
+    validate_root_catalog_scope_union_with_pins(
+        root,
+        protector,
+        &root_names,
+        &mut budget,
+        root.immutable_metadata_reads()
+            .then_some(&mut pinned_catalogs),
+    )?;
     let authenticated_scope =
         |key: &str, budget: &mut Budget| -> Result<EditJournalScope, StoreError> {
-            let scope = authenticate_scope_catalog(root, protector, key, budget)?;
+            let scope = if let Some(catalog) = pinned_catalogs.get(key) {
+                catalog.reuse(budget)?
+            } else {
+                authenticate_scope_catalog(root, protector, key, budget)?
+            };
             if expected_key.as_deref() == Some(key) && expected_scope != Some(&scope) {
                 return Err(StoreError::CorruptEvidence);
             }
             Ok(scope)
         };
-    let mut budget = Budget::new(policy);
-    let root_names = root.entries(policy.max_entries)?;
-    budget.entries(root_names.len())?;
-    validate_root_catalog_scope_union(root, protector, &root_names, &mut budget)?;
     let mut result = Inventory {
         bytes: 0,
         entries: root_names.len(),
@@ -1127,7 +1160,11 @@ fn v2_inventory_state(
             {
                 return Err(StoreError::IncompleteEvidence);
             }
-            result.add(directory.open(child)?.len()?)?;
+        }
+        let lengths = metadata_sizes_checked(&*directory, &names)?;
+        for (child, length) in names.iter().zip(lengths) {
+            let (id, suffix) = split_record_name(child)?;
+            result.add(length)?;
             if suffix == "reserve" {
                 let reservation = authenticate_reservation_record(
                     &*directory,
@@ -1139,6 +1176,9 @@ fn v2_inventory_state(
                 result.add(reservation.reserved_bytes)?;
             }
         }
+    }
+    for catalog in pinned_catalogs.values() {
+        catalog.verify()?;
     }
     root.verify()?;
     Ok(result)
@@ -1459,6 +1499,32 @@ struct RootCatalogScopes {
     keys: std::collections::HashSet<String>,
 }
 
+/// Original immutable catalog observation, retained only by one inventory.
+/// It is neither a healthy-state cache nor authority to mutate storage.
+struct AuthenticatedScopeCatalog {
+    scope: EditJournalScope,
+    reader: Box<dyn PinnedRead>,
+    sealed_len: u64,
+}
+impl AuthenticatedScopeCatalog {
+    fn verify(&self) -> Result<(), StoreError> {
+        if self.reader.len()? != self.sealed_len {
+            return Err(StoreError::CorruptEvidence);
+        }
+        self.reader.verify()
+    }
+    fn reuse(&self, budget: &mut Budget) -> Result<EditJournalScope, StoreError> {
+        self.verify()?;
+        // Preserve the original repeated metadata debits and failure bounds,
+        // even though this exact immutable catalog needs no second decryption.
+        budget.bytes = budget
+            .bytes
+            .checked_sub(self.sealed_len)
+            .ok_or(StoreError::ScanLimit)?;
+        Ok(self.scope.clone())
+    }
+}
+
 fn check_scope_union(keys: &std::collections::HashSet<String>) -> Result<(), StoreError> {
     if keys.len() > 256 {
         return Err(StoreError::ScanLimit);
@@ -1474,6 +1540,16 @@ fn validate_root_catalog_scope_union(
     protector: &dyn EditRecordProtector,
     names: &[String],
     budget: &mut Budget,
+) -> Result<RootCatalogScopes, StoreError> {
+    validate_root_catalog_scope_union_with_pins(root, protector, names, budget, None)
+}
+
+fn validate_root_catalog_scope_union_with_pins(
+    root: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    names: &[String],
+    budget: &mut Budget,
+    mut pinned_catalogs: Option<&mut std::collections::BTreeMap<String, AuthenticatedScopeCatalog>>,
 ) -> Result<RootCatalogScopes, StoreError> {
     root.verify()?;
     let mut unique = std::collections::HashSet::new();
@@ -1539,7 +1615,26 @@ fn validate_root_catalog_scope_union(
             if !valid_key(key) || !names.contains(&key.to_owned()) {
                 return Err(StoreError::IncompleteEvidence);
             }
-            let scope = authenticate_scope_catalog(root, protector, key, budget)?;
+            let scope = if let Some(catalogs) = pinned_catalogs.as_deref_mut() {
+                // The existing scope-union limit also bounds simultaneously
+                // retained immutable readers; an over-limit union still fails.
+                if catalogs.len() >= 256 {
+                    return Err(StoreError::ScanLimit);
+                }
+                let (sealed, reader) = read_metadata_pinned(root, name, budget)?;
+                let scope = decode_scope_catalog(protector, key, &sealed)?;
+                let catalog = AuthenticatedScopeCatalog {
+                    scope: scope.clone(),
+                    reader,
+                    sealed_len: sealed.len() as u64,
+                };
+                if catalogs.insert(key.to_owned(), catalog).is_some() {
+                    return Err(StoreError::CorruptEvidence);
+                }
+                scope
+            } else {
+                authenticate_scope_catalog(root, protector, key, budget)?
+            };
             root.child(key, false)?.verify()?;
             result.keys.insert(key.to_owned());
             result.snapshots.push(scope);
@@ -1561,9 +1656,17 @@ fn authenticate_scope_catalog(
         return Err(StoreError::Invalid);
     }
     let sealed = read_metadata(root, &format!("{key}.scope"), budget)?;
+    decode_scope_catalog(protector, key, &sealed)
+}
+
+fn decode_scope_catalog(
+    protector: &dyn EditRecordProtector,
+    key: &str,
+    sealed: &[u8],
+) -> Result<EditJournalScope, StoreError> {
     let plain = Zeroizing::new(
         protector
-            .open(&scope_aad(key), &sealed)
+            .open(&scope_aad(key), sealed)
             .map_err(|_| StoreError::CorruptEvidence)?,
     );
     if plain.len() > META_LIMIT / 2 {
@@ -1583,6 +1686,15 @@ fn read_metadata(
     name: &str,
     budget: &mut Budget,
 ) -> Result<Vec<u8>, StoreError> {
+    let (bytes, _reader) = read_metadata_pinned(directory, name, budget)?;
+    Ok(bytes)
+}
+
+fn read_metadata_pinned(
+    directory: &dyn Directory,
+    name: &str,
+    budget: &mut Budget,
+) -> Result<(Vec<u8>, Box<dyn PinnedRead>), StoreError> {
     let mut file = directory.open(name)?;
     let length = file.len()?;
     if length == 0 || length > META_LIMIT as u64 {
@@ -1599,7 +1711,7 @@ fn read_metadata(
         return Err(StoreError::CorruptEvidence);
     }
     file.verify()?;
-    Ok(bytes)
+    Ok((bytes, file))
 }
 fn persist_metadata(
     directory: &dyn Directory,

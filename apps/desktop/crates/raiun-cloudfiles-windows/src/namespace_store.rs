@@ -1632,8 +1632,8 @@ pub(super) fn accounted_usage(
                 .entries
                 .checked_add(children.len())
                 .ok_or(StoreError::ScanLimit)?;
-            for child in children {
-                result.add(directory.open(&child)?.len()?)?;
+            for length in metadata_sizes_checked(&*directory, &children)? {
+                result.add(length)?;
             }
             directory.verify()?;
         } else {
