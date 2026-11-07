@@ -155,6 +155,26 @@ impl Engine {
             Some("File saved locally but upload could not be queued. Open Saved upload copies in Transfers to recover it."),
         )
     }
+    /// Locate retained create recovery without obtaining new remote authority.
+    /// Mount startup must not probe every Space's DAV root just to watch its
+    /// existing journal. New creates and delivery still require fresh proofs.
+    pub fn cached_create_recovery_scope(
+        &self,
+        space: &str,
+    ) -> Result<Option<CacheScope>, CloudError> {
+        let Some(context) = &self.offline_cache else {
+            return Ok(None);
+        };
+        let scope = context
+            .cache
+            .find_plaintext_scope(&context.origin, &context.account_id, space)
+            .map_err(cache_cloud_error)?;
+        if let Some(scope) = &scope {
+            self.create_cache(scope)?;
+        }
+        Ok(scope)
+    }
+
     pub fn ordinary_create_scope(&self, space: &str) -> Result<Option<CacheScope>, CloudError> {
         if self.offline_cache.is_none() {
             return Ok(None);

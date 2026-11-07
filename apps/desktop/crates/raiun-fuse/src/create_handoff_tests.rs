@@ -1072,7 +1072,7 @@ fn unregistered_create_scope_fixture() -> (
 }
 
 #[test]
-fn create_handoff_scope_registration_initializes_only_genuinely_unregistered_online_scope() {
+fn create_handoff_scope_registration_leaves_unknown_scope_for_first_online_use() {
     let (_temp, fs, backend, mut owner) = unregistered_create_scope_fixture();
     let scope = fs
         .engine
@@ -1088,7 +1088,21 @@ fn create_handoff_scope_registration_initializes_only_genuinely_unregistered_onl
     );
     let before = backend.list_calls.load(Ordering::SeqCst);
     fs.register_create_upload_scopes(&owner.handle()).unwrap();
-    assert_eq!(backend.list_calls.load(Ordering::SeqCst), before + 1);
+    assert_eq!(backend.list_calls.load(Ordering::SeqCst), before);
+    assert!(
+        fs.engine
+            .cached_create_recovery_scope("personal")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fs.engine
+            .ordinary_create_page(&scope, None, 1)
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotFound
+    );
+    fs.engine.list("personal", "/").unwrap();
     assert!(
         fs.engine
             .ordinary_create_page(&scope, None, 1)
@@ -1106,19 +1120,31 @@ fn create_handoff_scope_registration_initializes_only_genuinely_unregistered_onl
 }
 
 #[test]
-fn create_handoff_scope_registration_refuses_offline_unknown_or_changed_root() {
+fn create_handoff_scope_registration_does_not_grant_offline_or_changed_root_authority() {
     {
         let (_temp, fs, backend, mut owner) = unregistered_create_scope_fixture();
+        let scope = fs.engine.ordinary_create_scope("personal").unwrap().unwrap();
         backend.set_network_error(Some(ErrorKind::Offline));
-        assert!(fs.register_create_upload_scopes(&owner.handle()).is_err());
+        fs.register_create_upload_scopes(&owner.handle()).unwrap();
         assert_eq!(backend.list_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            fs.engine
+                .capture_new_plaintext_create_parent(&scope, "/new.txt", None, &|| true)
+                .is_err()
+        );
         owner.stop_and_join().unwrap();
     }
     {
         let (_temp, fs, backend, mut owner) = unregistered_create_scope_fixture();
-        *backend.root_on_next_list.lock().unwrap() =
-            Some("root-changed-during-initialization".into());
-        assert!(fs.register_create_upload_scopes(&owner.handle()).is_err());
+        let scope = fs.engine.ordinary_create_scope("personal").unwrap().unwrap();
+        backend.replace_root_id("personal", "root-changed-before-create");
+        fs.register_create_upload_scopes(&owner.handle()).unwrap();
+        assert_eq!(backend.list_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            fs.engine
+                .capture_new_plaintext_create_parent(&scope, "/new.txt", None, &|| true)
+                .is_err()
+        );
         owner.stop_and_join().unwrap();
     }
 }

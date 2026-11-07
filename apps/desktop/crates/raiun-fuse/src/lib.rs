@@ -4118,27 +4118,13 @@ impl RaiunFilesystem {
             .values()
             .filter(|space| !space.encrypted)
         {
-            let scope = self
-                .engine
-                .ordinary_create_scope(&space.id)?
-                .ok_or_else(|| invalid("create handoff requires durable cache storage"))?;
-            let page = match self.engine.ordinary_create_page(&scope, None, 1) {
-                Ok(page) => page,
-                // ordinary_creates maps missing/corrupt ledger rows to Corrupt;
-                // NotFound here specifically means scope registration absent.
-                Err(error) if error.kind == ErrorKind::NotFound => {
-                    self.engine.list(&space.id, "/")?;
-                    let initialized = self
-                        .engine
-                        .ordinary_create_scope(&space.id)?
-                        .ok_or_else(|| invalid("create scope disappeared"))?;
-                    if initialized != scope {
-                        return Err(invalid("create root changed during scope initialization"));
-                    }
-                    self.engine.ordinary_create_page(&scope, None, 1)?
-                }
-                Err(error) => return Err(error),
+            // Startup watches only previously registered recovery. Fresh create
+            // admission registers and wakes new scopes after its online proof;
+            // an unused/unavailable DAV root must not block the entire mount.
+            let Some(scope) = self.engine.cached_create_recovery_scope(&space.id)? else {
+                continue;
             };
+            let page = self.engine.ordinary_create_page(&scope, None, 1)?;
             if !page.items.is_empty() {
                 handle.wake_scope(&scope)?;
             }
