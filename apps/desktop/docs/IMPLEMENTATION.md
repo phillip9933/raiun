@@ -5256,3 +5256,19 @@ sharing exclusion. The batch does not read file contents or expose handles.
 These changes remove confirmed duplicate work. Catalog savings depend on scope
 count and size-accounting savings depend on retained history; neither establishes
 the cause of the earlier deadline or a measured whole-copy speed improvement.
+
+Ordinary parent capture also retains one freshly discovered Space route inside
+that invocation, using it for its separate root, parent and intermediate metadata
+observations. Each observation still performs fresh DAV ancestry checks; exact
+binding, ordinary-storage, permissions, version tags and cancellation checks
+remain. Routes do not persist across files or later qualification phases.
+
+Protected metadata reads now validate the pinned parent and immutable file around
+one bounded length/read/EOF operation. This avoids repeating parent-policy walks
+for each small reader call. The original scan budget is debited before reading,
+and file identity, type, owner, DACL, length and final parent/state checks remain.
+Retained catalog readers keep their existing pin lifetime, and injected adapters
+keep the original read sequence. Every operation still reads current bytes;
+there is no shared authorization or metadata cache between operations. These
+source-level reductions do not establish the cause or completion of the partial
+Windows copy, or a measured speed improvement.

@@ -180,6 +180,31 @@ trait Directory: Send + Sync {
     fn child(&self, name: &str, create: bool) -> Result<Arc<dyn Directory>, StoreError>;
     fn create(&self, name: &str) -> Result<(Box<dyn StageWrite>, Identity), StoreError>;
     fn open(&self, name: &str) -> Result<Box<dyn PinnedRead>, StoreError>;
+    /// One bounded metadata read. The default preserves the original injected
+    /// adapter's open/length/debit/read/EOF/verify sequence exactly.
+    fn read_metadata_checked(
+        &self,
+        name: &str,
+        metadata_limit: u64,
+        remaining: &mut u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        let mut file = self.open(name)?;
+        let length = file.len()?;
+        if length == 0 || length > metadata_limit {
+            return Err(StoreError::CorruptEvidence);
+        }
+        *remaining = (*remaining)
+            .checked_sub(length)
+            .ok_or(StoreError::ScanLimit)?;
+        let mut bytes = vec![0; length as usize];
+        file.read_exact(&mut bytes).map_err(io_error)?;
+        let mut end = [0];
+        if file.read(&mut end).map_err(io_error)? != 0 {
+            return Err(StoreError::CorruptEvidence);
+        }
+        file.verify()?;
+        Ok(bytes)
+    }
     /// Complete metadata-only size observation. Injected adapters keep the
     /// original per-file open/length path, with no partial result.
     fn metadata_sizes(&self, names: &[String]) -> Result<Vec<u64>, StoreError> {
@@ -1686,8 +1711,7 @@ fn read_metadata(
     name: &str,
     budget: &mut Budget,
 ) -> Result<Vec<u8>, StoreError> {
-    let (bytes, _reader) = read_metadata_pinned(directory, name, budget)?;
-    Ok(bytes)
+    directory.read_metadata_checked(name, META_LIMIT as u64, &mut budget.bytes)
 }
 
 fn read_metadata_pinned(

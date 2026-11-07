@@ -899,27 +899,39 @@ impl OpenCloudPlaceholderBackend {
             token_generation: self.token_generation,
         };
         preparation_stage(trace, PreparationStage::ParentRootStat);
-        let root_entry = self
-            .client
-            .stat_with_context(&parent.space_id, "/", context)
-            .map_err(|error| {
+        // Retain only this invocation's fresh Graph route. Every metadata
+        // observation below still freshly walks its ordinary DAV ancestry;
+        // no root, permission or encryption result is cached across calls.
+        let spaces = self.client.spaces_with_context(context).map_err(|error| {
+            if let Some(trace) = trace {
+                trace.cloud(error.kind);
+            }
+            BackendError::Unavailable
+        })?;
+        let selected = spaces
+            .iter()
+            .find(|space| space.id == parent.space_id)
+            .ok_or_else(|| {
                 if let Some(trace) = trace {
-                    trace.cloud(error.kind);
+                    trace.cloud(ErrorKind::NotFound);
                 }
                 BackendError::Unavailable
             })?;
+        let stat = |path: &str| {
+            self.client
+                .stat_discovered_ordinary_with_context(selected, path, context)
+                .map_err(|error| {
+                    if let Some(trace) = trace {
+                        trace.cloud(error.kind);
+                    }
+                    BackendError::Unavailable
+                })
+        };
+        let root_entry = stat("/")?;
         preparation_stage(trace, PreparationStage::ParentStat);
-        let entry = self
-            .client
-            .stat_with_context(&parent.space_id, &parent.path, context)
-            .map_err(|error| {
-                if let Some(trace) = trace {
-                    trace.cloud(error.kind);
-                }
-                BackendError::Unavailable
-            })?;
-        // Preserve the original validation order and every condition. Only
-        // the fixed diagnostic stage changes; no metadata value is recorded.
+        let entry = stat(&parent.path)?;
+        // Preserve the original root/parent validation order and conditions;
+        // fixed diagnostic stages never record metadata values.
         preparation_stage(trace, PreparationStage::RootIdentity);
         if root_entry.id != parent.root_resource_id || root_entry.path != "/" {
             return Err(BackendError::Unavailable);
@@ -998,15 +1010,7 @@ impl OpenCloudPlaceholderBackend {
                 }
             } else {
                 self.ensure_ordinary_location(&parent.space_id, &binding.path)?;
-                let ancestor = self
-                    .client
-                    .stat_with_context(&parent.space_id, &binding.path, context)
-                    .map_err(|error| {
-                        if let Some(trace) = trace {
-                            trace.cloud(error.kind);
-                        }
-                        BackendError::Unavailable
-                    })?;
+                let ancestor = stat(&binding.path)?;
                 if ancestor.id != binding.remote_id
                     || ancestor.path != binding.path
                     || !ancestor.directory

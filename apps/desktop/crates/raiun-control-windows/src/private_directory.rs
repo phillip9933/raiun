@@ -870,9 +870,62 @@ enum PrivateChildAccess {
     MetadataSizing,
 }
 
+/// Bounded metadata-read failures, kept separate from caller budget refusal.
+#[derive(Debug)]
+pub enum PrivateMetadataReadError {
+    InvalidLength,
+    Budget,
+    Io(io::Error),
+}
+impl From<io::Error> for PrivateMetadataReadError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 impl PrivateDirectory {
     /// Maximum simultaneous immutable file pins in one metadata-only batch.
     pub const MAX_METADATA_SIZE_BATCH: usize = 64;
+    /// Hard allocation bound for one protected serialized metadata read.
+    pub const MAX_METADATA_READ_BYTES: u64 = 512 * 1024;
+
+    /// Read one exact immutable metadata file under a nonescaping parent proof.
+    /// Debit its exact length before reading, retaining the debit on later IO
+    /// failure. No partial bytes, handles or reusable proof escape.
+    pub fn read_metadata_checked(
+        &self,
+        name: &OsStr,
+        metadata_limit: u64,
+        remaining: &mut u64,
+    ) -> Result<Vec<u8>, PrivateMetadataReadError> {
+        if metadata_limit > Self::MAX_METADATA_READ_BYTES {
+            return Err(PrivateMetadataReadError::InvalidLength);
+        }
+        let parent = PrivateMetadataSizeParent::new(self)?;
+        let (mut file, expected) = parent.open_read(name)?;
+        let length = file.metadata()?.len();
+        if length == 0 || length > metadata_limit {
+            return Err(PrivateMetadataReadError::InvalidLength);
+        }
+        *remaining = (*remaining)
+            .checked_sub(length)
+            .ok_or(PrivateMetadataReadError::Budget)?;
+        let mut bytes = vec![0; length as usize];
+        file.read_exact(&mut bytes)?;
+        let mut end = [0];
+        if file.read(&mut end)? != 0 {
+            return Err(PrivateMetadataReadError::InvalidLength);
+        }
+        validate_private_handle(&file, PrivateEntryKind::File)?;
+        if identity(&file)? != expected {
+            return Err(private_policy_error().into());
+        }
+        if file.metadata()?.len() != length {
+            return Err(PrivateMetadataReadError::InvalidLength);
+        }
+        parent.verify()?;
+        Ok(bytes)
+    }
 
     /// Measure exactly these direct children without reading their contents.
     /// Parent/ancestor pins remain owned throughout; no partial sizes or
@@ -1449,6 +1502,12 @@ impl<'a> PrivateMetadataSizeParent<'a> {
     fn open(&self, name: &OsStr) -> io::Result<(File, PinnedFileIdentity)> {
         self.directory
             .open_private_child(name, PrivateChildAccess::MetadataSizing)
+    }
+    fn open_read(&self, name: &OsStr) -> io::Result<(File, PinnedFileIdentity)> {
+        self.directory.open_private_child(
+            name,
+            PrivateChildAccess::Pinned(PinnedPrivateFileAccess::ImmutableRead),
+        )
     }
     fn verify(&self) -> io::Result<()> {
         self.directory.verify_path()?;
