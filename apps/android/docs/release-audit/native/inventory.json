@@ -1,0 +1,440 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "description": "Local native-only security backport candidate; exact generated APK recorded by integrity checker. Prior signed phone build60 preserved unchanged."
+  },
+  "evidence_files": {
+    "scanner-native-build-manifest.json": "112002dce280f738bb4bb369d3f374d73d09a4ffa9ec38a245cbbf4adc951749",
+    "security-backports.json": "62e260123cc19c1206f17f14d18894bb4d7864f48ab2fef4cf91704104c127b2"
+  },
+  "artifacts": {
+    "androidx.graphics:graphics-path:1.0.1": {
+      "sha256": "8ca4032b6d79b351f0b59ad4b580eddbb9423e1652f7c958830687f1eee2ec03"
+    },
+    "androidx.datastore:datastore-core-android:1.1.7": {
+      "sha256": "adca1d7cde73406fcca2a0eeabac63459adc9d1fe201b79ba08711fa2e331984"
+    },
+    "androidx.camera:camera-core:1.4.2": {
+      "sha256": "bbca13760ce1587502eb15723d0e17fa0a3495d084e609c4e4c8d3c2e1c85cf8"
+    },
+    "net.java.dev.jna:jna:5.17.0": {
+      "sha256": "4dbeffffa665d97ad5aa7eee297531d3c841a86716ab7f774fd6956422b3cf38"
+    },
+    "com.microsoft.onnxruntime:onnxruntime-android:1.24.1": {
+      "sha256": "133134e2b01ffb91f8f66d46a3149f7fe402ac2e3e2d1df4f8fc679e999689f6"
+    },
+    "app.raiun.vendor:lazysodium-android:5.2.0-raiun-native.1": {
+      "sha256": "83326921726084e014289bffed0407bfeaa496622b9e01c862d684b32b56e6bc"
+    },
+    "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": {
+      "sha256": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+    }
+  },
+  "components": {
+    "opencv": {
+      "version": "4.12.0",
+      "artifacts": [
+        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1"
+      ],
+      "evidence": [
+        "https://github.com/phillip9933/open-android-doc-scanner/blob/8d9a451c27ed87d20110d25dcedb81001e0f521f/evidence/native-build-manifest.json",
+        "scanner-native-build-manifest.json",
+        "security-backports.json"
+      ],
+      "coverage_gap": "Base OpenCV4.12.0 source tag plus exact local typed-dispatch patch; raw OSVmatches retained and scoped resolutions artifact/evidence-bound. Static-transitive coverage not exhaustive.",
+      "source_tag": "4.12.0",
+      "osv_query": {
+        "package": {
+          "ecosystem": "GIT",
+          "name": "https://github.com/opencv/opencv.git"
+        },
+        "version": "4.12.0"
+      }
+    },
+    "ndk-libcxx": {
+      "version": "28.2.13676358",
+      "artifacts": [
+        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1"
+      ],
+      "evidence": [
+        "https://github.com/phillip9933/open-android-doc-scanner/blob/8d9a451c27ed87d20110d25dcedb81001e0f521f/evidence/native-build-manifest.json",
+        "scanner-native-build-manifest.json"
+      ],
+      "coverage_gap": "NDK build version is known; no verified OSV package/version mapping for Android NDK libc++ binaries. NDK version is not a libc++ upstream version."
+    },
+    "libsodium": {
+      "version": "1.0.20",
+      "artifacts": [
+        "app.raiun.vendor:lazysodium-android:5.2.0-raiun-native.1"
+      ],
+      "evidence": [
+        "https://github.com/terl/lazysodium-android/releases/tag/v5.2.0",
+        "security-backports.json"
+      ],
+      "coverage_gap": "Source-bound1.0.20 plus exactad3004e backport, allfile-tree signature/patch admission and behavior verified. Base-tag OSVquery cannot encode localbackport; exact resolution retained. Other undiscovered vulnerabilities remain possible.",
+      "source_tag": "1.0.20-RELEASE",
+      "osv_query": {
+        "package": {
+          "ecosystem": "GIT",
+          "name": "https://github.com/jedisct1/libsodium.git"
+        },
+        "version": "1.0.20-RELEASE"
+      }
+    },
+    "jna-dispatch": {
+      "version": "5.17.0",
+      "artifacts": [
+        "net.java.dev.jna:jna:5.17.0"
+      ],
+      "evidence": [
+        "https://github.com/java-native-access/jna/blob/5.17.0/native/Makefile"
+      ],
+      "coverage_gap": "Wrapper source tag queried; no reproducible build/source attestation for distributed dispatch binaries.",
+      "source_tag": "5.17.0",
+      "osv_query": {
+        "package": {
+          "ecosystem": "GIT",
+          "name": "https://github.com/java-native-access/jna.git"
+        },
+        "version": "5.17.0"
+      }
+    },
+    "libffi": {
+      "version": "3.4.4",
+      "artifacts": [
+        "net.java.dev.jna:jna:5.17.0"
+      ],
+      "evidence": [
+        "https://github.com/java-native-access/jna/blob/5.17.0/native/libffi/configure.ac"
+      ],
+      "coverage_gap": "Vendored configure.ac declares3.4.4; JNA may carry patches. Upstream tag query would misrepresent this fork; manual review/source commit inventory remains required."
+    },
+    "onnxruntime": {
+      "version": "1.24.1",
+      "artifacts": [
+        "com.microsoft.onnxruntime:onnxruntime-android:1.24.1"
+      ],
+      "evidence": [
+        "https://github.com/microsoft/onnxruntime/tree/v1.24.1",
+        "https://repo.maven.apache.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/1.24.1/"
+      ],
+      "coverage_gap": "Maven release/source tag binding; embedded transitive code/patch build options not fully inventoried.",
+      "source_tag": "v1.24.1",
+      "osv_query": {
+        "package": {
+          "ecosystem": "GIT",
+          "name": "https://github.com/microsoft/onnxruntime.git"
+        },
+        "version": "v1.24.1"
+      }
+    },
+    "androidx-camera": {
+      "version": "1.4.2",
+      "artifacts": [
+        "androidx.camera:camera-core:1.4.2"
+      ],
+      "evidence": [
+        "https://dl.google.com/dl/android/maven2/androidx/camera/camera-core/1.4.2/camera-core-1.4.2.aar"
+      ],
+      "coverage_gap": "Maven-coordinate coverage exists in check_runtime_advisories.py; native transitive revisions/build flags not attested."
+    },
+    "androidx-graphics": {
+      "version": "1.0.1",
+      "artifacts": [
+        "androidx.graphics:graphics-path:1.0.1"
+      ],
+      "evidence": [
+        "https://dl.google.com/dl/android/maven2/androidx/graphics/graphics-path/1.0.1/graphics-path-1.0.1.aar"
+      ],
+      "coverage_gap": "Maven-coordinate coverage exists in check_runtime_advisories.py; native transitive revisions/build flags not attested."
+    },
+    "androidx-datastore": {
+      "version": "1.1.7",
+      "artifacts": [
+        "androidx.datastore:datastore-core-android:1.1.7"
+      ],
+      "evidence": [
+        "https://dl.google.com/dl/android/maven2/androidx/datastore/datastore-core-android/1.1.7/datastore-core-android-1.1.7.aar"
+      ],
+      "coverage_gap": "Maven-coordinate coverage exists in check_runtime_advisories.py; native transitive revisions/build flags not attested."
+    },
+    "libyuv": {
+      "version": null,
+      "artifacts": [
+        "androidx.camera:camera-core:1.4.2"
+      ],
+      "evidence": [
+        "https://dl.google.com/dl/android/maven2/androidx/camera/camera-core/1.4.2/camera-core-1.4.2.pom",
+        "https://chromium.googlesource.com/libyuv/libyuv/+/refs/heads/main/README.chromium"
+      ],
+      "coverage_gap": "Pinned CameraX POM declares BSD libyuv and AAR includes its image conversion library; exact embedded revision not yet source-bound. POM reference to upstream main is attribution only. Do not query current main, distro versions or infer version from notices/filenames."
+    }
+  },
+  "libraries": [
+    {
+      "apk_entry": "lib/arm64-v8a/libandroidx.graphics.path.so",
+      "source_entry": "jni/arm64-v8a/libandroidx.graphics.path.so",
+      "sha256": "41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6",
+      "artifact": "androidx.graphics:graphics-path:1.0.1",
+      "components": [
+        "androidx-graphics"
+      ]
+    },
+    {
+      "apk_entry": "lib/arm64-v8a/libc++_shared.so",
+      "source_entry": "jni/arm64-v8a/libc++_shared.so",
+      "sha256": "cd61762848882a16c8244c964a6f396c0caa0b440588a210ce9cc4ab0e6d9f0c",
+      "artifact": "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1",
+      "components": [
+        "ndk-libcxx"
+      ]
+    },
+    {
+      "apk_entry": "lib/arm64-v8a/libdatastore_shared_counter.so",
+      "source_entry": "jni/arm64-v8a/libdatastore_shared_counter.so",
+      "sha256": "d3e48717c9aa147e0ab21063ba0e8e0211cabf8bf40b222640829519edbf58e1",
+      "artifact": "androidx.datastore:datastore-core-android:1.1.7",
+      "components": [
+        "androidx-datastore"
+      ]
+    },
+    {
+      "apk_entry": "lib/arm64-v8a/libimage_processing_util_jni.so",
+      "source_entry": "jni/arm64-v8a/libimage_processing_util_jni.so",
+      "sha256": "3e0071afcdc7e321f839e196d266014182f18d0988e4455acc9857a085b2184e",
+      "artifact": "androidx.camera:camera-core:1.4.2",
+      "components": [
+        "androidx-camera",
+        "libyuv"
+      ]
+    },
+    {
+      "apk_entry": "lib/arm64-v8a/libjnidispatch.so",
+      "source_entry": "jni/arm64-v8a/libjnidispatch.so",
+      "sha256": "abc26e994517bcaa3309acdb0a27373864086c7569c89d3087b8626fada9ef06",
+      "artifact": "net.java.dev.jna:jna:5.17.0",
+      "components": [
+        "jna-dispatch",
+        "libffi"
+      ]
+    },
+    {
+      "apk_entry": "lib/arm64-v8a/libonnxruntime.so",
+      "source_entry": "jni/arm64-v8a/libonnxruntime.so",
+      "sha256": "71592ea77d4e6aed7877bbc3139a15cb77785c7d2a5b273c2832c3e56aca91b4",
+      "artifact": "com.microsoft.onnxruntime:onnxruntime-android:1.24.1",
+      "components": [
+        "onnxruntime"
+      ]
+    },
+    {
+      "apk_entry": "lib/arm64-v8a/libonnxruntime4j_jni.so",
+      "source_entry": "jni/arm64-v8a/libonnxruntime4j_jni.so",
+      "sha256": "05afb25116dc68608cee6195dc074c49521d4b79639195b1755463d0118db469",
+      "artifact": "com.microsoft.onnxruntime:onnxruntime-android:1.24.1",
+      "components": [
+        "onnxruntime"
+      ]
+    },
+    {
+      "apk_entry": "lib/arm64-v8a/libopencv_java4.so",
+      "source_entry": "jni/arm64-v8a/libopencv_java4.so",
+      "sha256": "34d7f4d34908b9c8f78586c6908517258cf1b89cdaa5a28e333d4b3eb78c71d9",
+      "artifact": "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1",
+      "components": [
+        "opencv"
+      ]
+    },
+    {
+      "apk_entry": "lib/arm64-v8a/libsodium.so",
+      "source_entry": "jni/arm64-v8a/libsodium.so",
+      "sha256": "806f02e3d7e2f36cd8da101ed9edcc78eda4aeaf3277316b19e14ccda391dd80",
+      "artifact": "app.raiun.vendor:lazysodium-android:5.2.0-raiun-native.1",
+      "components": [
+        "libsodium"
+      ]
+    },
+    {
+      "apk_entry": "lib/arm64-v8a/libsurface_util_jni.so",
+      "source_entry": "jni/arm64-v8a/libsurface_util_jni.so",
+      "sha256": "ee3f0d56f81cc0a301db32dc4fd51274c3216733b4c40172768e38bc5049a265",
+      "artifact": "androidx.camera:camera-core:1.4.2",
+      "components": [
+        "androidx-camera"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libandroidx.graphics.path.so",
+      "source_entry": "jni/x86_64/libandroidx.graphics.path.so",
+      "sha256": "4e56c996f13670e70082658de7880c4020eabf4f25e43387f88ed78a713fc9f0",
+      "artifact": "androidx.graphics:graphics-path:1.0.1",
+      "components": [
+        "androidx-graphics"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libc++_shared.so",
+      "source_entry": "jni/x86_64/libc++_shared.so",
+      "sha256": "2e855857f80819737d25a663109fedf816a5e996a85423166806014a06593256",
+      "artifact": "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1",
+      "components": [
+        "ndk-libcxx"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libdatastore_shared_counter.so",
+      "source_entry": "jni/x86_64/libdatastore_shared_counter.so",
+      "sha256": "fb6c9208988c49ae94943bc3236fa763ba584722e044fa4ea9a12d2941027105",
+      "artifact": "androidx.datastore:datastore-core-android:1.1.7",
+      "components": [
+        "androidx-datastore"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libimage_processing_util_jni.so",
+      "source_entry": "jni/x86_64/libimage_processing_util_jni.so",
+      "sha256": "676e3e280c10dcb9b71ef5bb727552610dc73c7ec85af54c7c898f82785c33d7",
+      "artifact": "androidx.camera:camera-core:1.4.2",
+      "components": [
+        "androidx-camera",
+        "libyuv"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libjnidispatch.so",
+      "source_entry": "jni/x86_64/libjnidispatch.so",
+      "sha256": "3809247e9b804a05ed8377b87d545cf5b5e97f960f75e725bc8497b40260e417",
+      "artifact": "net.java.dev.jna:jna:5.17.0",
+      "components": [
+        "jna-dispatch",
+        "libffi"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libonnxruntime.so",
+      "source_entry": "jni/x86_64/libonnxruntime.so",
+      "sha256": "f8875eef0e3587895fb79384908021952b0d5a8bbf55b707f7e9db54512e80ae",
+      "artifact": "com.microsoft.onnxruntime:onnxruntime-android:1.24.1",
+      "components": [
+        "onnxruntime"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libonnxruntime4j_jni.so",
+      "source_entry": "jni/x86_64/libonnxruntime4j_jni.so",
+      "sha256": "fa557f9ea7d4d92e9270bf4943ecb99e3dc4ed9ba4c3ba599c57f8362065015b",
+      "artifact": "com.microsoft.onnxruntime:onnxruntime-android:1.24.1",
+      "components": [
+        "onnxruntime"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libopencv_java4.so",
+      "source_entry": "jni/x86_64/libopencv_java4.so",
+      "sha256": "ba27a05353d919f26bd91364095f68ade8975ce009f00d07cf28ab125457507a",
+      "artifact": "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1",
+      "components": [
+        "opencv"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libsodium.so",
+      "source_entry": "jni/x86_64/libsodium.so",
+      "sha256": "8f30f96fa9f7b5fe1d347c068868f25b428f9287479e50add6708374b06eb904",
+      "artifact": "app.raiun.vendor:lazysodium-android:5.2.0-raiun-native.1",
+      "components": [
+        "libsodium"
+      ]
+    },
+    {
+      "apk_entry": "lib/x86_64/libsurface_util_jni.so",
+      "source_entry": "jni/x86_64/libsurface_util_jni.so",
+      "sha256": "cd425e10a365fb3695e53f1e46227d44d89f14854da4f1258ef079c80c752339",
+      "artifact": "androidx.camera:camera-core:1.4.2",
+      "components": [
+        "androidx-camera"
+      ]
+    }
+  ],
+  "review_findings": [
+    {
+      "component": "libsodium",
+      "id": "CVE-2025-69277",
+      "status": "original_affected_fixed_by_source_bound_local_backport",
+      "sources": [
+        "https://github.com/jedisct1/libsodium/commit/ad3004ec8731730e93fcfbbc824e67eadc1c1bae",
+        "https://github.com/jedisct1/libsodium/blob/master/ChangeLog",
+        "https://github.com/advisories/GHSA-mrfv-m5wm-5w6w",
+        "https://00f.net/2025/12/30/libsodium-vulnerability/"
+      ],
+      "assessment": "Original pinned binary predates fix and accepts upstream mixed-order fixture. Current distinct localAAR contains authenticated1.0.20 source plus exact upstreamad3004e. BothAPI26/API35 rejectfixture and preserveSecretBoxcipher; rawfinding retained, exact artifact-bound resolution below."
+    }
+  ],
+  "resolutions": [
+    {
+      "component": "opencv",
+      "id": "OSV-2022-394",
+      "status": "fixed",
+      "justification": "source_patch_applied",
+      "artifacts": {
+        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+      },
+      "evidence_files": [
+        "security-backports.json"
+      ],
+      "rationale": "Typed wrappers remove wrong function-pointer calls without T** aliasing; real-core host UBSan fails before and passes672 cases after; Android output compatibility passes both APIs."
+    },
+    {
+      "component": "opencv",
+      "id": "OSV-2023-444",
+      "status": "not_affected",
+      "justification": "component_not_present",
+      "artifacts": {
+        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+      },
+      "evidence_files": [
+        "security-backports.json"
+      ],
+      "rationale": "Exact scanner configuration/built archive set/Java+ELF inventories exclude imgcodecs and its JPEG2K/PNG decoders on both supported ABIs."
+    },
+    {
+      "component": "opencv",
+      "id": "OSV-2025-486",
+      "status": "not_affected",
+      "justification": "component_not_present",
+      "artifacts": {
+        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+      },
+      "evidence_files": [
+        "security-backports.json"
+      ],
+      "rationale": "Exact scanner configuration/built archive set/Java+ELF inventories exclude imgcodecs and its JPEG2K/PNG decoders on both supported ABIs."
+    },
+    {
+      "component": "opencv",
+      "id": "OSV-2025-525",
+      "status": "not_affected",
+      "justification": "component_not_present",
+      "artifacts": {
+        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+      },
+      "evidence_files": [
+        "security-backports.json"
+      ],
+      "rationale": "Exact scanner configuration/built archive set/Java+ELF inventories exclude imgcodecs and its JPEG2K/PNG decoders on both supported ABIs."
+    },
+    {
+      "component": "libsodium",
+      "id": "CVE-2025-69277",
+      "status": "fixed",
+      "justification": "source_patch_applied",
+      "artifacts": {
+        "app.raiun.vendor:lazysodium-android:5.2.0-raiun-native.1": "83326921726084e014289bffed0407bfeaa496622b9e01c862d684b32b56e6bc"
+      },
+      "evidence_files": [
+        "security-backports.json"
+      ],
+      "rationale": "Exact upstreamad3004e backported to signed1.0.20 sources; original accepts badpoint, patched rejects on API26/API35; three upstream regressions and identicalSecretBoxcipher validate behavior."
+    }
+  ]
+}

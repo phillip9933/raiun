@@ -4533,6 +4533,87 @@
       ]
     },
     {
+      "coordinate": "app.raiun.vendor:lazysodium-android",
+      "version": "5.2.0-raiun-native.1",
+      "pom_source": "bundled native security backport / maven/app/raiun/vendor/lazysodium-android/5.2.0-raiun-native.1/lazysodium-android-5.2.0-raiun-native.1.pom",
+      "pom_chain": [
+        "bundled native security backport / maven/app/raiun/vendor/lazysodium-android/5.2.0-raiun-native.1/lazysodium-android-5.2.0-raiun-native.1.pom"
+      ],
+      "pom_sha256": "72b360969368036f5506720bbb2975cd6274fc1a86c58f894a69e154354ad748",
+      "license_status": "declared",
+      "licenses": [
+        {
+          "name": "Mozilla Public License, Version 2.0",
+          "url": "http://www.mozilla.org/MPL/2.0/index.txt"
+        }
+      ],
+      "artifact": "bundled native security backport / maven/app/raiun/vendor/lazysodium-android/5.2.0-raiun-native.1/lazysodium-android-5.2.0-raiun-native.1.aar",
+      "artifact_sha256": "83326921726084e014289bffed0407bfeaa496622b9e01c862d684b32b56e6bc",
+      "embedded_notice_files": [],
+      "license_texts": [
+        {
+          "name": "Mozilla Public License, Version 2.0",
+          "url": "http://www.mozilla.org/MPL/2.0/index.txt",
+          "path": "license-texts/Mozilla_Public_License_Version_2.0.txt",
+          "source": "https://www.mozilla.org/MPL/2.0/index.txt",
+          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+        }
+      ]
+    },
+    {
+      "coordinate": "app.raiun.vendor:scanner-processing-opencv",
+      "version": "0.8.0-beta.1-raiun-native.1",
+      "pom_source": "bundled native security backport / maven/app/raiun/vendor/scanner-processing-opencv/0.8.0-beta.1-raiun-native.1/scanner-processing-opencv-0.8.0-beta.1-raiun-native.1.pom",
+      "pom_chain": [
+        "bundled native security backport / maven/app/raiun/vendor/scanner-processing-opencv/0.8.0-beta.1-raiun-native.1/scanner-processing-opencv-0.8.0-beta.1-raiun-native.1.pom"
+      ],
+      "pom_sha256": "0f0eabe993181062e10ae511e1a1ff531461e54333b0644e991b5e6a294491af",
+      "license_status": "declared",
+      "licenses": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+        }
+      ],
+      "artifact": "bundled native security backport / maven/app/raiun/vendor/scanner-processing-opencv/0.8.0-beta.1-raiun-native.1/scanner-processing-opencv-0.8.0-beta.1-raiun-native.1.aar",
+      "artifact_sha256": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "assets/offline-scanner-notices/NOTICE",
+          "path": "embedded/app_raiun_vendor_scanner-processing-opencv/assets/offline-scanner-notices/NOTICE",
+          "sha256": "ff933d54e05dc6311121169d8e628c83b4b22c4765e2df5989b20f256b47d6c0",
+          "size_bytes": 472
+        },
+        {
+          "archive_entry": "assets/offline-scanner-notices/THIRD-PARTY-NOTICES.md",
+          "path": "embedded/app_raiun_vendor_scanner-processing-opencv/assets/offline-scanner-notices/THIRD-PARTY-NOTICES.md",
+          "sha256": "2c741700ea74f97658186b5bfe38e2437cd515f11888a4289012fd4118f39d47",
+          "size_bytes": 3074
+        },
+        {
+          "archive_entry": "assets/third_party_licenses/docquad/LICENSE.txt",
+          "path": "embedded/app_raiun_vendor_scanner-processing-opencv/assets/third_party_licenses/docquad/LICENSE.txt",
+          "sha256": "e1ee574b63dcde94cbee75a53aefed0a3f3bcf0966464cad85a8968b052ce13a",
+          "size_bytes": 11679
+        },
+        {
+          "archive_entry": "assets/third_party_licenses/onnxruntime/LICENSE.txt",
+          "path": "embedded/app_raiun_vendor_scanner-processing-opencv/assets/third_party_licenses/onnxruntime/LICENSE.txt",
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+          "size_bytes": 1073
+        }
+      ],
+      "license_texts": [
+        {
+          "name": "Apache License, Version 2.0",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+          "path": "license-texts/Apache_License_Version_2.0.txt",
+          "source": "scanner SDK 0.8.0-beta.1 Maven ZIP / LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ]
+    },
+    {
       "coordinate": "com.google.auto.value:auto-value-annotations",
       "version": "1.6.3",
       "pom_source": "Gradle module cache / com.google.auto.value/auto-value-annotations/1.6.3/8ccd7ba6d7ea8de204f17f6e509d77a76f06d298/auto-value-annotations-1.6.3.pom",
@@ -4615,36 +4696,8 @@
           "name": "BSD-3-Clause",
           "url": "https://opensource.org/licenses/BSD-3-Clause",
           "path": "license-texts/BSD-3-Clause.txt",
-          "source": "preserved vetted release text (original source: https://raw.githubusercontent.com/protocolbuffers/protobuf/v25.8/LICENSE)",
+          "source": "https://raw.githubusercontent.com/protocolbuffers/protobuf/v25.8/LICENSE",
           "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
-        }
-      ]
-    },
-    {
-      "coordinate": "com.goterl:lazysodium-android",
-      "version": "5.2.0",
-      "pom_source": "Gradle module cache / com.goterl/lazysodium-android/5.2.0/a3f84755ebfa9d96a7e7c3498dd832e009a630b/lazysodium-android-5.2.0.pom",
-      "pom_chain": [
-        "Gradle module cache / com.goterl/lazysodium-android/5.2.0/a3f84755ebfa9d96a7e7c3498dd832e009a630b/lazysodium-android-5.2.0.pom"
-      ],
-      "pom_sha256": "c10bf8f20bb90d993ce5277e5b328843f0f1ff6ae8c6283e34e1cf39ec02601a",
-      "license_status": "declared",
-      "licenses": [
-        {
-          "name": "Mozilla Public License, Version 2.0",
-          "url": "http://www.mozilla.org/MPL/2.0/index.txt"
-        }
-      ],
-      "artifact": "Gradle module cache / com.goterl/lazysodium-android/5.2.0/9790fd467365aa661519cdf48cedf8abefba0dd1/lazysodium-android-5.2.0.aar",
-      "artifact_sha256": "b5378c1d9db2573d61b304e89cf83db187a05c3e4ff081d9b2ef3d0bb00ca314",
-      "embedded_notice_files": [],
-      "license_texts": [
-        {
-          "name": "Mozilla Public License, Version 2.0",
-          "url": "http://www.mozilla.org/MPL/2.0/index.txt",
-          "path": "license-texts/Mozilla_Public_License_Version_2.0.txt",
-          "source": "preserved vetted release text (original source: https://www.mozilla.org/MPL/2.0/index.txt)",
-          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
         }
       ]
     },
@@ -4841,113 +4894,6 @@
       "artifact": "scanner SDK 0.8.0-beta.1 Maven ZIP / maven/dev/offlinescan/scanner-export/0.8.0-beta.1/scanner-export-0.8.0-beta.1.aar",
       "artifact_sha256": "29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970",
       "embedded_notice_files": [],
-      "license_texts": [
-        {
-          "name": "Apache License, Version 2.0",
-          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
-          "path": "license-texts/Apache_License_Version_2.0.txt",
-          "source": "scanner SDK 0.8.0-beta.1 Maven ZIP / LICENSE",
-          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
-        }
-      ]
-    },
-    {
-      "coordinate": "dev.offlinescan:scanner-processing-opencv",
-      "version": "0.8.0-beta.1",
-      "pom_source": "scanner SDK 0.8.0-beta.1 Maven ZIP / maven/dev/offlinescan/scanner-processing-opencv/0.8.0-beta.1/scanner-processing-opencv-0.8.0-beta.1.pom",
-      "pom_chain": [
-        "scanner SDK 0.8.0-beta.1 Maven ZIP / maven/dev/offlinescan/scanner-processing-opencv/0.8.0-beta.1/scanner-processing-opencv-0.8.0-beta.1.pom"
-      ],
-      "pom_sha256": "7e9086df5dfc98adc2186de4281eb093e2a8db435fbda97b5b68ac0ffb932912",
-      "license_status": "declared",
-      "licenses": [
-        {
-          "name": "Apache License, Version 2.0",
-          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
-        }
-      ],
-      "artifact": "scanner SDK 0.8.0-beta.1 Maven ZIP / maven/dev/offlinescan/scanner-processing-opencv/0.8.0-beta.1/scanner-processing-opencv-0.8.0-beta.1.aar",
-      "artifact_sha256": "6de7e504bda98f1f4a8d9c2451196061e0662ee1848f3278ab14c03cc3539375",
-      "embedded_notice_files": [
-        {
-          "archive_entry": "assets/offline-scanner-notices/Android-NDK-NOTICE.toolchain.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/Android-NDK-NOTICE.toolchain.txt",
-          "sha256": "789714a9076571c580cf531bdcebec776a4d889c12c3c1108adafc6e4338710a",
-          "size_bytes": 799639
-        },
-        {
-          "archive_entry": "assets/offline-scanner-notices/Android-NDK-NOTICE.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/Android-NDK-NOTICE.txt",
-          "sha256": "faf0dc52cf6ce9ab09a04b0c074a378dd2565ee1ed9bc1179d83793bcdba012e",
-          "size_bytes": 516438
-        },
-        {
-          "archive_entry": "assets/offline-scanner-notices/NOTICE",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/NOTICE",
-          "sha256": "ff933d54e05dc6311121169d8e628c83b4b22c4765e2df5989b20f256b47d6c0",
-          "size_bytes": 472
-        },
-        {
-          "archive_entry": "assets/offline-scanner-notices/OpenCV-LICENSE.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/OpenCV-LICENSE.txt",
-          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "size_bytes": 11358
-        },
-        {
-          "archive_entry": "assets/offline-scanner-notices/OpenCV-core-imgproc-java-SOURCE-NOTICES.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/OpenCV-core-imgproc-java-SOURCE-NOTICES.txt",
-          "sha256": "266449046c916ece845706adbc237d5325dce7855cf6e1f7a479e15cce15f287",
-          "size_bytes": 1268486
-        },
-        {
-          "archive_entry": "assets/offline-scanner-notices/THIRD-PARTY-NOTICES.md",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/THIRD-PARTY-NOTICES.md",
-          "sha256": "2c741700ea74f97658186b5bfe38e2437cd515f11888a4289012fd4118f39d47",
-          "size_bytes": 3074
-        },
-        {
-          "archive_entry": "assets/offline-scanner-notices/libyuv-LICENSE.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/libyuv-LICENSE.txt",
-          "sha256": "2b2cc1180c7e6988328ad2033b04b80117419db9c4c584918bbb3cfec7e9364f",
-          "size_bytes": 1506
-        },
-        {
-          "archive_entry": "assets/third_party_licenses/docquad/LICENSE.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/docquad/LICENSE.txt",
-          "sha256": "e1ee574b63dcde94cbee75a53aefed0a3f3bcf0966464cad85a8968b052ce13a",
-          "size_bytes": 11679
-        },
-        {
-          "archive_entry": "assets/third_party_licenses/docquad/README.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/docquad/README.txt",
-          "sha256": "67cab6fb0f6748c32587840830e3dcf3babc6155e7f00f0864c3e5d1b61e884b",
-          "size_bytes": 2188
-        },
-        {
-          "archive_entry": "assets/third_party_licenses/docquad/UPSTREAM-NOTICE.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/docquad/UPSTREAM-NOTICE.txt",
-          "sha256": "4a2935e00dfcb9aaa612706153108ce2f2ee3c6e39b05b67c956660c2a492fe9",
-          "size_bytes": 12261
-        },
-        {
-          "archive_entry": "assets/third_party_licenses/onnxruntime/LICENSE.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/onnxruntime/LICENSE.txt",
-          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
-          "size_bytes": 1073
-        },
-        {
-          "archive_entry": "assets/third_party_licenses/onnxruntime/README.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/onnxruntime/README.txt",
-          "sha256": "0faf4e2e796c8b01dc70dcb466b7c030dbd21677cb53b70405d6ecaf5276d30a",
-          "size_bytes": 655
-        },
-        {
-          "archive_entry": "assets/third_party_licenses/onnxruntime/ThirdPartyNotices.txt",
-          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/onnxruntime/ThirdPartyNotices.txt",
-          "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2",
-          "size_bytes": 325054
-        }
-      ],
       "license_texts": [
         {
           "name": "Apache License, Version 2.0",

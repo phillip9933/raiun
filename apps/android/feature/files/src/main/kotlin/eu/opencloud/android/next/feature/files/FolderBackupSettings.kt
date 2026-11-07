@@ -249,6 +249,17 @@ fun FolderBackupSettingsContent(
             HorizontalDivider()
             Text(stringResource(R.string.backup_settings_files_to_back_up), style = MaterialTheme.typography.titleSmall)
             BackupMediaTypeOptions(mediaType) { mediaType = it }
+            Text(
+                stringResource(
+                    when (mediaType) {
+                        "IMAGE" -> R.string.backup_filter_photos_help
+                        "VIDEO" -> R.string.backup_filter_videos_help
+                        else -> R.string.backup_filter_all_help
+                    },
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             HorizontalDivider()
             BackupDateOrganizationOptions(
                 wifiOnly = wifiOnly,

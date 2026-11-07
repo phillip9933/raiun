@@ -91,10 +91,12 @@ private class KeyChainIdentitySource(
 class ClientCertificatePolicy internal constructor(
     private val directory: File,
     private val identities: ClientIdentitySource,
+    private val namespace: Any = identities,
 ) {
     constructor(context: Context) : this(
         File(context.applicationContext.noBackupFilesDir, "client-certificates"),
         KeyChainIdentitySource(context.applicationContext),
+        context.applicationContext,
     )
 
     /** Shows Android's certificate chooser. The callback receives null on cancellation. */
@@ -116,80 +118,96 @@ class ClientCertificatePolicy internal constructor(
         origins: Collection<String>,
         alias: String,
     ): ClientCertificateBinding {
-        require(alias.isNotBlank() && alias.length <= 256 && alias.none(Char::isISOControl))
-        val canonical = canonicalServer(serverUrl)
-        val normalized = origins.map(::canonicalOrigin).toSet()
-        require(normalized.isNotEmpty() && normalized.size <= 32)
-        val identity = identities.load(alias) ?: throw ClientCertificateException.Unavailable()
-        val fingerprint = validateCertificate(identity.chain)
-        val binding = ClientCertificateBinding(canonical, normalized, alias, fingerprint)
-        val encoded = encode(binding).toByteArray(Charsets.UTF_8)
-        require(encoded.size <= MAX_BINDING_BYTES)
-        if (!directory.isDirectory &&
-            !directory.mkdirs()
-        ) {
-            throw IOException("Client certificate binding could not be saved")
-        }
-        val target = fileFor(canonical)
-        var temporary: File? = null
-        try {
-            val pending = File.createTempFile(target.name, ".tmp", directory)
-            temporary = pending
-            FileOutputStream(pending).use { stream ->
-                stream.write(encoded)
-                stream.fd.sync()
+        val saved =
+            synchronized(bindingLock) {
+                require(alias.isNotBlank() && alias.length <= 256 && alias.none(Char::isISOControl))
+                val canonical = canonicalServer(serverUrl)
+                val normalized = origins.map(::canonicalOrigin).toSet()
+                require(normalized.isNotEmpty() && normalized.size <= 32)
+                val identity = identities.load(alias) ?: throw ClientCertificateException.Unavailable()
+                val fingerprint = validateCertificate(identity.chain)
+                val binding = ClientCertificateBinding(canonical, normalized, alias, fingerprint)
+                val encoded = encode(binding).toByteArray(Charsets.UTF_8)
+                require(encoded.size <= MAX_BINDING_BYTES)
+                if (!directory.isDirectory &&
+                    !directory.mkdirs()
+                ) {
+                    throw IOException("Client certificate binding could not be saved")
+                }
+                val target = fileFor(canonical)
+                var temporary: File? = null
+                try {
+                    val pending = File.createTempFile(target.name, ".tmp", directory)
+                    temporary = pending
+                    FileOutputStream(pending).use { stream ->
+                        stream.write(encoded)
+                        stream.fd.sync()
+                    }
+                    Files.move(
+                        pending.toPath(),
+                        target.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING,
+                    )
+                } catch (_: IOException) {
+                    throw ClientCertificateException.Unavailable()
+                } finally {
+                    temporary?.delete()
+                }
+                binding to ScopedTransportCache.revokeDeferred(scope(canonical))
             }
-            Files.move(
-                pending.toPath(),
-                target.toPath(),
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        } catch (_: IOException) {
-            throw ClientCertificateException.Unavailable()
-        } finally {
-            temporary?.delete()
-        }
-        return binding
+        saved.second.forEach(ScopedTransportParts::retire)
+        return saved.first
     }
 
     @Suppress("ComplexCondition", "ThrowsCount")
-    fun load(serverUrl: String): ClientCertificateBinding? {
-        val canonical = canonicalServer(serverUrl)
-        val file = fileFor(canonical)
-        if (!file.exists()) return null
-        val content = readBounded(file)
-        try {
-            val data = JSONObject(content)
-            val origins = data.getJSONArray("origins")
-            val binding =
-                ClientCertificateBinding(
-                    canonicalServer(data.getString("serverUrl")),
-                    (0 until origins.length()).map { canonicalOrigin(origins.getString(it)) }.toSet(),
-                    data.getString("alias"),
-                    data.getString("certificateSha256"),
-                )
-            if (binding.serverUrl != canonical ||
-                binding.origins.isEmpty() ||
-                binding.origins.size > 32 ||
-                binding.alias.isBlank() ||
-                binding.alias.length > 256 ||
-                binding.alias.any(Char::isISOControl) ||
-                !binding.certificateSha256.matches(Regex("[0-9a-f]{64}"))
-            ) {
+    fun load(serverUrl: String): ClientCertificateBinding? =
+        synchronized(bindingLock) {
+            val canonical = canonicalServer(serverUrl)
+            val file = fileFor(canonical)
+            if (!file.exists()) return@synchronized null
+            val content = readBounded(file)
+            try {
+                val data = JSONObject(content)
+                val origins = data.getJSONArray("origins")
+                val binding =
+                    ClientCertificateBinding(
+                        canonicalServer(data.getString("serverUrl")),
+                        (0 until origins.length()).map { canonicalOrigin(origins.getString(it)) }.toSet(),
+                        data.getString("alias"),
+                        data.getString("certificateSha256"),
+                    )
+                if (binding.serverUrl != canonical ||
+                    binding.origins.isEmpty() ||
+                    binding.origins.size > 32 ||
+                    binding.alias.isBlank() ||
+                    binding.alias.length > 256 ||
+                    binding.alias.any(Char::isISOControl) ||
+                    !binding.certificateSha256.matches(Regex("[0-9a-f]{64}"))
+                ) {
+                    throw ClientCertificateException.Changed()
+                }
+                return@synchronized binding
+            } catch (_: JSONException) {
+                throw ClientCertificateException.Changed()
+            } catch (_: IllegalArgumentException) {
                 throw ClientCertificateException.Changed()
             }
-            return binding
-        } catch (_: JSONException) {
-            throw ClientCertificateException.Changed()
-        } catch (_: IllegalArgumentException) {
-            throw ClientCertificateException.Changed()
         }
-    }
 
     fun clear(serverUrl: String) {
-        val file = fileFor(canonicalServer(serverUrl))
-        if (file.exists() && !file.delete()) throw IOException("Client certificate binding could not be removed")
+        val retired =
+            synchronized(bindingLock) {
+                val canonical = canonicalServer(serverUrl)
+                val file = fileFor(canonical)
+                if (file.exists() &&
+                    !file.delete()
+                ) {
+                    throw IOException("Client certificate binding could not be removed")
+                }
+                ScopedTransportCache.revokeDeferred(scope(canonical))
+            }
+        retired.forEach(ScopedTransportParts::retire)
     }
 
     /** Creates a dedicated client; only enumerated origins receive this certificate. */
@@ -197,8 +215,88 @@ class ClientCertificatePolicy internal constructor(
     fun applyTo(
         baseClient: OkHttpClient,
         serverUrl: String,
+    ): OkHttpClient = applyTo(baseClient, serverUrl, null)
+
+    internal fun applyTo(
+        baseClient: OkHttpClient,
+        serverUrl: String,
+        transportIsolation: TransportGuard?,
     ): OkHttpClient {
-        val binding = load(serverUrl) ?: return baseClient
+        val canonical = canonicalServer(serverUrl)
+        val (binding, admission) =
+            synchronized(bindingLock) {
+                val binding = load(canonical)
+                binding to ScopedTransportCache.guardDeferred(scope(canonical), binding)
+            }
+        admission.retire()
+        val guard = admission.guard
+        val validation =
+            Interceptor { chain ->
+                validateRequest(canonical, binding, guard, chain.request().url)
+                chain.proceed(chain.request())
+            }
+        if (binding == null) {
+            return baseClient
+                .newBuilder()
+                .addInterceptor(validation)
+                .addNetworkInterceptor(validation)
+                .build()
+        }
+        try {
+            requireCurrent(binding)
+        } catch (failure: ClientCertificateException) {
+            ScopedTransportCache.revoke(scope(canonical))
+            throw failure
+        }
+        val parts =
+            ScopedTransportCache.getOrCreate(ScopedPartsKey(guard, baseClient.transportKey(), transportIsolation)) {
+                certificateParts(binding, guard, transportIsolation)
+            }
+        return baseClient
+            .newBuilder()
+            .sslSocketFactory(parts.sockets, parts.trust)
+            // A base client's pool may contain connections negotiated without this identity.
+            .connectionPool(parts.pool)
+            // HTTP/2 may coalesce another SAN origin onto a certificate-authenticated TLS connection.
+            .protocols(listOf(Protocol.HTTP_1_1))
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .addInterceptor(validation)
+            .addNetworkInterceptor(validation)
+            .build()
+    }
+
+    private fun validateRequest(
+        server: String,
+        binding: ClientCertificateBinding?,
+        guard: TransportGuard,
+        url: HttpUrl,
+    ) {
+        if (!guard.isCurrent()) throw ClientCertificateException.Changed()
+        try {
+            if (binding == null) {
+                requireAbsentBinding(server)
+            } else if (url.isHttps && origin(url) in binding.origins) {
+                requireCurrent(binding)
+            }
+        } catch (failure: ClientCertificateException) {
+            ScopedTransportCache.revoke(scope(server))
+            throw failure
+        }
+    }
+
+    private fun requireAbsentBinding(server: String) {
+        if (load(server) != null) throw ClientCertificateException.Changed()
+    }
+
+    private fun scope(server: String): List<Any> =
+        listOf("client-certificate", directory.canonicalPath, TransportIdentity(namespace), server)
+
+    private fun certificateParts(
+        binding: ClientCertificateBinding,
+        guard: TransportGuard,
+        transportIsolation: TransportGuard?,
+    ): CertificateTransportParts {
         val trustFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
         trustFactory.init(null as java.security.KeyStore?)
         val trust = trustFactory.trustManagers.filterIsInstance<X509TrustManager>().single()
@@ -206,29 +304,18 @@ class ClientCertificatePolicy internal constructor(
         val peers = ClientCertificatePeerRegistry()
         context.init(
             arrayOf<KeyManager>(
-                ScopedKeyManager(binding, identities, peers) { load(binding.serverUrl) },
+                ScopedKeyManager(binding, identities, peers) {
+                    if (guard.isCurrent() && transportIsolation?.isCurrent() != false) load(binding.serverUrl) else null
+                },
             ),
             trustFactory.trustManagers,
             null,
         )
-        return baseClient
-            .newBuilder()
-            .sslSocketFactory(ClientCertificateSocketFactory(context.socketFactory, peers), trust)
-            // A base client's pool may contain connections negotiated without this identity.
-            .connectionPool(ConnectionPool())
-            // HTTP/2 may coalesce another SAN origin onto a certificate-authenticated TLS connection.
-            .protocols(listOf(Protocol.HTTP_1_1))
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .addInterceptor(
-                Interceptor { chain ->
-                    val request = chain.request()
-                    if (request.url.isHttps && origin(request.url) in binding.origins) {
-                        requireCurrent(binding)
-                    }
-                    chain.proceed(request)
-                },
-            ).build()
+        return CertificateTransportParts(
+            context,
+            ClientCertificateSocketFactory(context.socketFactory, peers, context.clientSessionContext),
+            trust,
+        )
     }
 
     @Suppress("ThrowsCount")
@@ -272,10 +359,23 @@ class ClientCertificatePolicy internal constructor(
 
     companion object {
         private const val MAX_BINDING_BYTES = 16 * 1024
+        private val bindingLock = Any()
 
         fun normalizeServerUrl(value: String): String = canonicalServer(value)
 
         fun normalizeOrigin(value: String): String = canonicalOrigin(value)
+    }
+}
+
+private class CertificateTransportParts(
+    private val context: SSLContext,
+    val sockets: ClientCertificateSocketFactory,
+    val trust: X509TrustManager,
+    override val pool: ConnectionPool = ConnectionPool(),
+) : ScopedTransportParts {
+    override fun retire() {
+        pool.evictAll()
+        context.retireSessions()
     }
 }
 

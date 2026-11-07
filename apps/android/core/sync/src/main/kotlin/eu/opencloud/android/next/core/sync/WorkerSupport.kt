@@ -12,11 +12,11 @@ import eu.opencloud.android.next.core.model.auth.OidcConfiguration
 import eu.opencloud.android.next.core.network.HttpClients
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.bearerAuthorizationHeader
+import eu.opencloud.android.next.core.network.openCloudBasicAuthorization
 import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.CredentialStore
 import eu.opencloud.android.next.core.security.KeystoreCredentialStore
 import eu.opencloud.android.next.core.security.TlsPolicy
-import okhttp3.Credentials
 import okhttp3.OkHttpClient
 
 class WorkerAuthorizationProvider internal constructor(
@@ -34,7 +34,7 @@ class WorkerAuthorizationProvider internal constructor(
     fun authorization(account: AccountEntity): String {
         if (account.authenticationType == "BASIC") {
             val username = credentials.readBasicUsername(account.id) ?: account.userId
-            return Credentials.basic(username, requireNotNull(credentials.readBasicPassword(account.id)))
+            return openCloudBasicAuthorization(username, requireNotNull(credentials.readBasicPassword(account.id)))
         }
         val usable =
             sessions.tokens(account.id) { current ->

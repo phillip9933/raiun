@@ -4,6 +4,7 @@ import java.net.InetAddress
 import java.net.Socket
 import java.util.Collections
 import java.util.WeakHashMap
+import javax.net.ssl.SSLSessionContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
@@ -34,7 +35,14 @@ internal class ClientCertificatePeerRegistry {
 internal class ClientCertificateSocketFactory(
     private val delegate: SSLSocketFactory,
     private val peers: ClientCertificatePeerRegistry,
+    private val sessions: SSLSessionContext? = null,
 ) : SSLSocketFactory() {
+    internal fun retireSessions() {
+        val context = sessions ?: return
+        val ids = context.ids
+        while (ids.hasMoreElements()) context.getSession(ids.nextElement())?.invalidate()
+    }
+
     override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
 
     override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites

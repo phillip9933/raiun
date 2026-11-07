@@ -34,7 +34,11 @@ internal interface VaultCipherEngine : AutoCloseable {
 
     fun exportKeyMaterial(): ByteArray
 
-    /** Only engines with an independent content cipher may support concurrent boundary pipes. */
+    /**
+     * Only engines with an independent content cipher may support concurrent boundary pipes.
+     * Creation performs memory-only key work; close must never wait on caller-owned stream IO.
+     * The session revokes admitted forks on close and their owning operation's cancellation.
+     */
     fun forkForContent(): VaultCipherEngine = throw OpenCloudException(OpenCloudError.Unsupported)
 }
 

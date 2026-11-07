@@ -12,7 +12,16 @@ import java.security.MessageDigest
 class WifiServerRouteStore(
     context: Context,
 ) {
-    private val directory = File(context.noBackupFilesDir, "wifi-server-routes")
+    private val app = context.applicationContext
+    private val directory = File(app.noBackupFilesDir, "wifi-server-routes")
+
+    internal fun transportScope(serverUrl: String): List<Any> =
+        listOf("wifi-route", directory.canonicalPath, TransportIdentity(app), key(serverUrl))
+
+    internal fun <T> withRoute(
+        canonicalServerUrl: String,
+        block: (WifiServerRoute?) -> T,
+    ): T = synchronized(storeLock) { block(find(canonicalServerUrl)) }
 
     fun find(canonicalServerUrl: String): WifiServerRoute? =
         synchronized(storeLock) {
@@ -27,26 +36,34 @@ class WifiServerRouteStore(
             files.mapNotNull { read(AtomicFile(it), expectedKey = null) }
         }
 
-    fun put(route: WifiServerRoute) =
-        synchronized(storeLock) {
-            val normalized = route.copy(canonicalServerUrl = key(route.canonicalServerUrl))
-            WifiServerRoutePolicy.validate(normalized)
-            require(directory.isDirectory || directory.mkdirs()) { "Wi-Fi route storage is unavailable." }
-            val target = fileFor(normalized.canonicalServerUrl)
-            if (!target.exists()) {
-                require(directory.listFiles { file -> file.extension == "json" }.orEmpty().size < MAX_ROUTES)
+    fun put(route: WifiServerRoute) {
+        val retired =
+            synchronized(storeLock) {
+                val normalized = route.copy(canonicalServerUrl = key(route.canonicalServerUrl))
+                WifiServerRoutePolicy.validate(normalized)
+                require(directory.isDirectory || directory.mkdirs()) { "Wi-Fi route storage is unavailable." }
+                val target = fileFor(normalized.canonicalServerUrl)
+                if (!target.exists()) {
+                    require(directory.listFiles { file -> file.extension == "json" }.orEmpty().size < MAX_ROUTES)
+                }
+                write(AtomicFile(target), normalized)
+                ScopedTransportCache.revokeDeferred(transportScope(normalized.canonicalServerUrl))
             }
-            write(AtomicFile(target), normalized)
-        }
+        retired.forEach(ScopedTransportParts::retire)
+    }
 
-    fun remove(canonicalServerUrl: String) =
-        synchronized(storeLock) {
-            val target = fileFor(key(canonicalServerUrl))
-            AtomicFile(target).delete()
-            check(listOf(target, File(target.path + ".bak"), File(target.path + ".new")).none(File::exists)) {
-                "Wi-Fi route configuration could not be removed."
+    fun remove(canonicalServerUrl: String) {
+        val retired =
+            synchronized(storeLock) {
+                val target = fileFor(key(canonicalServerUrl))
+                AtomicFile(target).delete()
+                check(listOf(target, File(target.path + ".bak"), File(target.path + ".new")).none(File::exists)) {
+                    "Wi-Fi route configuration could not be removed."
+                }
+                ScopedTransportCache.revokeDeferred(transportScope(canonicalServerUrl))
             }
-        }
+        retired.forEach(ScopedTransportParts::retire)
+    }
 
     private fun key(value: String): String {
         val endpoint = EndpointPolicy().endpoint(value, allowQuery = false)

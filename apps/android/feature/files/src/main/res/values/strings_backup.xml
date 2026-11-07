@@ -23,6 +23,9 @@
     <string name="backup_destination_upload_unavailable">Uploads are unavailable for this folder.</string>
     <string name="backup_destination_encrypted_unavailable">Encrypted locations cannot be used for backups yet.</string>
     <string name="backup_settings_files_to_back_up">Files to back up</string>
+    <string name="backup_filter_photos_help">Backs up image files identified by the source folder, including in subfolders. Other files in mixed folders are skipped; excluded folders are not scanned.</string>
+    <string name="backup_filter_videos_help">Backs up video files identified by the source folder, including in subfolders. Other files in mixed folders are skipped; excluded folders are not scanned.</string>
+    <string name="backup_filter_all_help">Scans subfolders and backs up all files, except excluded files and folders.</string>
     <string name="backup_exclusions_label">Exclusions</string>
     <string name="backup_exclusions_button">Manage exclusions</string>
     <string name="backup_exclusions_hint">Optional · e.g. *.tmp, .thumbnail/ or Cache/</string>

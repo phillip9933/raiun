@@ -84,3 +84,56 @@ A separate `feature:vault` module remains deferred. The route currently depends 
 Session and first-directory adoption run synchronously after the final admission check. Local session, snapshot and material ownership is relinquished before any suspended post-open transfer; cancelling that transfer cannot close the adopted session. Late diagnosis is checked again before changing UI state, and post-open work checks the current session before replacing the offline observer. A late unknown remember outcome still blocks its durable identity, but only clears temporary key material belonging to its own live session. Password/request buffers and unadopted resources retain cancellation cleanup; directory snapshots and action leases close before the backing session.
 
 Remembered-key admission skips the biometric-only diagnostic lookup after checking the current account snapshot. Key currency, owner binding, route/generation, server proof and directory/root validation remain mandatory. An internal, disabled-by-default measurement seam separates local restore, server verification, initial directory acquisition and final admission through publication. It accepts only fixed stage/outcome enums and elapsed nanoseconds; it adds no runtime logging, persistent timing history or secret-bearing diagnostic data. “Verifying key” covers all of these stages, including server and directory work.
+
+## Local component refactoring after Android 1.5.0 — #51
+
+`OrdinaryExportOwner` owns external-file preparation and the browser's in-flight export gate. `BrowserAccountContext` still admits resources and presentation updates; the ViewModel still reduces UI state. Switching accounts clears the displayed export status without releasing the gate or replaying admitted backend work. Export continues against the captured account/resource, and local-copy removal retains its exact-copy check. Late completion cannot publish into a replacement account epoch.
+
+`VaultPreviewActions` owns encrypted text-save execution, edit-buffer wiping and plaintext leases awaiting an external-app handoff. It shares the existing `VaultPreviewContent` source and backing ownership. The ViewModel captures external-handoff requests and delegates session/generation admission and operation cancellation to `VaultSessionLifecycle`. Source revalidation, late-result checks, queued replacement writes and lease cleanup retain their existing order. A failed text save retains the draft but invalidates its write admission until a fresh source version is loaded; a late failure cannot alter a newer preview.
+
+These are local source extractions, with no new module boundary, UI design, persisted format or encryption policy. The separate vault Gradle module remains deferred for the host-contract reasons above. Current executed checks are recorded in [Testing](TESTING.md); this section alone does not establish validation or publication.
+
+`BrowserBackupCommands` handles backup creation, updates, source-selection completion and deletion. The picker and `BrowserAccountContext` retain navigation and account admission. Returning from a source picker still checks the captured account, backup identity and source fingerprint before updating a definition. Already-admitted saves retain their account binding; completion messages require the original account epoch. Updating a definition keeps source-selection/reset behavior and disables source deletion as before. The Android backend adapter retains provider-name lookup, persistence and diagnostic cleanup.
+
+`BrowserTransferCommands` handles individual conflict decisions and bulk cancellation of conflicting uploads. Its adapter delegates to the existing `TransferManager`, which retains persisted-state validation and actual scheduling/cancellation. Only upload conflicts for the displayed account admit bulk cancellation; late completion cannot clear a newer account epoch's busy/error state. Replace, keep-both and cancel remain distinct explicit decisions.
+
+`VaultRootManagement` handles encrypted root-management leases, folder-root rename/delete and management completion. It uses the existing `VaultSessionLifecycle` directly for account, session, generation and cancellation decisions; it does not hold an independent mutable session or key. Rename/delete keep their root-kind, online, path and lock-revision admission checks. Offline invalidation remains bound to the original identity, and uncertain mutation outcomes relock the owned route without altering a replacement session. The ViewModel retains catalog navigation and location presentation.
+
+## Local candidate follow-up — A7–A10
+
+The local Android 1.5.0 candidate retains incoming browser callbacks and folder
+shortcuts in a `LaunchIntentViewModel` until the matching request is consumed.
+Saved state holds no raw callback data; a salted SHA-256 URI marker suppresses a
+consumed event after recreation. Pending callbacks are memory-only, so process
+death can require a fresh login. This guard does not cancel an account switch
+already admitted to `AuthViewModel`. See [Authentication](AUTHENTICATION.md).
+
+`RcloneVaultCipher` holds its key monitor only for bounded cryptographic work.
+Content stream reads and writes do not run under that monitor, allowing cipher
+closure to clear its owned keys without waiting for a stalled external provider.
+Content forks are leased to their operation and disposed once on cancellation or
+session close; provider IO that ignores cancellation can still delay release of
+temporary plaintext buffers until it returns. See [the encrypted security
+review](ENCRYPTED-SECURITY-REVIEW.md).
+
+Trash and file-version XML responses share `SafeXml` declaration checks and
+controlled parse errors, while each client keeps its existing byte and item-count
+limits. This consolidation does not add a global DOM node or depth quota.
+OpenCloud Basic authorization is centralized and uses UTF-8 for supported
+OpenCloud 8.0.1 and 9.0.0 deployments; see [Authentication](AUTHENTICATION.md)
+for the legacy encoding boundary.
+
+## Local TLS maintenance — A2 and A4
+
+`TlsPolicy` composes legacy host pins, client-certificate policy and route
+admission without replacing the caller's pin policy. `LegacyCertificatePinStore`
+imports the retired preferences only after checked, synced private storage can
+preserve their enforcement. It exposes no new certificate-approval API.
+
+`ScopedTransportCache` retains bounded transport parts rather than whole HTTP
+clients. Immutable server, binding, base-transport and route identities determine
+compatibility; weak live admission guards revoke stale scopes without retaining
+historical server state indefinitely. Each caller keeps its dispatcher and
+request behavior. Idle resource retirement is separate from policy revocation
+and does not cancel active requests. See [server connections](SERVER-CONNECTIONS.md)
+for trust boundaries and [testing](TESTING.md) for acceptance scope.

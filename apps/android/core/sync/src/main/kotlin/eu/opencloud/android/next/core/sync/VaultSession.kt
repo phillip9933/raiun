@@ -41,6 +41,7 @@ class VaultSession internal constructor(
     private val issuedEntries = ConcurrentHashMap<String, VaultFolder>()
     private val boundaryEntries = ConcurrentHashMap<String, VaultFolder>()
     private val stateLock = Any()
+    private val activeContentCiphers = mutableSetOf<ContentCipherLease>()
     private val directoryGeneration = AtomicLong()
     private var directoryIndex: VaultDirectoryIndex? = null
 
@@ -386,7 +387,9 @@ class VaultSession internal constructor(
                 object : FilterInputStream(source) {
                     override fun read(): Int {
                         checkPreparing()
-                        return `in`.read()
+                        val value = `in`.read()
+                        checkPreparing()
+                        return value
                     }
 
                     override fun read(
@@ -395,7 +398,9 @@ class VaultSession internal constructor(
                         length: Int,
                     ): Int {
                         checkPreparing()
-                        return `in`.read(buffer, offset, length)
+                        val count = `in`.read(buffer, offset, length)
+                        checkPreparing()
+                        return count
                     }
                 }
             val job =
@@ -407,6 +412,7 @@ class VaultSession internal constructor(
                                 override fun write(value: Int) {
                                     checkPreparing()
                                     out.write(value)
+                                    checkPreparing()
                                 }
 
                                 override fun write(
@@ -416,6 +422,7 @@ class VaultSession internal constructor(
                                 ) {
                                     checkPreparing()
                                     out.write(buffer, offset, length)
+                                    checkPreparing()
                                 }
                             },
                             if (size <
@@ -1053,17 +1060,65 @@ class VaultSession internal constructor(
         }
     }
 
+    @Suppress("TooGenericExceptionCaught") // Restore cancellation precedence after memory-only fork admission fails.
     private suspend fun <T> withBoundaryContentCipher(operation: suspend (VaultCipherEngine) -> T): T =
         withContext(Dispatchers.IO) {
             requireLease()
-            val content = cipher.forkForContent()
+            val content = ContentCipherLease()
             try {
-                requireLease()
-                operation(content)
+                // Install revocation before allocating a fork. Creation/registration is memory-only
+                // and atomic against session close; neither monitor ever encloses stream IO.
+                withBoundaryRequestCancellation(content::close) {
+                    synchronized(stateLock) {
+                        if (closed.get()) throw OpenCloudException(OpenCloudError.AccessDenied)
+                        content.initialize(cipher::forkForContent)
+                        if (closed.get()) throw OpenCloudException(OpenCloudError.AccessDenied)
+                        activeContentCiphers.add(content)
+                    }
+                    currentCoroutineContext().ensureActive()
+                    requireLease()
+                    operation(content.engine())
+                }
+            } catch (failure: Exception) {
+                currentCoroutineContext().ensureActive()
+                throw failure
             } finally {
-                content.close()
+                try {
+                    content.close()
+                } finally {
+                    synchronized(stateLock) { activeContentCiphers.remove(content) }
+                }
             }
         }
+
+    /** Memory-only initialization and disposal serialize cancellation with key ownership handoff. */
+    private class ContentCipherLease : AutoCloseable {
+        private var engine: VaultCipherEngine? = null
+        private var closed = false
+
+        @Synchronized fun initialize(create: () -> VaultCipherEngine) {
+            if (closed) throw OpenCloudException(OpenCloudError.AccessDenied)
+            check(engine == null)
+            val created = create()
+            if (closed) {
+                created.close()
+                throw OpenCloudException(OpenCloudError.AccessDenied)
+            }
+            engine = created
+        }
+
+        @Synchronized fun engine(): VaultCipherEngine {
+            if (closed) throw OpenCloudException(OpenCloudError.AccessDenied)
+            return requireNotNull(engine)
+        }
+
+        @Synchronized override fun close() {
+            if (!closed) {
+                closed = true
+                engine?.close()
+            }
+        }
+    }
 
     /** Streams authenticated blocks to the caller's new destination; caller removes it on failure. */
     private suspend fun downloadWithCipher(
@@ -1093,6 +1148,9 @@ class VaultSession internal constructor(
             requireLease()
             verifyVaultRoot()
             sink.flush()
+            checkTransferActive(coroutineContext)
+            access.requireCurrent()
+            requireLease()
             plainSize
         }
 
@@ -1261,7 +1319,9 @@ class VaultSession internal constructor(
         object : FilterInputStream(input) {
             override fun read(): Int {
                 checkTransferActive(context)
-                return super.read()
+                val value = `in`.read()
+                checkTransferActive(context)
+                return value
             }
 
             override fun read(
@@ -1270,7 +1330,9 @@ class VaultSession internal constructor(
                 length: Int,
             ): Int {
                 checkTransferActive(context)
-                return `in`.read(buffer, offset, length)
+                val count = `in`.read(buffer, offset, length)
+                checkTransferActive(context)
+                return count
             }
         }
 
@@ -1282,6 +1344,7 @@ class VaultSession internal constructor(
             override fun write(value: Int) {
                 checkTransferActive(context)
                 out.write(value)
+                checkTransferActive(context)
             }
 
             override fun write(
@@ -1291,6 +1354,7 @@ class VaultSession internal constructor(
             ) {
                 checkTransferActive(context)
                 out.write(buffer, offset, length)
+                checkTransferActive(context)
             }
         }
 
@@ -1425,19 +1489,21 @@ class VaultSession internal constructor(
     }
 
     override fun close() {
-        dav.cancelRequests()
-        val shouldClose =
+        val content =
             synchronized(stateLock) {
-                if (!closed.compareAndSet(false, true)) {
-                    false
-                } else {
-                    invalidateDirectorySnapshot()
-                    boundaryEntries.clear()
-                    true
-                }
+                if (!closed.compareAndSet(false, true)) return
+                invalidateDirectorySnapshot()
+                boundaryEntries.clear()
+                activeContentCiphers.toList().also { activeContentCiphers.clear() }
             }
-        if (shouldClose) {
+        try {
             cipher.close()
+        } finally {
+            try {
+                content.forEach(ContentCipherLease::close)
+            } finally {
+                dav.cancelRequests()
+            }
         }
     }
 

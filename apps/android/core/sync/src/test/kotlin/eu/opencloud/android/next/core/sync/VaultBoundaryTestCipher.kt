@@ -8,13 +8,17 @@ import java.io.OutputStream
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Synthetic block cipher deliberately holds the same stream monitor as the native Rclone implementation. */
+/** Adversarial synthetic cipher retains a stream monitor to exercise independent boundary pipes. */
 internal class VaultBoundaryTestCipher(
     private val onName: ((String) -> Unit)? = null,
 ) : VaultCipherEngine {
     val closed = AtomicBoolean(false)
     val forks = java.util.concurrent.CopyOnWriteArrayList<VaultBoundaryTestCipher>()
     var refuseFork = false
+    var onFork: ((VaultBoundaryTestCipher) -> Unit)? = null
+    val closeCount =
+        java.util.concurrent.atomic
+            .AtomicInteger()
 
     override fun forkForContent(): VaultCipherEngine {
         if (refuseFork) {
@@ -22,7 +26,10 @@ internal class VaultBoundaryTestCipher(
                 eu.opencloud.android.next.core.network.OpenCloudError.Unsupported,
             )
         }
-        return VaultBoundaryTestCipher().also(forks::add)
+        return VaultBoundaryTestCipher().also {
+            forks.add(it)
+            onFork?.invoke(it)
+        }
     }
 
     override fun createIntegrityToken() = "proof-token"
@@ -128,6 +135,7 @@ internal class VaultBoundaryTestCipher(
     @Synchronized override fun exportKeyMaterial() = ByteArray(80)
 
     override fun close() {
+        closeCount.incrementAndGet()
         closed.set(true)
     }
 }

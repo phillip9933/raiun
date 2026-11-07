@@ -1,5 +1,8 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
+    <string name="backup_filter_photos_help">Guarda las imágenes que la carpeta de origen identifica como tales, también en subcarpetas. Se omiten los demás archivos de las carpetas mixtas; no se analizan las carpetas excluidas.</string>
+    <string name="backup_filter_videos_help">Guarda los vídeos que la carpeta de origen identifica como tales, también en subcarpetas. Se omiten los demás archivos de las carpetas mixtas; no se analizan las carpetas excluidas.</string>
+    <string name="backup_filter_all_help">Analiza las subcarpetas y guarda todos los archivos, excepto los archivos y carpetas excluidos.</string>
     <string name="backup_settings_title">Copia de seguridad de carpetas y cámara</string>
     <string name="backup_settings_add_accessibility">Añadir copia de seguridad</string>
     <string name="backup_settings_scan_accessibility">Analizar copias de seguridad ahora</string>

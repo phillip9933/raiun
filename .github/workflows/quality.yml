@@ -72,6 +72,20 @@ jobs:
       - name: Build release APK
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8'
 
+      - name: Test native dependency inventory checks
+        run: python3 scripts/test_check_native_dependencies.py
+
+      - name: Verify packaged native libraries against pinned artifacts
+        run: >-
+          python3 scripts/check_native_dependencies.py
+          --inventory docs/release-audit/native/inventory.json
+          --pins gradle/runtime-artifact-pins.sha256
+          --apk app/build/outputs/apk/release/app-release-unsigned.apk
+          --artifact-root "${GRADLE_USER_HOME:-$HOME/.gradle}/caches/modules-2/files-2.1"
+          --artifact-root .gradle/open-android-doc-scanner-0.8.0-beta.1/maven
+          --artifact-root third_party/native-security-fixes/maven
+          --output build/native-integrity-results.json
+
       - name: Report runner disk capacity on failure
         if: failure()
         run: df -h
@@ -88,3 +102,4 @@ jobs:
             apps/android/app/build/outputs/apk/debug/app-debug.apk
             apps/android/app/build/outputs/apk/release/app-release-unsigned.apk
             apps/android/app/build/outputs/mapping/release/**
+            apps/android/build/native-integrity-results.json

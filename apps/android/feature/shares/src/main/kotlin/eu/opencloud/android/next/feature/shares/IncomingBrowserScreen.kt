@@ -33,7 +33,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -60,6 +59,8 @@ internal fun IncomingBrowserRoute(
     account: String,
     initialFolder: eu.opencloud.android.next.core.sync.SharedFolderRequest? = null,
     onConsumeInitialFolder: () -> Unit = {},
+    initialFolderRequestId: Long? = null,
+    canApplyInitialFolder: () -> Boolean = { true },
 ) {
     val context = LocalContext.current
     val owner = rememberCoroutineScope()
@@ -91,18 +92,12 @@ internal fun IncomingBrowserRoute(
     val fileActions = rememberIncomingFileActions { openError = it }
     val upload = incomingUploadPicker(state, controller) { openError = it }
     LaunchedEffect(controller) { controller.load(account, IncomingBrowserTrail.restore(account, savedTrail)) }
-    val consumeInitialFolder by rememberUpdatedState(onConsumeInitialFolder)
-    LaunchedEffect(controller, initialFolder) {
-        if (initialFolder != null && initialFolder.account == account) {
-            controller.openShortcut(
-                IncomingBrowserItem.Folder(
-                    initialFolder.path.substringAfterLast('/').ifBlank { "Shared folder" },
-                    initialFolder,
-                ),
-            )
-            consumeInitialFolder()
+    // Keep A's admission and acknowledgement together until its effect is replaced by B.
+    val initialFolderCallbacks =
+        remember(controller, initialFolder, initialFolderRequestId) {
+            InitialFolderCallbacks(canApplyInitialFolder, onConsumeInitialFolder)
         }
-    }
+    ApplyInitialSharedFolderShortcut(controller, account, initialFolder, initialFolderRequestId, initialFolderCallbacks)
     DisposableEffect(controller) { onDispose { controller.clear() } }
     BackHandler(state.trail.isNotEmpty()) { controller.back() }
     preview?.let { item ->
@@ -176,6 +171,32 @@ internal fun IncomingBrowserRoute(
         onFolderActions = { folderActions = it },
         onPage = controller::page,
     )
+}
+
+internal class InitialFolderCallbacks(
+    val current: () -> Boolean,
+    val consume: () -> Unit,
+)
+
+@Composable
+private fun ApplyInitialSharedFolderShortcut(
+    controller: IncomingBrowserController,
+    account: String,
+    initialFolder: eu.opencloud.android.next.core.sync.SharedFolderRequest?,
+    requestId: Long?,
+    callbacks: InitialFolderCallbacks,
+) {
+    LaunchedEffect(controller, initialFolder, requestId) {
+        if (initialFolder != null && initialFolder.account == account && callbacks.current()) {
+            controller.openShortcut(
+                IncomingBrowserItem.Folder(
+                    initialFolder.path.substringAfterLast('/').ifBlank { "Shared folder" },
+                    initialFolder,
+                ),
+            )
+            callbacks.consume()
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

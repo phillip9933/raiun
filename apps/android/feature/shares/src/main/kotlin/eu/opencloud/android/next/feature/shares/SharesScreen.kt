@@ -150,6 +150,8 @@ fun TopLevelSharesRoute(
     modifier: Modifier = Modifier,
     initialFolder: eu.opencloud.android.next.core.sync.SharedFolderRequest? = null,
     onConsumeInitialFolder: () -> Unit = {},
+    initialFolderRequestId: Long? = null,
+    canApplyInitialFolder: () -> Boolean = { true },
     onBrowseResource: ((ResourceEntity) -> Unit)? = null,
     viewModel: SharesViewModel = viewModel(key = "shares-$accountId"),
 ) {
@@ -167,8 +169,16 @@ fun TopLevelSharesRoute(
     )
     val state by viewModel.controller.state.collectAsStateWithLifecycle()
     LaunchedEffect(accountId) { viewModel.controller.load(accountId) }
-    LaunchedEffect(initialFolder) {
-        if (initialFolder != null) viewModel.controller.selectCategory(ShareCategory.WITH_ME)
+    val initialFolderCallbacks =
+        remember(accountId, initialFolder, initialFolderRequestId) {
+            InitialFolderCallbacks(canApplyInitialFolder, onConsumeInitialFolder)
+        }
+    LaunchedEffect(accountId, initialFolder, initialFolderRequestId) {
+        if (initialFolder != null &&
+            initialFolderCallbacks.current()
+        ) {
+            viewModel.controller.selectCategory(ShareCategory.WITH_ME)
+        }
     }
     SharesContent(
         state = state,
@@ -181,7 +191,15 @@ fun TopLevelSharesRoute(
         onBrowseResource = onBrowseResource,
         layout = preferences.browserLayout,
         onLayout = { value -> owner.launch { settings.setBrowserLayout(value) } },
-        incomingContent = { IncomingBrowserRoute(accountId, initialFolder, onConsumeInitialFolder) },
+        incomingContent = {
+            IncomingBrowserRoute(
+                accountId,
+                initialFolder,
+                onConsumeInitialFolder,
+                initialFolderRequestId,
+                canApplyInitialFolder,
+            )
+        },
     )
 }
 

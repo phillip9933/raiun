@@ -2,7 +2,6 @@ package eu.opencloud.android.next.feature.files
 
 import android.app.Application
 import android.net.Uri
-import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
@@ -25,9 +24,7 @@ import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.database.ResourceOfflineFilter
 import eu.opencloud.android.next.core.database.SpaceEntity
 import eu.opencloud.android.next.core.database.TransferBrowserOverview
-import eu.opencloud.android.next.core.database.TransferDirection
 import eu.opencloud.android.next.core.database.TransferEntity
-import eu.opencloud.android.next.core.database.TransferState
 import eu.opencloud.android.next.core.datastore.FileDisplayOptions
 import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
 import eu.opencloud.android.next.core.datastore.SettingsRepository
@@ -48,7 +45,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -101,7 +97,6 @@ class FileBrowserViewModel(
     private val accountContext = BrowserAccountContext()
     private val accountBindings = MutableStateFlow<BrowserAccountBinding?>(null)
     private val offlineBindings = MutableStateFlow<Pair<BrowserAccountBinding, Long>?>(null)
-    private var exportInFlight = false
     private val directoryOptions = MutableStateFlow(DirectoryPageOptions())
     private val transfers = TransferManager(application, store)
     private val operations =
@@ -159,6 +154,32 @@ class FileBrowserViewModel(
                     }
                 }
             },
+        )
+    private val exports =
+        OrdinaryExportOwner(
+            scope = viewModelScope,
+            accountContext = accountContext,
+            files = AndroidOrdinaryExportFiles(application, store, transfers),
+            reduce = ::reduce,
+        )
+    private val backupCommands =
+        BrowserBackupCommands(
+            scope = viewModelScope,
+            accountContext = accountContext,
+            state = state,
+            backend = AndroidBrowserBackupBackend(application, store, transfers),
+            reduce = ::reduce,
+            failureMessage = { it.toOpenCloudError().safeMessage(getApplication()) },
+            configuredMessage = { application.localizedString(R.string.browser_backup_configured) },
+        )
+    private val transferCommands =
+        BrowserTransferCommands(
+            scope = viewModelScope,
+            accountContext = accountContext,
+            state = state,
+            backend = AndroidBrowserTransferBackend(transfers),
+            reduce = ::reduce,
+            failureMessage = { it.toOpenCloudError().safeMessage(getApplication()) },
         )
     private val placement =
         OrdinaryPlacementOwner(
@@ -482,18 +503,7 @@ class FileBrowserViewModel(
         recentFiles.record(resource.accountId, resource.spaceId, resource.remoteId)
     }
 
-    suspend fun prepareExternalFile(resource: ResourceEntity): ResourceEntity {
-        val binding =
-            accountContext.admitResource(resource)
-                ?: throw CancellationException("Resource account is no longer shown")
-        val prepared =
-            eu.opencloud.android.next.core.sync
-                .prepareLocalResource(getApplication(), resource)
-        withContext(Dispatchers.Main.immediate) {
-            if (accountContext.binding != binding) throw CancellationException("Resource account is no longer shown")
-        }
-        return prepared
-    }
+    suspend fun prepareExternalFile(resource: ResourceEntity): ResourceEntity = exports.prepareExternalFile(resource)
 
     fun exportFile(
         spaceId: String,
@@ -501,48 +511,7 @@ class FileBrowserViewModel(
         destination: Uri,
         removeLocal: Boolean,
     ) {
-        val binding = accountContext.binding ?: return
-        val account = binding.accountId
-        if (exportInFlight) return
-        exportInFlight = true
-        reduce { copy(exporting = true, exportStatus = "Preparing export…") }
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val resource = requireNotNull(store.resource(account, spaceId, resourceId))
-                val ready =
-                    eu.opencloud.android.next.core.sync
-                        .prepareLocalResource(getApplication(), resource)
-                reduce(binding) { copy(exportStatus = "Exporting ${ready.name}…") }
-                eu.opencloud.android.next.core.sync
-                    .exportCachedFile(getApplication(), ready, destination)
-                if (removeLocal) transfers.removeLocalCopy(ready, requireSameCopy = true)
-                reduce(binding) {
-                    copy(
-                        exportStatus =
-                            if (removeLocal) {
-                                "Exported; app's local copy removed. Cloud file kept."
-                            } else {
-                                "Saved to the selected location."
-                            },
-                    )
-                }
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                reduce(binding) {
-                    copy(
-                        exportStatus =
-                            "Export did not finish. Your cloud file is unchanged. " +
-                                "Check the destination before retrying.",
-                    )
-                }
-            } finally {
-                withContext(NonCancellable + Dispatchers.Main.immediate) {
-                    exportInFlight = false
-                    reduce(binding) { copy(exporting = false) }
-                }
-            }
-        }
+        exports.exportFile(spaceId, resourceId, destination, removeLocal)
     }
 
     fun dismissExportStatus() = reduce { copy(exportStatus = null) }
@@ -889,62 +858,14 @@ class FileBrowserViewModel(
         searchQuery.value = query
     }
 
-    @Suppress("LongParameterList")
     fun saveBackup(
         sourceTreeUri: Uri,
         draft: BackupDraft,
-    ) {
-        val binding = accountContext.binding ?: return
-        val account = binding.accountId
-        val space = draft.spaceId ?: return
-        viewModelScope.launch {
-            val backup =
-                FolderBackupEntity(
-                    UUID.randomUUID().toString(),
-                    account,
-                    space,
-                    sourceTreeUri.toString(),
-                    getApplication<Application>().sourceDirectoryName(sourceTreeUri),
-                    draft.destinationPath
-                        .ifBlank {
-                            "/Camera Uploads"
-                        },
-                    draft.mediaType,
-                    draft.wifiOnly,
-                    draft.chargingOnly,
-                    draft.deleteAfterUpload,
-                    dateOrganization = draft.dateOrganization,
-                    destinationKind = draft.destinationKind,
-                    sharedShareId = draft.sharedShareId,
-                    sharedFolderId = draft.sharedFolderId,
-                    exclusionPatterns = draft.exclusionPatterns,
-                    enabled = draft.enabled,
-                )
-            runCatching { withContext(Dispatchers.IO) { transfers.saveBackup(backup) } }
-                .onSuccess {
-                    reduce(binding) {
-                        copy(
-                            message =
-                                getApplication<Application>().localizedString(R.string.browser_backup_configured),
-                        )
-                    }
-                }.onFailure { reduce(binding) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
-        }
-    }
+    ) = backupCommands.saveBackup(sourceTreeUri, draft)
 
-    fun scanBackupsNow() = transfers.scanBackupsNow()
+    fun scanBackupsNow() = backupCommands.scanBackupsNow()
 
-    fun deleteBackup(id: String) {
-        val backup = state.value.backups.firstOrNull { it.id == id }
-        viewModelScope.launch(Dispatchers.IO) {
-            store.deleteBackup(id)
-            backup?.let {
-                eu.opencloud.android.next.core.sync
-                    .BackupScanDiagnostics(getApplication())
-                    .forget(it)
-            }
-        }
-    }
+    fun deleteBackup(id: String) = backupCommands.deleteBackup(id)
 
     fun completeBackupSourceSelection(
         expectedAccountId: String?,
@@ -952,57 +873,19 @@ class FileBrowserViewModel(
         expectedFingerprint: String?,
         draft: BackupDraft,
         selectedSource: Uri,
-    ) {
-        if (accountId != expectedAccountId || expectedAccountId == null) return
-        if (expectedBackupId == null) {
-            saveBackup(selectedSource, draft)
-        } else {
-            val current =
-                state.value.backups.firstOrNull {
-                    it.id == expectedBackupId &&
-                        it.accountId == expectedAccountId
-                }
-            if (current != null && backupSourceSelectionFingerprint(current) == expectedFingerprint) {
-                updateBackup(current, draft, selectedSource)
-            }
-        }
-    }
+    ) = backupCommands.completeBackupSourceSelection(
+        expectedAccountId,
+        expectedBackupId,
+        expectedFingerprint,
+        draft,
+        selectedSource,
+    )
 
     fun updateBackup(
         backup: FolderBackupEntity,
         draft: BackupDraft,
         selectedSource: Uri? = null,
-    ) {
-        val binding = accountContext.binding ?: return
-        if (backup.accountId != binding.accountId) return
-        viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    transfers.saveBackup(
-                        backupSourceSelection(
-                            backup,
-                            selectedSource?.toString(),
-                            selectedSource?.let { getApplication<Application>().sourceDirectoryName(it) },
-                        ).copy(
-                            destinationPath = draft.destinationPath,
-                            spaceId = draft.spaceId ?: backup.spaceId,
-                            destinationKind = draft.destinationKind,
-                            sharedShareId = draft.sharedShareId,
-                            sharedFolderId = draft.sharedFolderId,
-                            mediaType = draft.mediaType,
-                            wifiOnly = draft.wifiOnly,
-                            chargingOnly = draft.chargingOnly,
-                            deleteAfterUpload = false,
-                            lastSafeScanEpochMillis = 0,
-                            dateOrganization = draft.dateOrganization,
-                            exclusionPatterns = draft.exclusionPatterns,
-                            enabled = draft.enabled,
-                        ),
-                    )
-                }
-            }.onFailure { reduce(binding) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
-        }
-    }
+    ) = backupCommands.updateBackup(backup, draft, selectedSource)
 
     fun openBackupPicker() = backupPicker.openBackupPicker()
 
@@ -1026,55 +909,9 @@ class FileBrowserViewModel(
     fun resolveConflict(
         transfer: TransferEntity,
         decision: ConflictDecision,
-    ) {
-        if (transfer.accountId != accountId || state.value.bulkConflictCancelling) return
-        val binding = accountContext.binding ?: return
-        viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    when (decision) {
-                        ConflictDecision.REPLACE -> transfers.retryConflict(transfer, overwrite = true)
-                        ConflictDecision.KEEP_BOTH ->
-                            transfers.retryConflict(
-                                transfer,
-                                overwrite = false,
-                                keepBoth = true,
-                            )
-                        ConflictDecision.CANCEL -> transfers.cancelConflict(transfer)
-                    }
-                }
-            }.onFailure { reduce(binding) { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
-        }
-    }
+    ) = transferCommands.resolveConflict(transfer, decision)
 
-    fun cancelUploadConflicts() {
-        val binding = accountContext.binding ?: return
-        val account = binding.accountId
-        if (account.isBlank()) return
-        val hasConflicts =
-            state.value.transfers.any {
-                it.accountId == account &&
-                    it.direction == TransferDirection.UPLOAD.name &&
-                    it.state == TransferState.CONFLICT.name
-            }
-        if (state.value.bulkConflictCancelling || !hasConflicts) return
-        reduce { copy(bulkConflictCancelling = true, error = null) }
-        viewModelScope.launch {
-            runCatching { withContext(Dispatchers.IO) { transfers.cancelUploadConflicts(account) } }
-                .onFailure { failure ->
-                    if (accountId == account) {
-                        reduce(binding) {
-                            copy(
-                                bulkConflictCancelling = false,
-                                error = failure.toOpenCloudError().safeMessage(getApplication()),
-                            )
-                        }
-                    }
-                }.onSuccess {
-                    if (accountId == account) reduce(binding) { copy(bulkConflictCancelling = false) }
-                }
-        }
-    }
+    fun cancelUploadConflicts() = transferCommands.cancelUploadConflicts()
 
     fun showGlobalActionUnavailable() =
         reduce {
@@ -1219,26 +1056,6 @@ class FileBrowserViewModel(
 
 internal fun preferredInitialBrowserSpace(spaces: List<SpaceEntity>): SpaceEntity? =
     spaces.firstOrNull { it.type.equals("personal", ignoreCase = true) }
-
-private fun Application.sourceDirectoryName(treeUri: Uri): String {
-    val displayName =
-        runCatching {
-            val documentUri =
-                DocumentsContract.buildDocumentUriUsingTree(
-                    treeUri,
-                    DocumentsContract.getTreeDocumentId(treeUri),
-                )
-            contentResolver
-                .query(
-                    documentUri,
-                    arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-                    null,
-                    null,
-                    null,
-                )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
-        }.getOrNull()
-    return displayName?.takeIf(String::isNotBlank) ?: sourceNameFromTreeUri(treeUri.toString())
-}
 
 internal fun sourceNameFromTreeUri(sourceTreeUri: String): String =
     Uri

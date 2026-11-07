@@ -1,6 +1,7 @@
 package eu.opencloud.android.next
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -12,10 +13,9 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.core.datastore.Appearance
 import eu.opencloud.android.next.core.datastore.SettingsRepository
@@ -25,8 +25,7 @@ import eu.opencloud.android.next.core.designsystem.theme.OpenCloudTheme
 import eu.opencloud.android.next.ui.OpenCloudNextApp
 
 class MainActivity : AppCompatActivity() {
-    private var oauthCallback by mutableStateOf<String?>(null)
-    private var folderShortcut by mutableStateOf<String?>(null)
+    private val launchIntents by lazy { ViewModelProvider(this)[LaunchIntentViewModel::class.java] }
 
     override fun onResume() {
         super.onResume()
@@ -45,7 +44,7 @@ class MainActivity : AppCompatActivity() {
         eu.opencloud.android.next.feature.settings.RaiunUpdates
             .get(this)
             .initialize()
-        acceptLaunchIntent(intent)
+        launchIntents.acceptInitial(intent, savedInstanceState)
 
         setContent {
             val repository = SettingsRepository.create(this)
@@ -85,9 +84,8 @@ class MainActivity : AppCompatActivity() {
                 SideEffect { updateTaskBackground(dark, background) }
                 DeviceLockGate(this) {
                     OpenCloudNextApp(
-                        oauthCallback = oauthCallback,
-                        folderShortcut = folderShortcut,
-                        onConsumeFolderShortcut = { folderShortcut = null },
+                        launchIntents = launchIntents,
+                        onConsumeLaunchRequest = { consumeLaunchRequest(launchIntents, it) },
                     )
                     eu.opencloud.android.next.feature.settings
                         .AppUpdateNotice()
@@ -96,16 +94,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onNewIntent(intent: android.content.Intent) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        setIntent(intent)
-        acceptLaunchIntent(intent)
+        if (launchIntents.acceptNew(intent)) setIntent(intent)
     }
 
-    private fun acceptLaunchIntent(intent: android.content.Intent?) {
-        val folder = intent?.data?.scheme == eu.opencloud.android.next.core.sync.FolderShortcutTarget.SCHEME
-        folderShortcut = intent?.dataString?.takeIf { folder }
-        oauthCallback = intent?.dataString?.takeUnless { folder }
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        launchIntents.saveReplayMarker(outState)
     }
 
     private companion object {

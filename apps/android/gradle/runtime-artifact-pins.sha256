@@ -46,6 +46,7 @@
 5de2d48aa578402f46deb5294a955cee62f0c7d8c1840ef626fc7afb8abe22f9  androidx.window:window:1.5.0
 612d36c21865a0008e889a2515c088cbd3b2210891f23acfe458abb63030d92a  androidx.compose.runtime:runtime-android:1.10.0
 626714ee7a6120adbebad6c57d743087aed173fe4769fea2ccee71b4770c1c70  androidx.compose.ui:ui-text-android:1.10.0
+638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66  app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1
 64e86269f1106848981dd76f0046f81b46f3bd92efb22645de8fd044c0402b61  androidx.compose.material:material-icons-extended-android:1.7.8
 65308a06b1c00ee186cb9e19321383f043b993813f1522c47f4a3e3303bdba41  androidx.arch.core:core-common:2.2.0
 674155d592d5de18175ef0727442f7827a86cf8fe68d9927ba6a4140b69a5bc9  androidx.lifecycle:lifecycle-service:2.9.4
@@ -61,6 +62,7 @@
 78d5f42c866c2430c52e858a653e8f54b1a4d344cefdd0762ea267e5e3b5373b  io.github.phillip9933:android-updater:0.2.1
 7b0f19724082cbfcbc66e5abea2b9bc92cf08a1ea11e191933ed43801eb3cd05  org.jetbrains:annotations:23.0.0
 7ed55d308f72d274bad72b224d568f70ae82b968de40aea31465688fb5c08d5c  androidx.work:work-runtime:2.11.2
+83326921726084e014289bffed0407bfeaa496622b9e01c862d684b32b56e6bc  app.raiun.vendor:lazysodium-android:5.2.0-raiun-native.1
 8355383d86060ba2ac260f749305b7a3bcc9fa80b534b46e814e2140871998ce  androidx.camera:camera-lifecycle:1.4.2
 85513652dc9e458be47683dc0e61473e0bbbe24417d18c4eaf15b0c25a60318c  androidx.compose.foundation:foundation-layout-android:1.10.0
 865a061ef2fad16522f8433536b8d47208c46ff7c7745197dfa1eeb481869487  androidx.documentfile:documentfile:1.0.0

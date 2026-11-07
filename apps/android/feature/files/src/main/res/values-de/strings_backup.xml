@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="backup_filter_photos_help">Sichert Bilddateien, die vom Quellordner als Bilder erkannt werden, auch aus Unterordnern. Andere Dateien in gemischten Ordnern werden übersprungen; ausgeschlossene Ordner werden nicht durchsucht.</string>
+    <string name="backup_filter_videos_help">Sichert Videodateien, die vom Quellordner als Videos erkannt werden, auch aus Unterordnern. Andere Dateien in gemischten Ordnern werden übersprungen; ausgeschlossene Ordner werden nicht durchsucht.</string>
+    <string name="backup_filter_all_help">Durchsucht Unterordner und sichert alle Dateien außer ausgeschlossenen Dateien und Ordnern.</string>
     <string name="backup_settings_title">Ordner- und Kamerasicherung</string>
     <string name="backup_settings_add_accessibility">Sicherung hinzufügen</string>
     <string name="backup_settings_scan_accessibility">Sicherungen jetzt überprüfen</string>

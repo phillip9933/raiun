@@ -41,6 +41,18 @@ TLS client certificates remain separate; see [Server connections](SERVER-CONNECT
   The return URI, state and code are validated before exchange. No code or verifier
   is sent on a rejected issuer response.
 
+### Browser callback lifetime
+
+The Activity retains a pending browser callback in `LaunchIntentViewModel` memory
+until the matching request is acknowledged. Saved instance state does not contain
+the callback URI, OAuth code, or other callback payload. After successful
+consumption it may contain only a salted SHA-256 marker for the consumed URI, so
+rotation and app-lock re-entry do not replay that event. If Android destroys the
+process while a callback is still pending, the callback is not restored from saved
+state and sign-in may need to be started again. A callback already admitted to
+`AuthViewModel` is not cancelled by this replay guard, including an account switch
+already underway.
+
 ### Issuer response support
 
 The `iss` parameter in a browser authorization response is an extension defined by
@@ -96,6 +108,20 @@ a new browser login or require this optional response extension.
 Android 1.3.3 adds versioned account/slot binding and checked
 legacy migration; see [credential storage](CREDENTIAL-STORAGE.md). This does not
 change the OAuth flow or the supported provider profile described above.
+
+### OpenCloud Basic credentials
+
+HTTP Basic authorization for OpenCloud sign-in and restored account workers uses
+UTF-8 consistently. Source review of OpenCloud
+[8.0.1](https://github.com/opencloud-eu/opencloud/blob/v8.0.1/services/proxy/pkg/middleware/basic_auth.go)
+and [9.0.0](https://github.com/opencloud-eu/opencloud/blob/v9.0.0/services/proxy/pkg/middleware/basic_auth.go)
+and their Reva authentication backends found the server
+passes decoded Basic-auth bytes into UTF-8 identity strings without Latin-1
+transcoding. This is an explicit compatibility policy for those supported server
+versions. [RFC 7617 Appendix B.3](https://www.rfc-editor.org/rfc/rfc7617.html#appendix-B.3)
+describes ambiguity with legacy deployments; this does not establish a universal
+HTTP server default. Raiun does not normalize credentials or retry a failed
+authentication with another encoding.
 
 ## Verification boundaries
 

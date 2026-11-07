@@ -35,11 +35,42 @@ check(bundledMavenFiles == pinnedFiles.filter { it.startsWith("maven/") }.toSet(
     "Pinned Android updater Maven repository contains missing or unpinned files"
 }
 
+// Native-only security backports retain upstream Java payloads under distinct coordinates.
+val nativeBundle = rootDir.resolve("third_party/native-security-fixes")
+val nativePins = nativeBundle.resolve("SHA256SUMS")
+check(nativePins.isFile) { "Missing native security bundle; see third_party/native-security-fixes/README.md" }
+val nativeFiles = nativePins.readLines().filter { it.isNotBlank() }.map { line ->
+    val parts = line.split("  ", limit = 2)
+    check(parts.size == 2 && parts[0].matches(Regex("[0-9a-f]{64}"))) { "Invalid native bundle checksum entry" }
+    val file = nativeBundle.resolve(parts[1]).canonicalFile
+    check(file.toPath().startsWith(nativeBundle.canonicalFile.toPath()) && file.isFile) {
+        "Missing or unsafe native bundle file: ${parts[1]}"
+    }
+    val actual = MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
+    check(actual == parts[0]) { "Native security bundle checksum mismatch: ${parts[1]}" }
+    parts[1]
+}
+check(nativeFiles.distinct().size == nativeFiles.size && nativeFiles.any { it.endsWith(".aar") } &&
+    nativeFiles.any { it.endsWith(".pom") }) { "Incomplete native security bundle inventory" }
+val actualNativeFiles = nativeBundle.walkTopDown().filter { it.isFile && it != nativePins }.map {
+    it.relativeTo(nativeBundle).invariantSeparatorsPath
+}.toSet()
+check(actualNativeFiles == nativeFiles.toSet()) { "Native security bundle has missing or unpinned files" }
+
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
         mavenCentral()
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "PinnedNativeSecurityFixes"
+                    url = uri(rootDir.resolve("third_party/native-security-fixes/maven"))
+                }
+            }
+            filter { includeGroup("app.raiun.vendor") }
+        }
         exclusiveContent {
             forRepository {
                 maven {

@@ -1,6 +1,7 @@
 package eu.opencloud.android.next.core.network
 
 import org.w3c.dom.Document
+import org.w3c.dom.Node
 import org.xml.sax.InputSource
 import org.xml.sax.SAXException
 import org.xml.sax.SAXParseException
@@ -8,7 +9,10 @@ import org.xml.sax.helpers.DefaultHandler
 import java.io.StringReader
 import javax.xml.parsers.DocumentBuilderFactory
 
-/** Android does not implement the Apache-specific JAXP feature switches used on desktop JVMs. */
+/**
+ * Rejects declarations before parsing decoded text, without Android-unsupported JAXP switches.
+ * Callers must bound response bytes; this DOM parser does not enforce node or depth limits.
+ */
 @Suppress("ThrowsCount") // Entity resolution and both SAX callbacks must fail closed.
 internal fun parseSafeXml(xml: String): Document {
     if (xml.contains("<!DOCTYPE", true) || xml.contains("<!ENTITY", true) || '\u0000' in xml) {
@@ -29,9 +33,27 @@ internal fun parseSafeXml(xml: String): Document {
             override fun fatalError(exception: SAXParseException): Unit = throw exception
         },
     )
-    return try {
-        parser.parse(InputSource(StringReader(xml)))
-    } catch (_: SAXException) {
-        throw OpenCloudException(OpenCloudError.InvalidResponse)
+    val document =
+        try {
+            parser.parse(InputSource(StringReader(xml)))
+        } catch (_: SAXException) {
+            throw OpenCloudException(OpenCloudError.InvalidResponse)
+        }
+    // Android retains undeclared EntityReference nodes regardless of the expansion setting.
+    // Legal standard/numeric references are text; declarations for custom entities are forbidden.
+    var node: Node? = document
+    while (node != null) {
+        if (node.nodeType == Node.ENTITY_REFERENCE_NODE) {
+            throw OpenCloudException(OpenCloudError.InvalidResponse)
+        }
+        if (node.firstChild != null) {
+            node = node.firstChild
+            continue
+        }
+        while (node != null && node.nextSibling == null) {
+            node = node.parentNode
+        }
+        node = node?.nextSibling
     }
+    return document
 }

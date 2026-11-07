@@ -33,6 +33,41 @@ import org.robolectric.annotation.Config
 class BackupEditorTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
+    @Test fun mediaFilterHelpMatchesSelectionWhileManagingBackup() {
+        val backup =
+            FolderBackupEntity(
+                id = "backup",
+                accountId = "account",
+                spaceId = "personal",
+                sourceTreeUri = "content://provider/tree/camera",
+                sourceDisplayName = "Camera",
+                destinationPath = "/Pictures",
+                mediaType = "VIDEO",
+                wifiOnly = true,
+                chargingOnly = false,
+                deleteAfterUpload = false,
+            )
+        compose.setContent {
+            OpenCloudTheme {
+                FolderBackupSettingsContent(
+                    backups = emptyList(),
+                    onDismiss = {},
+                    onAdd = {},
+                    onDelete = {},
+                    initialBackup = backup,
+                )
+            }
+        }
+
+        compose.onNodeWithText(compose.activity.getString(R.string.backup_filter_videos_help)).assertExists()
+        compose.onNodeWithText("Photos").performScrollTo().performClick()
+        compose.onNodeWithText(compose.activity.getString(R.string.backup_filter_photos_help)).assertExists()
+        compose.onNodeWithText("All files").performScrollTo().performClick()
+        compose
+            .onNodeWithText(compose.activity.getString(R.string.backup_filter_all_help))
+            .assertExists()
+    }
+
     @Test fun choosingSourceDoesNotSaveUntilSaveIsPressed() {
         var sourceName by mutableStateOf<String?>(null)
         var pickerCalls = 0

@@ -1,0 +1,11 @@
+e0f5101a790c9d421dc1c7c53242f72a4184bb45760795ae30dc53a4e98dde37  BUNDLE-MANIFEST.json
+d2cc771eeb07bbc30072aa207741160e671b7607f88c8e1fe06b7a46a5e423a6  README.md
+83326921726084e014289bffed0407bfeaa496622b9e01c862d684b32b56e6bc  maven/app/raiun/vendor/lazysodium-android/5.2.0-raiun-native.1/lazysodium-android-5.2.0-raiun-native.1.aar
+72b360969368036f5506720bbb2975cd6274fc1a86c58f894a69e154354ad748  maven/app/raiun/vendor/lazysodium-android/5.2.0-raiun-native.1/lazysodium-android-5.2.0-raiun-native.1.pom
+638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66  maven/app/raiun/vendor/scanner-processing-opencv/0.8.0-beta.1-raiun-native.1/scanner-processing-opencv-0.8.0-beta.1-raiun-native.1.aar
+0f0eabe993181062e10ae511e1a1ff531461e54333b0644e991b5e6a294491af  maven/app/raiun/vendor/scanner-processing-opencv/0.8.0-beta.1-raiun-native.1/scanner-processing-opencv-0.8.0-beta.1-raiun-native.1.pom
+87e9fc6df0950c4bccb5b5ce92d5bc49e958eada5a259406a12d4bfdf8d02bfd  provenance/libsodium-build.json
+1a24e64bf4c6416c4052992b154b760a0df748bdd2ce124c746ce97c5c2d54ce  provenance/libsodium-source-recipe.md
+34108b4abb7e4f28c31be8c0aa2c384c0d5c6637dacba107665f4db39527ab69  provenance/opencv-build.json
+3134c046e09bddf5bbd25c04d9c17f1252b98a9ca59b36fe426fea155f59a35e  sources/libsodium-fix.patch
+d80350b6a3b354accacaabdd058da0b36f435eab95b2ef88acb2b021ed09b0ad  sources/opencv-split-function-pointer.patch

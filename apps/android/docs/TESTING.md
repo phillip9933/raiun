@@ -19,6 +19,73 @@ These Gradle tasks match the [quality workflow](../../../.github/workflows/quali
 
 For focused changes, run the affected module's tests first. Documentation-only changes need path, link and command inspection rather than an app suite. A release candidate still needs the complete quality and emulator gates on the exact commit proposed for release.
 
+## Local native dependency checks and backup help — 6 November 2026
+
+The local follow-up to signed review test 2 adds the [native inventory/checker](NATIVE-DEPENDENCIES.md)
+and localized inline filter explanations in both Add backup and Manage backup.
+Filtering, transfers, password policy, dependencies and app version are unchanged.
+The optional password-strength estimator is not planned. The existing signed
+build 60 is preserved unchanged and does not contain this new backup copy.
+
+Validation passes 26 native-checker regressions, 11 existing advisory-checker
+regressions, eight locale-validator regressions and strict five-locale
+completeness for 1,613 strings/plurals across 12 modules. The focused backup
+editor/details/source-selection suite passes 18 cases. The complete local gate
+passes all 2,347 host cases with zero failures/errors/skips, formatting, static
+analysis, screenshot verification, release lint and debug/unsigned-release
+assembly. Lint reports zero errors, 268 warnings and one hint. Three deliberate
+golden changes were reviewed: light/dark Add backup and the destination picker's
+dimmed editor background. Old images and the initial failed golden run are
+retained outside Git; no assertions were weakened.
+
+The old signed APK and the newly built unsigned release each verify all 20
+packaged native libraries against seven checksum-pinned AARs. The live OSV
+source-tag query completes with four OpenCV matches. The result remains
+`attention_required`, retaining the independently known libsodium review finding
+and source-coverage gaps. It is not a clean vulnerability scan; see the native
+guide for module/reachability assessments and unfinished provenance work.
+An independent source review found one corrupt-ZIP reporting gap, now fixed
+with real invalid-DEFLATE and unsupported-compression regressions and a scoped
+review of the correction.
+
+No new connected-native, physical-phone, GitHub CI, signed-upgrade or server
+acceptance is claimed. Workflow changes remain local and have not run on GitHub.
+No signing, installation, commit, push, issue change or publication occurred.
+Exact source, logs, old screenshots, live-query data and matching R8 diagnostics
+are retained in the project's `outputs/android-native-backup-20261106/` evidence.
+
+## Native security backport candidate — 6 November 2026
+
+The local candidate integrates source-bound OpenCV/libsodium backports under
+distinct checksum-pinned coordinates. Wrapper classes, scanner models/resources,
+the C++ runtime, app identity, data formats and password policy are preserved.
+The owner phone's signed build 60 is unchanged; cross-built arm64 artifacts do
+not establish arm64 execution or physical acceptance.
+
+The original real OpenCV core fails `-fsanitize=function`; the typed-wrapper
+patch passes 672 byte-exact checks. Unsanitized Android compatibility programs
+run the same checks against original and patched libraries on API 26/API 35.
+The exact original libsodium binary accepts the upstream mixed-order point;
+the backport rejects it on both APIs while producing identical SecretBox
+ciphertext. Three upstream crypto programs pass on each API, including exact
+expected-output comparisons. Source-tree tampering admission has eight tests.
+
+Run `scripts/test_check_native_dependencies.py` for artifact/evidence-bound
+resolution regressions; unknown IDs and changed artifacts must remain visible
+for review. Run the complete quality gate, normal eight-module API26/API35
+matrix and optimized app checks for the integrated candidate. Current commands,
+exact source/artifact hashes, outcomes and retained failed attempts are in the
+project's `outputs/android-native-findings-20261106/`; this paragraph is not a
+substitute for those results. No production signing or publication is included.
+
+## Preview and ordinary export ownership
+
+The local refactoring after Android 1.5.0 adds `OrdinaryExportOwnerTest` and `VaultPreviewActionsTest`. They cover account-epoch changes during export, one in-flight export across account round trips, cancelled preparation/provider writes, local-copy retention after failure, edit-buffer wiping before a save starts, late save results after replacing a preview, external-launch failures and lease cleanup after a cancelled download returns. The vault fixtures execute on Robolectric API 26 and API 35; they are not connected-native or physical-device tests. Successful external-copy fixtures initialize WorkManager just as the provider fixtures do.
+
+Run these together with `BrowserAccountContextTest`, `VaultViewModelTransferTest`, `VaultPreviewContentTest` and `VaultViewModelRaceTest` before the broader quality checks. Existing lock/provider/native checks remain relevant; these unit fixtures do not establish behavior for every external app or document provider.
+
+The subsequent command extractions add focused backup, transfer-conflict and vault root-management fixtures. Their regressions exercise account-epoch changes after admission, source-fingerprint rejection, exact conflict decisions, stale lock revisions and mutation outcomes after replacing a route. These use synthetic backends; they do not rename or delete a real server location. Existing ViewModel, root-menu, source-selection and conflict tests remain part of the broader checks.
+
 ## OpenCloud 9 and guest links
 
 See [OpenCloud 9 compatibility](OPENCLOUD-9.md) for the protocol scope, security boundaries and pending real-server acceptance. Guest tests use synthetic mock responses; they must not send live invitation or renewal emails. Existing 1.2.0 device acceptance does not establish this new feature.
@@ -841,3 +908,50 @@ The host gate passes 2,179 cases with no failures/errors/skips. Fixed timing obs
 The release assigns code 58, above the accepted local phone test builds 56 and 57. Application identity, Room 28, credential aliases and encryption formats stay unchanged. Runtime source matches the accepted build 57 candidate apart from the build number; release documentation is updated separately. The owner reported that the production-signed build 57 worked well after checking encrypted access. This is general owner-reported acceptance, not measured phone latency or an exhaustive device/server matrix.
 
 Publication requires the frozen release commit's quality/build checks, complete API 26/API 35 matrix, optimized instrumentation, original-key signature/alignment checks and a production-signed upgrade from 1.4.0. Record exact results and hashes in project `outputs/android-release-1.5.0/`; preparation alone does not establish those outcomes. Earlier standalone scanner/native probes may be reused only within their unchanged-boundary scope, not presented as fresh tests of this APK. Synthetic upgrade retention and bounded startup do not establish complete real-account, offline or biometric acceptance.
+
+### Local A7–A10 regression fixtures — candidate code 59, 2026-11-05
+
+The local candidate adds fixture coverage for browser callback and folder-shortcut
+admission across recreation, consumed-event replay suppression, matching
+acknowledgements, lock re-entry, account switching and late completion. Callback
+payloads are not restored from saved state; process death with a pending callback
+may require starting sign-in again. These checks do not claim cancellation of an
+account switch already admitted to `AuthViewModel`.
+
+Vault content-cipher fixtures exercise stalled source/sink IO, cancellation and
+session-close races, exactly-once fork disposal, rejected late publication and
+temporary buffer cleanup. A provider that ignores cancellation can retain
+temporary plaintext until its IO returns; tests cannot establish universal JVM or
+forensic erasure.
+
+Trash and file-version parser fixtures cover declaration rejection, controlled
+errors, namespace/escaped-name handling, alternate legal encodings and preservation
+of each client's existing response-byte and item-count limits. They do not add or
+assert a global DOM node/depth quota. Basic-auth fixtures cover UTF-8 encoding at
+all three production call sites, including non-ASCII credentials and unchanged
+ASCII behavior; OpenCloud 8.0.1/9.0.0 source evidence is documented in
+[Authentication](AUTHENTICATION.md). These fixture descriptions record coverage,
+not passed counts or release acceptance; exact execution results belong in the
+candidate evidence record.
+
+### Local A2/A4 TLS maintenance fixtures — 2026-11-05
+
+Focused security-module fixtures cover checked legacy pin migration and cleanup,
+corruption/recovery refusal, preservation of base pins, and rejection before HTTP
+transmission. `LegacyCertificatePinStoreAndroidTest` separately exercises real
+Android preferences, AtomicFile persistence and directory syncing with uniquely
+named synthetic fixtures on the native matrix.
+The related host classes explicitly select API 26/35 and use a scoped directory
+model with per-test OS-object isolation. That model tests control flow, not real
+filesystem durability; native API checks are kept separate and do not simulate a
+power loss.
+
+Transport fixtures cover compatible pool/socket-factory reuse, independent
+dispatchers and request settings, client-identity and route separation, policy
+replacement/removal, stale admissions and idle eviction. Plain HTTP keepalive
+tests establish socket reuse, not measured HTTPS/mTLS handshake performance;
+the existing synthetic TLS fixtures separately cover certificate origin selection.
+No real KeyChain identity, private deployment, Wi-Fi SSID or account is required.
+Physical network transitions, browser/IdP behavior and system certificate
+provisioning remain separate acceptance boundaries. Exact current results belong
+in the task evidence rather than being inferred from these fixture descriptions.

@@ -9,6 +9,7 @@ import eu.opencloud.android.next.core.model.auth.ServerCapabilities
 import eu.opencloud.android.next.core.model.auth.UserProfile
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.bearerAuthorizationHeader
+import eu.opencloud.android.next.core.network.openCloudBasicAuthorization
 import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.CredentialStore
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -58,7 +59,7 @@ class AuthRepository(
                 profile.displayName,
                 AuthenticationType.BASIC,
             )
-        val authorization = okhttp3.Credentials.basic(username, password)
+        val authorization = openCloudBasicAuthorization(username, password)
         val capabilities = api.capabilities(serverUrl, authorization)
         requireAccountAdmission(account.id)
         credentialStore.saveBasicCredentials(account.id, username, password)

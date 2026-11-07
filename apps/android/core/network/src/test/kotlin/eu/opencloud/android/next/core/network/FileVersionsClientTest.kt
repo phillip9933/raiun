@@ -3,6 +3,7 @@ package eu.opencloud.android.next.core.network
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -82,6 +83,46 @@ class FileVersionsClientTest {
         server.enqueue(
             MockResponse().setResponseCode(207).setBody("<!DOCTYPE x [<!ENTITY x SYSTEM 'file:///secret'>]><x/>"),
         )
+        val failure = assertThrows(OpenCloudException::class.java) { client.list(root, "file", "Bearer test") }
+        assertEquals(OpenCloudError.InvalidResponse, failure.error)
+    }
+
+    @Test fun `versions reject unsafe XML and alternate encoded declarations with controlled errors`() {
+        val malicious = "<!DOCTYPE x [<!ENTITY secret SYSTEM 'https://secret.example'>]><x>&secret;</x>"
+        val bodies =
+            listOf(
+                malicious.toByteArray(),
+                "<!ENTITY secret 'expanded'><x/>".toByteArray(),
+                "<x>\u0000</x>".toByteArray(),
+                "<x>private".toByteArray(),
+                "<x>&unknown;</x>".toByteArray(),
+                ("<?xml version='1.0' encoding='UTF-16'?>" + malicious).toByteArray(Charsets.UTF_16),
+                ("<?xml version='1.0' encoding='ISO-8859-1'?>" + malicious).toByteArray(Charsets.ISO_8859_1),
+            )
+        bodies.forEach { bytes ->
+            server.enqueue(MockResponse().setResponseCode(207).setBody(Buffer().write(bytes)))
+            val failure = assertThrows(OpenCloudException::class.java) { client.list(root, "file", "Bearer test") }
+            assertEquals(OpenCloudError.InvalidResponse, failure.error)
+            assertEquals("The server returned incomplete or unexpected metadata.", failure.message)
+        }
+        assertEquals(bodies.size, server.requestCount)
+    }
+
+    @Test fun `versions preserve namespace prefixes and escaped href segments`() {
+        server.enqueue(
+            MockResponse().setResponseCode(207).setBody(
+                listing(
+                    row("/remote.php/dav/meta/file/v/A&amp;B"),
+                ).replace("d:", "dav:").replace("xmlns:d=", "xmlns:dav="),
+            ),
+        )
+        assertEquals("A&B", client.list(root, "file", "Bearer test").single().id)
+    }
+
+    @Test fun `versions retain byte and response count bounds`() {
+        server.enqueue(MockResponse().setResponseCode(207).setBody(" ".repeat(2_000_001)))
+        assertThrows(IllegalArgumentException::class.java) { client.list(root, "file", "Bearer test") }
+        server.enqueue(MockResponse().setResponseCode(207).setBody(listing("<d:response/>".repeat(10_002))))
         assertThrows(IllegalArgumentException::class.java) { client.list(root, "file", "Bearer test") }
     }
 

@@ -7,13 +7,14 @@ import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.CredentialStore
-import okhttp3.Credentials
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import java.util.Base64
 
 @RunWith(RobolectricTestRunner::class)
 class WorkerAuthorizationProviderTest {
@@ -45,19 +46,36 @@ class WorkerAuthorizationProviderTest {
         assertEquals(tokens, credentials.readTokens("account"))
     }
 
-    @Test fun `basic authorization stays unchanged`() {
-        val credentials =
-            MemoryCredentials().apply {
-                username = "alice"
-                password = "secret"
+    @Test fun `restored basic authorization uses exact UTF8 with saved username or legacy user id fallback`() {
+        listOf(
+            "alice" to "secret",
+            "利用者" to "秘密",
+            "user😀" to "pass🔑",
+            "élise" to "café",
+        ).forEach { (username, password) ->
+            listOf(true, false).forEach { hasSavedUsername ->
+                val credentials =
+                    MemoryCredentials().apply {
+                        this.username = username.takeIf { hasSavedUsername }
+                        this.password = password
+                    }
+                val provider =
+                    WorkerAuthorizationProvider(
+                        context,
+                        credentials,
+                        AccountSessions(credentials, AppClock { 1_000_000 }),
+                    )
+                val account = AccountEntity("basic", "https://cloud.example", username, "User", "BASIC", false)
+                val header = provider.authorization(account)
+                assertEquals("Basic", header.substringBefore(' '))
+                assertArrayEquals(
+                    "$username:$password".toByteArray(Charsets.UTF_8),
+                    Base64.getDecoder().decode(header.substringAfter(' ')),
+                )
+                assertEquals(username.takeIf { hasSavedUsername }, credentials.username)
+                assertEquals(password, credentials.password)
             }
-        val provider =
-            WorkerAuthorizationProvider(context, credentials, AccountSessions(credentials, AppClock { 1_000_000 }))
-
-        assertEquals(
-            Credentials.basic("alice", "secret"),
-            provider.authorization(AccountEntity("basic", "https://cloud.example", "user", "User", "BASIC", false)),
-        )
+        }
     }
 
     private fun oidcAccount(id: String) = AccountEntity(id, "https://cloud.example", "user", "User", "OIDC", false)
