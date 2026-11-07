@@ -30,6 +30,7 @@ mod win32;
 pub use private_directory::{
     LegacyRecoveryMetadataDirectory, OwnedPrivateReader, OwnedPrivateStagedReader, PinnedDirectory,
     PinnedFileIdentity, PinnedPrivateFile, PinnedPrivateFileAccess, PrivateDirectory,
+    PrivateMetadataReadError,
 };
 /// DPAPI-protected, current-user-only storage for bounded serialized sessions.
 #[cfg(windows)]

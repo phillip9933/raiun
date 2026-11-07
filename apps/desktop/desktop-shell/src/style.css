@@ -1189,3 +1189,5 @@ body{min-width:0}
 }
 :root[data-theme] .sharing-tab.active { border-color: transparent; border-bottom-color: var(--raiun-primary); }
 :root[data-theme] .sharing-section-intro { padding: 4px 0; border: 0; border-radius: 0; background: transparent; }
+
+.pending-write-copy .pending-write-guidance{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45;margin-top:3px}

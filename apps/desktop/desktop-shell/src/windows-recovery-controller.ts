@@ -1,12 +1,14 @@
 import {
   validateWindowsRecoveryPage,
   validateWindowsRecoveryRetryResult,
+  validateWindowsRecoveryCloudCheckResult,
   windowsRecoveryEligibility,
   WINDOWS_RECOVERY_PAGE_LIMIT,
   type WindowsRecoveryAgentStatus,
   type WindowsRecoveryEligibility,
   type WindowsRecoveryPage,
   type WindowsRecoveryRetryResult,
+  type WindowsRecoveryCloudCheckResult,
   type WindowsRecoveryPageExpectation
 } from './windows-recovery';
 
@@ -18,6 +20,7 @@ export type WindowsRecoveryContext = {
   cloudRoot: string | null;
   authGeneration: number;
   recoveryScopeToken: string;
+  cloudCheckSupported?: boolean;
 };
 
 export type WindowsRecoveryControllerState = {
@@ -26,6 +29,9 @@ export type WindowsRecoveryControllerState = {
   error: string;
   retrying: boolean;
   retryResult: WindowsRecoveryRetryResult | null;
+  checking: boolean;
+  checkingRecordId: string | null;
+  cloudCheckResult: WindowsRecoveryCloudCheckResult | null;
 };
 
 export type WindowsRecoveryRequest = (action: string, args: Record<string, unknown>) => Promise<unknown>;
@@ -38,12 +44,16 @@ export function windowsRecoveryContextKey(context: WindowsRecoveryContext): stri
     context.clientId,
     context.cloudRoot,
     context.authGeneration,
-    context.recoveryScopeToken
+    context.recoveryScopeToken,
+    context.cloudCheckSupported === true
   ]);
 }
 
 export class WindowsRecoveryController {
-  readonly state: WindowsRecoveryControllerState = { page: null, loading: false, error: '', retrying: false, retryResult: null };
+  readonly state: WindowsRecoveryControllerState = {
+    page: null, loading: false, error: '', retrying: false, retryResult: null,
+    checking: false, checkingRecordId: null, cloudCheckResult: null
+  };
   private activeKey: string | null = null;
   private requestSequence = 0;
   private mutationInFlight = false;
@@ -58,6 +68,9 @@ export class WindowsRecoveryController {
     this.state.error = '';
     this.state.retrying = false;
     this.state.retryResult = null;
+    this.state.checking = false;
+    this.state.checkingRecordId = null;
+    this.state.cloudCheckResult = null;
   }
 
   async load(
@@ -65,7 +78,7 @@ export class WindowsRecoveryController {
     request: WindowsRecoveryRequest,
     isCurrentContext: () => boolean
   ): Promise<void> {
-    if (this.state.retrying) return;
+    if (this.mutationInFlight || this.state.checking || this.state.retrying) return;
     this.setContext(context);
     const key = windowsRecoveryContextKey(context);
     const sequence = ++this.requestSequence;
@@ -73,6 +86,7 @@ export class WindowsRecoveryController {
     this.state.loading = true;
     this.state.page = null;
     this.state.error = '';
+    this.state.cloudCheckResult = null;
 
     try {
       const value = await request('windows_recovery_list', {
@@ -113,7 +127,7 @@ export class WindowsRecoveryController {
     confirm: () => Promise<boolean>,
     isCurrentContext: () => boolean
   ): Promise<void> {
-    if (this.mutationInFlight || this.state.loading || retrySupported !== true || !isCurrentContext()) return;
+    if (this.mutationInFlight || this.state.loading || this.state.checking || retrySupported !== true || !isCurrentContext()) return;
     const key = windowsRecoveryContextKey(context);
     const page = this.state.page;
     if (this.activeKey !== key || !page ||
@@ -124,6 +138,7 @@ export class WindowsRecoveryController {
     this.mutationInFlight = true;
     this.state.retrying = true;
     this.state.retryResult = null;
+    this.state.cloudCheckResult = null;
     this.state.error = '';
     try {
       if (await confirm() !== true || !current()) return;
@@ -142,6 +157,7 @@ export class WindowsRecoveryController {
       if (!current()) return;
       this.state.retryResult = result;
       this.state.retrying = false;
+      this.mutationInFlight = false;
       await this.load(context, request, isCurrentContext);
     } catch {
       if (current()) {
@@ -152,6 +168,56 @@ export class WindowsRecoveryController {
       this.mutationInFlight = false;
       if (this.activeKey === key && !isCurrentContext()) this.setContext(null);
       if (this.activeKey === key) this.state.retrying = false;
+    }
+  }
+
+  async checkCloudCopy(
+    context: WindowsRecoveryContext,
+    recordId: string,
+    generation: number,
+    checkSupported: boolean,
+    request: WindowsRecoveryRequest,
+    isCurrentContext: () => boolean
+  ): Promise<void> {
+    if (this.mutationInFlight || this.state.loading || this.state.retrying || this.state.checking ||
+        checkSupported !== true || context.cloudCheckSupported !== true || !isCurrentContext()) return;
+    const key = windowsRecoveryContextKey(context);
+    const page = this.state.page;
+    const item = page?.items.find(candidate => candidate.record_id === recordId && candidate.generation === generation);
+    if (this.activeKey !== key || !page || !item) return;
+    const sequence = this.requestSequence;
+    const current = () => this.activeKey === key && this.requestSequence === sequence &&
+      this.state.page === page && isCurrentContext();
+    this.mutationInFlight = true;
+    this.state.checking = true;
+    this.state.checkingRecordId = recordId;
+    this.state.cloudCheckResult = null;
+    this.state.retryResult = null;
+    this.state.error = '';
+    try {
+      const value = await request('windows_recovery_check_cloud', {
+        profile_id: context.profileId,
+        expected_generation: context.authGeneration,
+        expected_recovery_scope_token: context.recoveryScopeToken,
+        record_id: recordId,
+        generation
+      });
+      const result = validateWindowsRecoveryCloudCheckResult(value, {
+        profileId: context.profileId,
+        authGeneration: context.authGeneration,
+        recoveryScopeToken: context.recoveryScopeToken,
+        recordId, generation, bytes: item.bytes
+      });
+      if (current()) this.state.cloudCheckResult = result;
+    } catch {
+      if (current()) this.state.error = 'The cloud copy could not be checked. Your saved copy is kept and Windows sync status is unchanged.';
+    } finally {
+      this.mutationInFlight = false;
+      if (this.activeKey === key && !isCurrentContext()) this.setContext(null);
+      if (this.activeKey === key) {
+        this.state.checking = false;
+        this.state.checkingRecordId = null;
+      }
     }
   }
 }
@@ -173,7 +239,8 @@ export function eligibleWindowsRecoveryContext(
       clientId: identity.clientId,
       cloudRoot: identity.cloudRoot,
       authGeneration: eligibility.authGeneration,
-      recoveryScopeToken: eligibility.recoveryScopeToken
+      recoveryScopeToken: eligibility.recoveryScopeToken,
+      ...(status?.windows_recovery_cloud_check_supported === true ? { cloudCheckSupported: true } : {})
     }
   };
 }

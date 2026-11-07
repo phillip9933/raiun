@@ -23,21 +23,78 @@ pub(super) fn has_unresolved_namespace(
     provider: &crate::ProviderScope,
     physical_root: crate::ConfiguredRootIdentity,
 ) -> Result<bool, BackendError> {
+    let summary = namespace_history_summary(namespace, streamed, catalog, provider, physical_root)?;
+    crate::streamed_store::namespace_rename_store::history_unresolved(&summary, namespace.is_some())
+}
+
+/// Same bounded authenticated metadata query; no body or mutation authority.
+pub(super) fn has_unresolved_for_fresh_create(
+    namespace: Option<&NamespaceRenameStoreContext>,
+    streamed: Option<&StreamedRecoveryContext>,
+    catalog: &ScopeCatalog,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+) -> Result<bool, BackendError> {
+    let summary = namespace_history_summary(namespace, streamed, catalog, provider, physical_root)?;
+    crate::streamed_store::namespace_rename_store::history_unresolved_for_fresh_create(
+        &summary,
+        namespace.is_some(),
+    )
+}
+
+/// Same bounded authenticated metadata query; no body or mutation authority.
+pub(super) fn namespace_history_summary(
+    namespace: Option<&NamespaceRenameStoreContext>,
+    streamed: Option<&StreamedRecoveryContext>,
+    catalog: &ScopeCatalog,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+) -> Result<crate::streamed_store::namespace_rename_store::NamespaceHistorySummary, BackendError> {
+    namespace_history_query(namespace, streamed, catalog, provider, physical_root, false)
+        .map_err(|_| BackendError::Unavailable)
+}
+
+/// Pending phase details are read only for an explicit support request.
+pub(super) fn namespace_history_diagnostics(
+    namespace: Option<&NamespaceRenameStoreContext>,
+    streamed: Option<&StreamedRecoveryContext>,
+    catalog: &ScopeCatalog,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+) -> Result<
+    crate::streamed_store::namespace_rename_store::NamespaceHistorySummary,
+    crate::NamespaceRecoveryDiagnosticError,
+> {
+    namespace_history_query(namespace, streamed, catalog, provider, physical_root, true)
+}
+
+fn namespace_history_query(
+    namespace: Option<&NamespaceRenameStoreContext>,
+    streamed: Option<&StreamedRecoveryContext>,
+    catalog: &ScopeCatalog,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+    diagnostics: bool,
+) -> Result<
+    crate::streamed_store::namespace_rename_store::NamespaceHistorySummary,
+    crate::NamespaceRecoveryDiagnosticError,
+> {
+    use crate::NamespaceRecoveryDiagnosticError as DiagnosticError;
     if !super::valid_scope_binding(provider, physical_root) {
-        return Err(BackendError::Unavailable);
+        return Err(DiagnosticError::ProviderScope);
     }
     let (state, policy) = if let Some(context) = namespace {
         if context.admission.state_identity() != context.state.identity()
             || context.state.path() != catalog.state_directory
         {
-            return Err(BackendError::Unavailable);
+            return Err(DiagnosticError::RecoveryContext);
         }
         (Arc::clone(&context.state), context.policy)
     } else if let Some(context) = streamed {
         if context.admission.state_identity() != context.state.identity()
             || context.state.path() != catalog.state_directory
         {
-            return Err(BackendError::Unavailable);
+            return Err(DiagnosticError::RecoveryContext);
         }
         (Arc::clone(&context.state), context.policy)
     } else {
@@ -51,11 +108,13 @@ pub(super) fn has_unresolved_namespace(
             Ok(state) => state,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return match std::fs::symlink_metadata(&catalog.state_directory) {
-                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                    _ => Err(BackendError::Unavailable),
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(Default::default())
+                    }
+                    _ => Err(DiagnosticError::RecoveryStateAbsence),
                 };
             }
-            Err(_) => return Err(BackendError::Unavailable),
+            Err(_) => return Err(DiagnosticError::RecoveryStateOpen),
         };
         // These existing defaults bound metadata discovery only. No content
         // body is opened and no storage/capture quota is admitted or changed.
@@ -68,21 +127,45 @@ pub(super) fn has_unresolved_namespace(
         };
         (state, policy)
     };
-    let summary = crate::streamed_store::SnapshotStore::namespace_history_summary_existing(
+    let inspect = if diagnostics {
+        crate::streamed_store::SnapshotStore::namespace_history_diagnostic_existing
+    } else {
+        crate::streamed_store::SnapshotStore::namespace_history_summary_existing
+    };
+    let summary = inspect(
         state,
         Arc::clone(&catalog.protector),
         policy,
         provider,
         physical_root,
     )
-    .map_err(|_| BackendError::Unavailable)?;
-    crate::streamed_store::namespace_rename_store::history_unresolved(&summary, namespace.is_some())
+    .map_err(DiagnosticError::Store)?;
+    Ok(summary)
 }
 
 pub(super) fn prepared_store(
     prepared: &DurablePreparedEditRecovery,
     scope: &EditJournalScope,
     authorization: CapturedAuthorization,
+) -> Result<Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>, BackendError>
+{
+    prepared_store_with_mode(prepared, scope, authorization, false)
+}
+
+pub(super) fn prepared_existing_store(
+    prepared: &DurablePreparedEditRecovery,
+    scope: &EditJournalScope,
+    authorization: CapturedAuthorization,
+) -> Result<Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>, BackendError>
+{
+    prepared_store_with_mode(prepared, scope, authorization, true)
+}
+
+fn prepared_store_with_mode(
+    prepared: &DurablePreparedEditRecovery,
+    scope: &EditJournalScope,
+    authorization: CapturedAuthorization,
+    existing_only: bool,
 ) -> Result<Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>, BackendError>
 {
     let Some(context) = &prepared.namespace_rename else {
@@ -118,8 +201,19 @@ pub(super) fn prepared_store(
         .state
         .verify_path()
         .map_err(|_| BackendError::Unavailable)?;
-    if context.admission.state_identity() != context.state.identity() {
+    if context.admission.state_identity() != context.state.identity()
+        || context.state.path() != prepared.catalog.state_directory
+    {
         return Err(BackendError::Unavailable);
+    }
+    if existing_only {
+        return crate::streamed_store::namespace_rename_store::FileRenameStore::open_existing_admitted(
+            Arc::clone(&context.state),
+            scope.clone(),
+            Arc::clone(&prepared.catalog.protector),
+            context.policy,
+        )
+        .map_err(|_| BackendError::Unavailable);
     }
     let base = crate::streamed_store::SnapshotStore::create_or_open_admitted(
         Arc::clone(&context.state),
@@ -137,6 +231,25 @@ pub(super) fn prepared_directory_store(
     prepared: &DurablePreparedEditRecovery,
     scope: &EditJournalScope,
     authorization: CapturedAuthorization,
+) -> Result<Option<Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>, BackendError>
+{
+    prepared_directory_store_with_mode(prepared, scope, authorization, false)
+}
+
+pub(super) fn prepared_existing_directory_store(
+    prepared: &DurablePreparedEditRecovery,
+    scope: &EditJournalScope,
+    authorization: CapturedAuthorization,
+) -> Result<Option<Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>, BackendError>
+{
+    prepared_directory_store_with_mode(prepared, scope, authorization, true)
+}
+
+fn prepared_directory_store_with_mode(
+    prepared: &DurablePreparedEditRecovery,
+    scope: &EditJournalScope,
+    authorization: CapturedAuthorization,
+    existing_only: bool,
 ) -> Result<Option<Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>, BackendError>
 {
     let Some(context) = &prepared.namespace_rename else {
@@ -172,11 +285,22 @@ pub(super) fn prepared_directory_store(
         .state
         .verify_path()
         .map_err(|_| BackendError::Unavailable)?;
-    if context.admission.state_identity() != context.state.identity() {
+    if context.admission.state_identity() != context.state.identity()
+        || context.state.path() != prepared.catalog.state_directory
+    {
         return Err(BackendError::Unavailable);
     }
     // Constructed only from the ORIGINAL prepared namespace context; no
     // current_user/default state/protector/caller policy is rediscovered.
+    if existing_only {
+        return crate::streamed_store::namespace_store::DirectoryIntentStore::open_existing_admitted(
+            Arc::clone(&context.state),
+            scope.clone(),
+            Arc::clone(&prepared.catalog.protector),
+            context.policy,
+        )
+        .map_err(|_| BackendError::Unavailable);
+    }
     let store =
         crate::streamed_store::namespace_store::DirectoryIntentStore::create_or_open_admitted(
             Arc::clone(&context.state),

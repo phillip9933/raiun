@@ -1344,13 +1344,19 @@ fn request_agent_guarded(mut message: AgentRequest) -> Result<Value, String> {
     #[cfg(target_os = "windows")]
     {
         use raiun_control_windows::connect_current_user;
-        let timeout = if agent_action_waits_for_completion(action) {
+        let cloud_copy_check = action == "windows_recovery_check_cloud";
+        let timeout = if cloud_copy_check {
+            Duration::from_secs(30)
+        } else if agent_action_waits_for_completion(action) {
             Duration::from_secs(300)
         } else {
             agent_response_timeout(action)
         };
         let mut stream = connect_current_user(timeout)
             .map_err(|error| format!("Could not connect to the Raiun agent pipe: {error}"))?;
+        if cloud_copy_check {
+            stream.set_io_timeout(Duration::from_secs(10));
+        }
         let mut encoded = Zeroizing::new(
             encode_json_line(&message.value)
                 .map_err(|error| format!("Could not encode agent request: {error}"))?,
@@ -1361,6 +1367,11 @@ fn request_agent_guarded(mut message: AgentRequest) -> Result<Value, String> {
             .map_err(|error| format!("Could not send request to Raiun agent: {error}"))?;
         if !contains_secret {
             encoded.zeroize();
+        }
+        if cloud_copy_check {
+            // Keep connection and request-write waits ordinary and bounded;
+            // only this read-only check's response can use its full allowance.
+            stream.set_io_timeout(agent_response_timeout("windows_recovery_check_cloud"));
         }
         let response = read_json_line(&mut stream)
             .map_err(|error| format!("Could not read Raiun agent response: {error}"))?;

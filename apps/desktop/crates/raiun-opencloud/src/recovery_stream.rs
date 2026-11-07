@@ -396,8 +396,8 @@ impl OpenCloudClient {
         let cancel = budget.cancellation();
         let pause_budget = budget.clone();
         let body_cancel = cancel.clone();
-        let generation = Arc::clone(&self.token_generation);
-        let body_generation = Arc::clone(&generation);
+        let generation = self.context_generation_fence();
+        let body_generation = generation.clone();
         let body_job_cancelled = Arc::clone(&cancelled);
         let timeout = transfer_timeout_for_context(
             context,
@@ -408,13 +408,14 @@ impl OpenCloudClient {
         let verified = Arc::new(AtomicBool::new(false));
         let witness = Arc::clone(&verified);
         let result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             timeout,
             || {
                 cancelled()
                     || pause_budget.is_paused()
                     || cancel.is_cancelled()
-                    || generation.load(Ordering::Acquire) != context.token_generation
+                    || !generation.matches(context.token_generation)
             },
             move |progress| async move {
                 let body = strict_upload(StrictReader {
@@ -426,7 +427,7 @@ impl OpenCloudClient {
                     cancelled: move || {
                         body_job_cancelled()
                             || body_cancel.is_cancelled()
-                            || body_generation.load(Ordering::Acquire) != context.token_generation
+                            || !body_generation.matches(context.token_generation)
                     },
                     progress,
                     verified: witness,
@@ -584,6 +585,57 @@ impl OpenCloudClient {
         }
     }
 
+    /// Opt-in first live create with a scheduling-only accepted notification.
+    /// The hook runs after HTTP 201 and strict body consumption, before the
+    /// unchanged independent readback. It grants no recovery or native proof.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fresh_create_blocking_reader_with_parent_accepted_cancellable_with_context<R>(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        parent: Option<&RecoveryCreateParent<'_>>,
+        reader: R,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+        accepted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Result<RecoveryCreateReadback, CloudError>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        let original_cancel = self.transfer_budget.cancellation();
+        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || cancelled() || original_cancel.is_cancelled());
+        let (mut worker, reader) = crate::blocking_reader::start(reader)
+            .map_err(|_| invalid("create source worker could not start"))?;
+        let result = self.recovery_create_reader_inner(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            reader,
+            content_length,
+            expected_sha256,
+            context,
+            Arc::clone(&cancelled),
+            parent,
+            Some(accepted),
+        );
+        let completion = worker.cancel_and_join();
+        match result {
+            Err(error) => Err(error),
+            Ok(proof) if completion == crate::blocking_reader::WorkerCompletion::Eof => {
+                self.stream_context_current(context)?;
+                ensure_not_cancelled(&|| cancelled())?;
+                Ok(proof)
+            }
+            Ok(_) => Err(invalid("create source worker did not complete safely")),
+        }
+    }
+
     /// Create an ordinary file with one Absent/root-conditioned PUT and require
     /// HTTP 201 followed by an independent exact-ETag/ID/length/hash full GET.
     /// Not an atomic created-ID receipt. OC9 normal PUT can resolve an existing
@@ -619,6 +671,7 @@ impl OpenCloudClient {
             expected_sha256,
             context,
             cancelled,
+            None,
             None,
         )
     }
@@ -657,6 +710,7 @@ impl OpenCloudClient {
             context,
             cancelled,
             Some(parent),
+            None,
         )
     }
 
@@ -673,6 +727,7 @@ impl OpenCloudClient {
         context: RangeReadContext,
         cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
         parent: Option<&RecoveryCreateParent<'_>>,
+        accepted: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> Result<RecoveryCreateReadback, CloudError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -693,33 +748,106 @@ impl OpenCloudClient {
         if let Some(parent) = parent {
             validate_create_parent(remote_root_path, &path, parent)?;
         }
-        stream_metadata_step(self, context, || {
-            self.validate_recovery_root(space, remote_root_path, expected_root_id)
-        })?;
-        stream_metadata_step(self, context, || {
-            match CloudBackend::stat(self, space, &path) {
-                Err(error) if error.kind == ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error),
-                Ok(_) => Err(conflict("create target already exists")),
+        let (selected, url, condition) = if remote_root_path == "/" {
+            if expected_root_id.is_empty()
+                || expected_root_id.len() > MAX_DAV_ENTRY
+                || expected_root_id.chars().any(char::is_control)
+            {
+                return Err(invalid("recovery root identity is invalid"));
             }
-        })?;
-        let (mut selected, url) =
-            stream_metadata_step(self, context, || self.transfer_url(space, &path))?;
-        let root_condition = stream_metadata_step(self, context, || {
-            selected.dav_url = self
-                .validate_identity_addressed_root(&selected, expected_root_id)?
-                .to_string();
-            self.ensure_writable_target(&selected, &url, &path)?;
-            self.root_write_condition(&selected, &path, expected_root_id)
-        })?;
-        let condition = if let Some(parent) = parent {
-            ensure_not_cancelled(&|| cancelled())?;
-            let tag = stream_metadata_step(self, context, || {
-                self.create_parent_condition(&selected, parent, true)
+            // Use one fresh discovery and ordered ordinary ancestry/absence
+            // observation for THIS preparation only. It cannot authorize a
+            // later operation, a replay, or independent postflight readback.
+            let observation = stream_metadata_step(self, context, || {
+                self.ordinary_create_metadata(
+                    space,
+                    &path,
+                    Some(expected_root_id),
+                    parent.map(|parent| parent.resource_id),
+                    true,
+                    &|| !cancelled() && self.stream_context_current(context).is_ok(),
+                )
             })?;
-            format!("{root_condition} {tag}")
+            if observation.target.is_some() {
+                return Err(conflict("create target already exists"));
+            }
+            self.stream_context_current(context)?;
+            ensure_not_cancelled(&|| cancelled())?;
+            let mut selected = observation.space;
+            let root_url = self.validate_identity_addressed_root(&selected, expected_root_id)?;
+            let url = append_logical_path(&root_url, &path)?;
+            selected.dav_url = root_url.to_string();
+            let parent_condition = if let Some(parent) = parent {
+                if !root_url.username().is_empty() || root_url.password().is_some() {
+                    return Err(invalid(
+                        "create parent DAV root is outside the original origin",
+                    ));
+                }
+                let observed = observation.ancestors.last().unwrap_or(&observation.root);
+                // Do not rebase the captured parent revision to a new one.
+                // The exact original ID/path/revision is both observed here
+                // and emitted in the conditional PUT below.
+                validate_recovery_entry(observed, parent.path)?;
+                stream_metadata(&observed.id, &observed.etag)?;
+                if observed.id != parent.resource_id
+                    || observed.etag != parent.etag
+                    || !observed.directory
+                    || observed.encrypted
+                    || !observed.writable
+                    || observed.etag.len() > 4096
+                {
+                    return Err(conflict("create parent identity, revision or role changed"));
+                }
+                let parent_url = append_logical_path(&root_url, parent.path)?;
+                Some(format!("<{parent_url}> ([{}])", parent.etag))
+            } else {
+                None
+            };
+            // Keep the separate late root revision observation, even though
+            // the rest of the ancestry was already checked in this operation.
+            let root_condition = stream_metadata_step(self, context, || {
+                self.root_write_condition_after_observation(
+                    &selected,
+                    &observation.root,
+                    expected_root_id,
+                )
+            })?;
+            let condition = match parent_condition {
+                Some(parent) => format!("{root_condition} {parent}"),
+                None => root_condition,
+            };
+            (selected, url, condition)
         } else {
-            root_condition
+            // Keep the established non-Space-root recovery route separate.
+            stream_metadata_step(self, context, || {
+                self.validate_recovery_root(space, remote_root_path, expected_root_id)
+            })?;
+            stream_metadata_step(self, context, || {
+                match CloudBackend::stat(self, space, &path) {
+                    Err(error) if error.kind == ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                    Ok(_) => Err(conflict("create target already exists")),
+                }
+            })?;
+            let (mut selected, url) =
+                stream_metadata_step(self, context, || self.transfer_url(space, &path))?;
+            let root_condition = stream_metadata_step(self, context, || {
+                selected.dav_url = self
+                    .validate_identity_addressed_root(&selected, expected_root_id)?
+                    .to_string();
+                self.ensure_writable_target(&selected, &url, &path)?;
+                self.root_write_condition(&selected, &path, expected_root_id)
+            })?;
+            let condition = if let Some(parent) = parent {
+                ensure_not_cancelled(&|| cancelled())?;
+                let tag = stream_metadata_step(self, context, || {
+                    self.create_parent_condition(&selected, parent, true)
+                })?;
+                format!("{root_condition} {tag}")
+            } else {
+                root_condition
+            };
+            (selected, url, condition)
         };
         self.stream_context_current(context)?;
         ensure_not_cancelled(&|| cancelled())?;
@@ -728,8 +856,8 @@ impl OpenCloudClient {
         let cancel = budget.cancellation();
         let pause_budget = budget.clone();
         let body_cancel = cancel.clone();
-        let generation = Arc::clone(&self.token_generation);
-        let body_generation = Arc::clone(&generation);
+        let generation = self.context_generation_fence();
+        let body_generation = generation.clone();
         let body_job_cancelled = Arc::clone(&cancelled);
         let timeout = transfer_timeout_for_context(
             context,
@@ -740,13 +868,14 @@ impl OpenCloudClient {
         let verified = Arc::new(AtomicBool::new(false));
         let witness = Arc::clone(&verified);
         let result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             timeout,
             || {
                 cancelled()
                     || pause_budget.is_paused()
                     || cancel.is_cancelled()
-                    || generation.load(Ordering::Acquire) != context.token_generation
+                    || !generation.matches(context.token_generation)
             },
             move |progress| async move {
                 let body = strict_upload(StrictReader {
@@ -758,7 +887,7 @@ impl OpenCloudClient {
                     cancelled: move || {
                         body_job_cancelled()
                             || body_cancel.is_cancelled()
-                            || body_generation.load(Ordering::Acquire) != context.token_generation
+                            || !body_generation.matches(context.token_generation)
                     },
                     progress,
                     verified: witness,
@@ -786,6 +915,9 @@ impl OpenCloudClient {
         result?;
         if !verified.load(Ordering::Acquire) {
             return Err(invalid("recovery source was not completely consumed"));
+        }
+        if let Some(accepted) = accepted {
+            accepted();
         }
         stream_metadata_step(self, context, || {
             self.validate_recovery_root(space, remote_root_path, expected_root_id)
@@ -862,6 +994,113 @@ impl OpenCloudClient {
         }
         // Always emit the ORIGINAL captured revision, never a refreshed rebase.
         Ok(format!("<{url}> ([{}])", parent.etag))
+    }
+
+    /// Compare an uncertain create's retained bytes with the current cloud
+    /// copy, without PUT or adoption. The original parent ID is checked before
+    /// and after observation; its historical revision may have changed. An
+    /// unknown created ID is observed only for this conditional full GET and
+    /// never becomes an original-created-ID receipt or mutation authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recovery_check_created_copy_with_parent_cancellable_with_context(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        parent: &RecoveryCreateParent<'_>,
+        expected_resource_id: Option<&str>,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<RecoveryStreamReadback, CloudError> {
+        let original_cancel = self.transfer_budget.cancellation();
+        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || cancelled() || original_cancel.is_cancelled());
+        self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
+        let _guard = RangeContextGuard::enter(context);
+        let path = recovery_parent_create_target_path(remote_root_path, relative_path)?;
+        validate_create_parent(remote_root_path, &path, parent)?;
+        if expected_resource_id
+            .is_some_and(|id| id.is_empty() || id.len() > 4096 || id.chars().any(char::is_control))
+        {
+            return Err(invalid("created copy identity is invalid"));
+        }
+        let (selected, target_url) =
+            stream_metadata_step(self, context, || self.transfer_url(space, &path)).map_err(
+                |error| {
+                    if error.kind == ErrorKind::NotFound {
+                        CloudError::new(
+                            ErrorKind::Forbidden,
+                            "created copy location is unavailable",
+                        )
+                    } else {
+                        error
+                    }
+                },
+            )?;
+        let check_location = || {
+            ensure_not_cancelled(&|| cancelled())?;
+            stream_metadata_step(self, context, || {
+                self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
+                self.create_parent_condition(&selected, parent, false)?;
+                Ok(())
+            })
+            .map_err(|error| {
+                // A missing root/parent is never a qualified missing child.
+                if error.kind == ErrorKind::NotFound {
+                    CloudError::new(ErrorKind::Forbidden, "created copy location is unavailable")
+                } else {
+                    error
+                }
+            })?;
+            self.stream_context_current(context)?;
+            ensure_not_cancelled(&|| cancelled())
+        };
+        check_location()?;
+        // This leaf-only request has no nested root/ancestor lookup whose
+        // NotFound could be confused with target absence. The independently
+        // qualified original root and parent still bracket it.
+        let observed = stream_metadata_step(self, context, || self.stat_at_dav(&target_url, &path));
+        check_location()?;
+        let observed = observed?;
+        validate_recovery_entry(&observed, &path)?;
+        stream_metadata(&observed.id, &observed.etag)?;
+        if observed.directory
+            || observed.encrypted
+            || observed.size != content_length
+            || observed.id.starts_with('/')
+            || Url::parse(&observed.id).is_ok()
+            || expected_resource_id.is_some_and(|expected| expected != observed.id)
+        {
+            return Err(conflict("created copy differs from retained content"));
+        }
+        let result = self.recovery_read_digest_inner(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            &observed.id,
+            &observed.etag,
+            content_length,
+            expected_sha256,
+            context,
+            Arc::clone(&cancelled),
+            true,
+        );
+        check_location()?;
+        // The generic full-body helper performs nested metadata checks. Their
+        // NotFound identifies no particular leaf even if the location is now
+        // available, so only the direct preflight above can report Missing.
+        result.map_err(|error| {
+            if error.kind == ErrorKind::NotFound {
+                CloudError::new(ErrorKind::Forbidden, "created copy readback is unavailable")
+            } else {
+                error
+            }
+        })
     }
 
     /// Verify the entire decoded HTTP entity without returning its plaintext.
@@ -971,8 +1210,8 @@ impl OpenCloudClient {
         let cancel = budget.cancellation();
         let pause_budget = budget.clone();
         let body_cancel = cancel.clone();
-        let generation = Arc::clone(&self.token_generation);
-        let body_generation = Arc::clone(&generation);
+        let generation = self.context_generation_fence();
+        let body_generation = generation.clone();
         let body_job_cancelled = Arc::clone(&cancelled);
         let timeout = transfer_timeout_for_context(
             context,
@@ -981,13 +1220,14 @@ impl OpenCloudClient {
             expected_size,
         )?;
         let result = async_body::run_body_operation_cancellable(
+            &self.body_runtime,
             self.body_idle_timeout,
             timeout,
             || {
                 cancelled()
                     || pause_budget.is_paused()
                     || cancel.is_cancelled()
-                    || generation.load(Ordering::Acquire) != context.token_generation
+                    || !generation.matches(context.token_generation)
             },
             move |progress| async move {
                 let response = request
@@ -1021,8 +1261,7 @@ impl OpenCloudClient {
                         let cancelled = || {
                             body_job_cancelled()
                                 || body_cancel.is_cancelled()
-                                || body_generation.load(Ordering::Acquire)
-                                    != context.token_generation
+                                || !body_generation.matches(context.token_generation)
                         };
                         if cancelled() {
                             return Err(invalid("recovery readback cancelled"));

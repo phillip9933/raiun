@@ -1,5 +1,13 @@
 # Windows headless CLI candidate
 
+Current transfer update: headless and GUI Windows mounts use the same ordinary
+four-file same-parent upload scheduler and verified provider credential leases.
+Routine same-account OAuth renewal updates the retained authentication owner
+without disconnecting native mounts or cancelling original jobs. Rejected grants,
+account changes and startup verification remain strict security transitions.
+Pending recovery copies are retained; neither renewal nor reconnect retries them
+automatically. The mount-only command scope is unchanged.
+
 Local, unpublished test candidate, 28 October 2026, based on Desktop 0.7.4.
 The package contains the Rust CLI and agent, with no graphical shell, tray,
 WebView or sync scheduler. Explicit startup commands are a separate opt-in.
@@ -259,7 +267,7 @@ Linux rejects this Windows-only section. Configuration changes require restart.
 
 ```json
 "windows_recovery": {
-  "max_file_bytes": 1073741824,
+  "max_file_bytes": 8589934592,
   "max_state_bytes": 8589934592,
   "max_state_entries": 20000,
   "max_scan_metadata_bytes": 67108864,
@@ -272,7 +280,7 @@ are errors. All values are integers; the object contains no credentials.
 
 | Field | Meaning and accepted range |
 | --- | --- |
-| `max_file_bytes` | Inclusive plaintext admission limit for one ordinary file: 1–1,099,511,627,776 bytes (1 TiB); default 1 GiB. Encrypted-vault limits are separate. |
+| `max_file_bytes` | Inclusive plaintext admission limit for one ordinary file: 1–1,099,511,627,776 bytes (1 TiB); omitted values follow `max_state_bytes` up to 1 TiB (8 GiB by default). Explicit file limits are retained. Encrypted-vault limits are separate. |
 | `max_state_bytes` | Aggregate logical recovery budget: 16,777,216–17,592,186,044,416 bytes (16 MiB–16 TiB), at least `max_file_bytes`; default 8 GiB. Retained v1/v2 records, ciphertext stages, reservations and namespace metadata count. |
 | `max_state_entries` | Retained-entry scan/admission limit: 64–20,000; default 20,000. The separate 256-scope/2,000-record discovery ceilings remain. |
 | `max_scan_metadata_bytes` | Authenticated metadata work per scan: 524,288–67,108,864 bytes (512 KiB–64 MiB); default 64 MiB. |
@@ -327,3 +335,16 @@ The earlier `d8233c1` installer passed basic install/upgrade/startup checks; a f
 laptop test account's unavailable browser route leaves its sign-in/file workflow
 unverified. Existing-headless state, memory-only credentials, explicit mount and
 folder-sync/autostart restrictions are unchanged.
+
+
+### Read-only cloud comparison
+
+Use `raiun drive edits check --id HEX --generation N` with an immutable record
+ID and generation from `edits list`. This reads and hashes the current cloud
+copy against the authenticated retained body. It never uploads, retries,
+acknowledges or removes a saved edit. `matched` means current bytes match;
+Windows native sync status and the retained local copy remain unchanged.
+`missing`, `different` and `unavailable` remain distinct; incomplete location
+proof never becomes target absence. The command pins the current profile,
+authentication generation and registered drive scope and does not replay a
+request against newer state. Use `--json` for the fixed scoped result.

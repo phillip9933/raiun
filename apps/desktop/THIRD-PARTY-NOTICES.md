@@ -4,31 +4,52 @@ This inventory accompanies the Linux x86_64 beta. Third-party copyrights and lic
 
 ## Headless CLI source notices
 
-The consolidated, unpublished GUI/CLI source also retains the separate
+The consolidated GUI/CLI candidate retains a separate
 [headless dependency inventory](legal/headless-dependency-inventory.json) and its
-complete license texts. That frozen inventory describes 231 external crate
-versions across the Linux and Windows headless dependency closures, including
-build/proc-macro dependencies and excluding dev-only edges. It is a source/notice
-inventory, not a linked-binary SBOM or a newly verified combined-package inventory.
-Its embedded lock hash identifies the earlier CLI snapshot; the consolidated
-workspace lock and both package inventories need final consistency validation
-before packaging. The earlier GUI inventory and full notice tree below remain
-preserved with their own scope.
+complete license texts. The GUI and headless inventories are regenerated offline
+from the current locked dependency graphs and existing cached source archives.
+Each records its exact lock hashes and scope; neither is a linked-binary SBOM.
+System FUSE and Windows APIs remain platform prerequisites. Notice collection
+does not change Desktop's version or publish a release.
 
-Hidden token input uses `rpassword 7.5.4` and `rtoolbox 0.0.6`, both declared
-Apache-2.0; see their retained [rpassword license](legal/rust/rpassword-7.5.4/LICENSE-APACHE)
-and [rtoolbox license](legal/rust/rtoolbox-0.0.6/LICENSE-APACHE). All version,
-repository, target membership and notice hashes are recorded in the inventory.
-The headless notice collector at `scripts/collect-headless-notices.py` works from
-existing cached archives, verifies their locked checksums and does not download
-missing license text. No collector or package build was executed by this
-reconciliation. System FUSE and Windows APIs remain platform prerequisites.
-Consolidating these source notices does not change Desktop's version or publish
-a release.
+<!-- BEGIN HEADLESS CLI NOTICES -->
+## Headless CLI MVP notices
+
+The unpublished headless agent/CLI candidate has a separate offline inventory:
+[legal/headless-dependency-inventory.json](legal/headless-dependency-inventory.json).
+It covers **232 distinct external crate versions**, with 212 in the
+Linux x86_64 closure and 208 in the Windows x86_64 GNULLVM closure. The
+closure excludes dev-only edges and conservatively includes build/proc-macro
+dependencies. It is a source/notice inventory, **not a linked-binary SBOM**.
+
+The exact workspace `Cargo.lock` SHA-256 is
+`feb0ebf58e7fc376a573a76c537d1a063e8080b16961077413168e62fd33f53a`. Generate/check the
+inventory entirely offline with `python3 scripts/collect-headless-notices.py`.
+Each cached registry archive is verified against its locked checksum before
+license text is read. Existing notice files are verified and preserved; only
+missing cached texts are copied. Any applied upstream supplement must match
+the retained registry checksum, VCS commit and notice hashes. The collector
+fails when required text is missing and never downloads it.
+
+The hidden token prompt adds `rpassword 7.5.4` and `rtoolbox 0.0.6`, both declared
+Apache-2.0. Their complete cached texts are retained as
+[rpassword LICENSE-APACHE](legal/rust/rpassword-7.5.4/LICENSE-APACHE) and
+[rtoolbox LICENSE-APACHE](legal/rust/rtoolbox-0.0.6/LICENSE-APACHE). All package
+versions, declared expressions, repositories, target membership and text hashes
+are in the headless inventory. Retained Rust toolchain/EME notices and any
+candidate-specific cross-toolchain notices accompany packaging. Linux FUSE and
+Windows OS APIs remain platform prerequisites, not copies made by this collector.
+
+The earlier GUI/Linux inventory and its full notice tree below are preserved
+independently. This headless collection does not change the app version,
+publish a release or certify exact binary linkage.
+<!-- END HEADLESS CLI NOTICES -->
 
 ## Scope and retained texts
 
-The offline collector traverses the two locked Linux Cargo graphs from the shipped agent, CLI and Tauri shell, excluding dev-only edges and conservatively retaining build/proc-macro dependencies. It records 464 distinct crate versions and the two production UI packages. This is a source/notice inventory, not a claim that every listed crate is linked into every binary. Development npm build tools are outside the shipped UI runtime inventory.
+The offline collector traverses the two locked Linux Cargo graphs from the shipped agent, CLI and Tauri shell, excluding dev-only edges and conservatively retaining build/proc-macro dependencies. It records 466 distinct crate versions and the two production UI packages. This is a source/notice inventory, not a claim that every listed crate is linked into every binary. Development npm build tools are outside the shipped UI runtime inventory.
+
+The single-instance plugin uses the retained local vendor source; its [vendor provenance](legal/rust/tauri-plugin-single-instance-2.4.5/RAIUN-VENDOR.md) accompanies its upstream license texts.
 
 Exact lock hashes, declared license expressions, source repositories and retained text hashes are in [legal/dependency-inventory.json](legal/dependency-inventory.json). All available cached nested LICENSE/COPYING/NOTICE/COPYRIGHT files are retained. Upstream declarations with `/` are reproduced verbatim rather than silently normalized. Retaining alternative license texts does not replace combined-license requirements.
 

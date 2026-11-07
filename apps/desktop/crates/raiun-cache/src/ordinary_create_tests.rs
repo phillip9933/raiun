@@ -533,6 +533,73 @@ fn bounded_ready_batch_and_counts_preserve_every_terminal_state() {
 }
 
 #[test]
+fn ready_discovery_keeps_window_and_validates_unowned_winner() {
+    let (_dir, cache, s) = fixture();
+    let receipts = (1..=5)
+        .zip(["/a", "/b", "/c", "/d", "/e"])
+        .map(|(id, path)| ready(&cache, &s, id, path))
+        .collect::<Vec<_>>();
+    let window = receipts[..4]
+        .iter()
+        .map(|receipt| receipt.write.id)
+        .collect::<Vec<_>>();
+    let excluded = &window[..3];
+    let (observed, unfiltered) = cache.ready_ordinary_create_discovery(&s, 4, &[]).unwrap();
+    assert_eq!(observed, window);
+    assert_eq!(unfiltered, receipts[..4]);
+    assert_eq!(unfiltered, cache.ready_ordinary_creates(&s, 4).unwrap());
+
+    let assert_filtered = || {
+        let (observed, candidates) = cache
+            .ready_ordinary_create_discovery(&s, 4, excluded)
+            .unwrap();
+        assert_eq!(observed, window);
+        assert_eq!(candidates, vec![receipts[3].clone()]);
+    };
+    assert_filtered();
+    let set_digest = |id, digest: &str| {
+        let db = cache.lock_db().unwrap();
+        assert_eq!(
+            db.execute(
+                "UPDATE ordinary_create_handoffs SET body_sha256=?1 WHERE scope_key=?2 AND write_id=?3",
+                params![digest, &s.key, id],
+            )
+            .unwrap(),
+            1
+        );
+    };
+    // Already-owned rows are selector exclusions, never authority for another
+    // worker. Their active owner remains responsible for full validation.
+    let corrupt_digest = "0".repeat(64);
+    set_digest(receipts[0].write.id, &corrupt_digest);
+    assert_filtered();
+    assert!(matches!(
+        cache.ready_ordinary_creates(&s, 4),
+        Err(CacheError::Corrupt)
+    ));
+    set_digest(receipts[0].write.id, &receipts[0].sha256);
+    set_digest(receipts[3].write.id, &corrupt_digest);
+    assert!(matches!(
+        cache.ready_ordinary_create_discovery(&s, 4, excluded),
+        Err(CacheError::Corrupt)
+    ));
+
+    let unregistered = CacheScope::new(
+        "https://cloud.example.test/",
+        "other-account",
+        "space",
+        "root",
+        ScopeProtection::PlaintextAllowed,
+    )
+    .unwrap();
+    assert!(
+        cache
+            .ready_ordinary_create_discovery(&unregistered, 4, &window)
+            .is_err()
+    );
+}
+
+#[test]
 fn legacy_queue_cannot_alias_handoff_path_after_parent_identity_changes() {
     let (_dir, cache, s) = fixture();
     let mut req = request(1, "/folder/file", b"body");

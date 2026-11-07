@@ -62,7 +62,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
 };
 
@@ -122,7 +122,7 @@ impl ProviderScope {
         account_id: String,
         server_origin: String,
     ) -> Result<Self, BackendError> {
-        let token_generation = client.token_generation();
+        let token_generation = client.provider_context_generation();
         if !valid_scope_part(&profile_id)
             || !valid_scope_part(&account_id)
             || !valid_scope_part(&server_origin)
@@ -334,6 +334,28 @@ pub trait ProviderIdentityCatalog: Send + Sync {
         scope: &ProviderIdentityCatalogScope,
         binding: &ProviderIdentityBinding,
     ) -> Result<(), BackendError>;
+    /// Persist a bounded complete-listing batch before publishing its native
+    /// identities. Failure may retain a safe prefix, but permits no publication.
+    /// Implementations may authenticate their catalog once for the entire batch;
+    /// every binding retains the same stable-target and tombstone checks.
+    /// `ensure_current` performs bounded cancellation/atomic checks only; no
+    /// provider reentry or acquisition of another publication/state lock.
+    fn upsert_many(
+        &self,
+        scope: &ProviderIdentityCatalogScope,
+        bindings: &[ProviderIdentityBinding],
+        ensure_current: &dyn Fn() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        ensure_current()?;
+        if bindings.len() > MAX_DIRECTORY_CHILDREN {
+            return Err(BackendError::Unavailable);
+        }
+        for binding in bindings {
+            ensure_current()?;
+            self.upsert(scope, binding)?;
+        }
+        ensure_current()
+    }
     fn remove(
         &self,
         scope: &ProviderIdentityCatalogScope,
@@ -524,8 +546,11 @@ pub struct OpenCloudPlaceholderBackend {
     vault_routes: Option<Arc<crate::vault_routes::VaultRouteRegistry>>,
     token_generation: u64,
     revoked: AtomicBool,
+    revoked_cloud_error: AtomicU8,
     lease_gate: RwLock<()>,
     publish_gate: Mutex<()>,
+    #[cfg(windows)]
+    fresh_create_send_gates: crate::fresh_create_send_gate::Gates,
     state: Mutex<State>,
     cached_only: bool,
 }
@@ -586,12 +611,14 @@ impl OpenCloudPlaceholderBackend {
         identity_catalog: Option<Arc<dyn ProviderIdentityCatalog>>,
     ) -> Result<Self, BackendError> {
         let client_origin = client.server_origin().ok_or(BackendError::Unavailable)?;
-        if client_origin != scope.server_origin
-            || client.token_generation() != scope.token_generation
+        if !client.provider_credentials_match(scope.account_id(), None, None)
+            || !client.provider_scope_generation_is_admitted(scope.token_generation)
+            || client_origin != scope.server_origin
+            || !client.provider_generation_is_current(scope.token_generation)
         {
             return Err(BackendError::Unavailable);
         }
-        let token_generation = client.token_generation();
+        let token_generation = client.provider_context_generation();
         Ok(Self {
             backend_id: NEXT_BACKEND_ID.fetch_add(1, Ordering::Relaxed),
             client,
@@ -609,8 +636,11 @@ impl OpenCloudPlaceholderBackend {
             catalog_scope: Mutex::new(None),
             token_generation,
             revoked: AtomicBool::new(false),
+            revoked_cloud_error: AtomicU8::new(0),
             lease_gate: RwLock::new(()),
             publish_gate: Mutex::new(()),
+            #[cfg(windows)]
+            fresh_create_send_gates: crate::fresh_create_send_gate::Gates::default(),
             cached_only: false,
             state: Mutex::new(State {
                 next_identity: 1,
@@ -703,13 +733,17 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         let account_id = derive_account_id(&self.client.configured_server_url(), &personal.id);
-        if account_id != self.scope.account_id {
+        if !self
+            .client
+            .provider_credentials_match(&account_id, Some(&personal.id), Some(&root.id))
+            || account_id != self.scope.account_id
+        {
             return Err(BackendError::Unavailable);
         }
         let catalog_scope = self.load_catalog_for_root(&personal.id, &root.id)?;
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -786,9 +820,37 @@ impl OpenCloudPlaceholderBackend {
         if spaces.iter().any(|space| {
             space.id.is_empty() || space.id.len() > 512 || space.id.chars().any(char::is_control)
         }) {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
-        verified_personal(&spaces)?;
+        verified_personal(&spaces).map_err(|_| self.reject_cached_namespace_mismatch())?;
+        Ok(spaces)
+    }
+
+    #[cfg(any(windows, test))]
+    fn discover_spaces_traced(
+        &self,
+        deadline: std::time::Instant,
+        trace: &crate::creation_preparation::Trace,
+    ) -> Result<Vec<raiun_core::backend::CloudSpace>, BackendError> {
+        let spaces = self
+            .client
+            .spaces_with_context_limited(
+                RangeReadContext {
+                    deadline,
+                    token_generation: self.token_generation,
+                },
+                MAX_PROVIDER_SPACES,
+            )
+            .map_err(|error| {
+                trace.cloud(error.kind);
+                self.reject_cached_cloud_error(error)
+            })?;
+        if spaces.iter().any(|space| {
+            space.id.is_empty() || space.id.len() > 512 || space.id.chars().any(char::is_control)
+        }) {
+            return Err(self.reject_cached_namespace_mismatch());
+        }
+        verified_personal(&spaces).map_err(|_| self.reject_cached_namespace_mismatch())?;
         Ok(spaces)
     }
 
@@ -1033,7 +1095,7 @@ impl OpenCloudPlaceholderBackend {
         let catalog_scope = self.catalog_scope_snapshot()?;
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire)
                     || binding_count(&state) >= MAX_IDENTITY_CATALOG_ENTRIES
                 {
@@ -1143,7 +1205,7 @@ impl OpenCloudPlaceholderBackend {
         };
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(context.token_generation, || {
+            .with_provider_generation(context.token_generation, || {
                 self.ensure_active()?;
                 if binding_count(&state) >= MAX_IDENTITY_CATALOG_ENTRIES {
                     return Err(BackendError::Unavailable);
@@ -1230,7 +1292,7 @@ impl OpenCloudPlaceholderBackend {
         let catalog_scope = self.catalog_scope_snapshot()?;
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire)
                     || binding_count(&state) >= MAX_IDENTITY_CATALOG_ENTRIES
                 {
@@ -1429,7 +1491,9 @@ impl OpenCloudPlaceholderBackend {
                         personal_root_id,
                     ) == identity
             ) && !self.revoked.load(Ordering::Acquire)
-                && self.client.token_generation() == self.token_generation
+                && self
+                    .client
+                    .provider_generation_is_current(self.token_generation)
         })
     }
 
@@ -1597,7 +1661,7 @@ impl OpenCloudPlaceholderBackend {
         let path = route.root_path();
         let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -2453,6 +2517,19 @@ impl OpenCloudPlaceholderBackend {
         self.revoked.load(Ordering::Acquire)
     }
 
+    /// First authoritative cloud rejection that revoked this cached backend.
+    /// This memory-only category grants no authority and contains no server data.
+    /// Explicit lifecycle revocation does not manufacture a cloud rejection.
+    pub fn revoked_cloud_error_kind(&self) -> Option<raiun_core::backend::ErrorKind> {
+        match self.revoked_cloud_error.load(Ordering::Acquire) {
+            1 => Some(ErrorKind::Unauthorized),
+            2 => Some(ErrorKind::Forbidden),
+            3 => Some(ErrorKind::NotFound),
+            4 => Some(ErrorKind::Conflict),
+            _ => None,
+        }
+    }
+
     /// Publish fail-closed revocation without waiting for backend read leases
     /// or changing the retained vault cleanup inventory. Owners call this
     /// before any fallible worker join, then `revoke` for the existing barrier.
@@ -2558,12 +2635,118 @@ impl OpenCloudPlaceholderBackend {
             children
         };
         let catalog_scope = self.catalog_scope_snapshot()?;
+        // Persist the complete ordinary listing in one catalog admission. A
+        // vault child never enters this plaintext catalog, and no placeholder
+        // state is exposed if any protected binding fails validation/storage.
+        let durable_bindings = entries
+            .iter()
+            .filter_map(|(_, entry)| {
+                #[cfg(windows)]
+                if vault_children.contains_key(&(entry.path.clone(), entry.id.clone())) {
+                    return None;
+                }
+                catalog_scope.as_ref().map(|scope| {
+                    if entry.directory {
+                        let identity = binding_identity(
+                            scope,
+                            "directory",
+                            &[
+                                &directory.space_id,
+                                &directory.root_resource_id,
+                                &entry.path,
+                                &entry.id,
+                            ],
+                        );
+                        ProviderIdentityBinding::Directory {
+                            identity: *identity.as_bytes(),
+                            space_id: directory.space_id.clone(),
+                            root_resource_id: directory.root_resource_id.clone(),
+                            path: entry.path.clone(),
+                            remote_id: entry.id.clone(),
+                        }
+                    } else {
+                        let identity = binding_identity(
+                            scope,
+                            "file",
+                            &[
+                                &directory.space_id,
+                                &directory.root_resource_id,
+                                &entry.path,
+                                &entry.id,
+                            ],
+                        );
+                        ProviderIdentityBinding::File {
+                            identity: *identity.as_bytes(),
+                            space_id: directory.space_id.clone(),
+                            root_resource_id: directory.root_resource_id.clone(),
+                            path: entry.path.clone(),
+                            remote_id: entry.id.clone(),
+                            etag: entry.etag.clone(),
+                            size: entry.size,
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
+                if let Some(scope) = catalog_scope.as_ref() {
+                    let catalog = self
+                        .identity_catalog
+                        .as_ref()
+                        .ok_or(BackendError::Unavailable)?;
+                    for binding in &durable_bindings {
+                        if validate_catalog_binding(scope, binding)? != binding.identity() {
+                            return Err(BackendError::Unavailable);
+                        }
+                    }
+                    check_cancel(cancellation)?;
+                    catalog.upsert_many(scope, &durable_bindings, &|| {
+                        check_cancel(cancellation)?;
+                        if self.revoked.load(Ordering::Acquire) {
+                            return Err(BackendError::Unavailable);
+                        }
+                        Ok(())
+                    })?;
+                    check_cancel(cancellation)?;
+                }
+                // Without a durable catalog, index this exact directory once
+                // rather than scanning all existing identities for every child.
+                let existing_directories = if catalog_scope.is_none() {
+                    state
+                        .directories
+                        .iter()
+                        .filter(|(_, item)| {
+                            item.space_id == directory.space_id
+                                && item.root_resource_id == directory.root_resource_id
+                        })
+                        .map(|(identity, item)| {
+                            ((item.path.clone(), item.remote_id.clone()), *identity)
+                        })
+                        .collect::<HashMap<_, _>>()
+                } else {
+                    HashMap::new()
+                };
+                let existing_files = if catalog_scope.is_none() {
+                    state
+                        .files
+                        .iter()
+                        .filter(|(_, item)| {
+                            item.space_id == directory.space_id
+                                && item.root_resource_id == directory.root_resource_id
+                        })
+                        .map(|(identity, item)| {
+                            ((item.path.clone(), item.remote_id.clone()), *identity)
+                        })
+                        .collect::<HashMap<_, _>>()
+                } else {
+                    HashMap::new()
+                };
+                let mut durable_bindings = durable_bindings.into_iter();
                 let mut children = Vec::with_capacity(entries.len());
                 for (name, entry) in entries {
                     check_cancel(cancellation)?;
@@ -2582,77 +2765,19 @@ impl OpenCloudPlaceholderBackend {
                         });
                         continue; // never persist a vault route in the ordinary catalogue
                     }
-                    let durable_binding = catalog_scope.as_ref().map(|scope| {
-                        if entry.directory {
-                            let identity = binding_identity(
-                                scope,
-                                "directory",
-                                &[
-                                    &directory.space_id,
-                                    &directory.root_resource_id,
-                                    &entry.path,
-                                    &entry.id,
-                                ],
-                            );
-                            ProviderIdentityBinding::Directory {
-                                identity: *identity.as_bytes(),
-                                space_id: directory.space_id.clone(),
-                                root_resource_id: directory.root_resource_id.clone(),
-                                path: entry.path.clone(),
-                                remote_id: entry.id.clone(),
-                            }
-                        } else {
-                            let identity = binding_identity(
-                                scope,
-                                "file",
-                                &[
-                                    &directory.space_id,
-                                    &directory.root_resource_id,
-                                    &entry.path,
-                                    &entry.id,
-                                ],
-                            );
-                            ProviderIdentityBinding::File {
-                                identity: *identity.as_bytes(),
-                                space_id: directory.space_id.clone(),
-                                root_resource_id: directory.root_resource_id.clone(),
-                                path: entry.path.clone(),
-                                remote_id: entry.id.clone(),
-                                etag: entry.etag.clone(),
-                                size: entry.size,
-                            }
-                        }
-                    });
-                    let opaque = if let (Some(scope), Some(binding)) =
-                        (catalog_scope.as_ref(), durable_binding.as_ref())
-                    {
-                        let identity = binding.identity();
-                        self.upsert_identity_binding(scope, binding)?;
-                        identity
+                    let opaque = if catalog_scope.is_some() {
+                        durable_bindings
+                            .next()
+                            .ok_or(BackendError::Unavailable)?
+                            .identity()
                     } else {
+                        let key = (entry.path.clone(), entry.id.clone());
                         let existing = if entry.directory {
-                            state
-                                .directories
-                                .iter()
-                                .find(|(_, item)| {
-                                    item.space_id == directory.space_id
-                                        && item.root_resource_id == directory.root_resource_id
-                                        && item.path == entry.path
-                                        && item.remote_id == entry.id
-                                })
-                                .map(|(identity, _)| *identity)
+                            existing_directories.get(&key)
                         } else {
-                            state
-                                .files
-                                .iter()
-                                .find(|(_, item)| {
-                                    item.space_id == directory.space_id
-                                        && item.root_resource_id == directory.root_resource_id
-                                        && item.path == entry.path
-                                        && item.remote_id == entry.id
-                                })
-                                .map(|(identity, _)| *identity)
-                        };
+                            existing_files.get(&key)
+                        }
+                        .copied();
                         if let Some(existing) = existing {
                             existing
                         } else {
@@ -2706,6 +2831,17 @@ impl OpenCloudPlaceholderBackend {
         namespace: NamespaceDirectory,
         cancellation: &CancellationToken,
     ) -> Result<Vec<PlaceholderChild>, BackendError> {
+        self.enumerate_namespace_for_parent(namespace, cancellation, None)
+    }
+
+    // A selected child is an internal ancestry lookup, never a complete
+    // population result. Ordinary Explorer enumeration always passes None.
+    fn enumerate_namespace_for_parent(
+        &self,
+        namespace: NamespaceDirectory,
+        cancellation: &CancellationToken,
+        selected_name: Option<&str>,
+    ) -> Result<Vec<PlaceholderChild>, BackendError> {
         check_cancel(cancellation)?;
         self.ensure_active()?;
         let deadline = cancellation.deadline();
@@ -2727,10 +2863,21 @@ impl OpenCloudPlaceholderBackend {
             personal_root_id,
             deadline,
         )?;
+        // Root visibility can change which names consume ordinal suffixes.
+        // Only globally unique base names are independent of that visibility;
+        // every ambiguous case retains the original full discovery path.
+        let selected_space = if matches!(&namespace, NamespaceDirectory::Spaces { .. }) {
+            selected_name.and_then(|name| unique_space_parent_target(&spaces, name))
+        } else {
+            None
+        };
         let staged_space_roots = if matches!(&namespace, NamespaceDirectory::Spaces { .. }) {
             let mut names = std::collections::HashSet::new();
             let mut staged = Vec::new();
             for space in spaces.iter().filter(|space| !space.personal) {
+                if selected_space.is_some_and(|selected| selected.id != space.id) {
+                    continue;
+                }
                 check_cancel(cancellation)?;
                 if space.encrypted && !self.has_vault_space_root(&space.id)? {
                     continue;
@@ -2762,14 +2909,21 @@ impl OpenCloudPlaceholderBackend {
                     return Err(BackendError::Unavailable);
                 }
             }
-            // Bind the complete set only if the account's Personal root and
-            // namespace identity still match after root discovery.
-            self.validate_namespace_scope(
+            // Bind roots only if the account's Personal root and namespace
+            // identity still match after discovery. A selected route also
+            // rechecks the complete Graph name set without probing other roots.
+            let spaces_after = self.validate_namespace_scope(
                 account_id,
                 personal_space_id,
                 personal_root_id,
                 deadline,
             )?;
+            if let Some(selected) = selected_space
+                && selected_name.and_then(|name| unique_space_parent_target(&spaces_after, name))
+                    != Some(selected)
+            {
+                return Err(BackendError::Unavailable);
+            }
             for (space_id, root_id, _, vault_identity) in &staged {
                 check_cancel(cancellation)?;
                 let spaces_by_id = spaces
@@ -2801,6 +2955,21 @@ impl OpenCloudPlaceholderBackend {
                     }
                 }
             }
+            if let Some(selected) = selected_space {
+                // The exact account/Personal root and selected Graph route
+                // must still be current after the selected root recheck.
+                let spaces_final = self.validate_namespace_scope(
+                    account_id,
+                    personal_space_id,
+                    personal_root_id,
+                    deadline,
+                )?;
+                if selected_name.and_then(|name| unique_space_parent_target(&spaces_final, name))
+                    != Some(selected)
+                {
+                    return Err(BackendError::Unavailable);
+                }
+            }
             Some(staged)
         } else {
             None
@@ -2808,7 +2977,7 @@ impl OpenCloudPlaceholderBackend {
         let catalog_scope = self.catalog_scope_snapshot()?;
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -2941,11 +3110,14 @@ impl OpenCloudPlaceholderBackend {
                         personal_space_id,
                         personal_root_id,
                     } => {
-                        // Replace Space names only from the freshly validated
-                        // complete set. Old roots must not keep a stale label.
-                        state.location_labels.retain(|(space, root), _| {
-                            space == &personal_space_id && root == &personal_root_id
-                        });
+                        // Only full discovery replaces the complete label set.
+                        // A selected ancestry lookup publishes its one child
+                        // without pruning unrelated labels or bindings.
+                        if selected_space.is_none() {
+                            state.location_labels.retain(|(space, root), _| {
+                                space == &personal_space_id && root == &personal_root_id
+                            });
+                        }
                         let mut children = Vec::new();
                         for (space_id, root_id, name, vault_identity) in
                             staged_space_roots.unwrap_or_default()
@@ -3041,17 +3213,18 @@ impl OpenCloudPlaceholderBackend {
         deadline: std::time::Instant,
     ) -> Result<Vec<raiun_core::backend::CloudSpace>, BackendError> {
         let spaces = self.discover_spaces(deadline)?;
-        let personal = verified_personal(&spaces)?;
+        let personal =
+            verified_personal(&spaces).map_err(|_| self.reject_cached_namespace_mismatch())?;
         if personal.id != expected_personal_space_id
             || derive_account_id(&self.client.configured_server_url(), &personal.id) != account_id
             || account_id != self.scope.account_id
         {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
         }
         let personal = spaces
             .iter()
             .find(|space| space.id == expected_personal_space_id)
-            .ok_or(BackendError::Unavailable)?;
+            .ok_or_else(|| self.reject_cached_namespace_mismatch())?;
         let root = self
             .client
             .stat_discovered_space_root_with_context(
@@ -3063,7 +3236,59 @@ impl OpenCloudPlaceholderBackend {
             )
             .map_err(|error| self.reject_cached_cloud_error(error))?;
         if !root.directory || root.encrypted || root.id != expected_personal_root_id {
-            return Err(BackendError::Unavailable);
+            return Err(self.reject_cached_namespace_mismatch());
+        }
+        Ok(spaces)
+    }
+
+    #[cfg(any(windows, test))]
+    fn validate_namespace_scope_traced(
+        &self,
+        account_id: &str,
+        expected_personal_space_id: &str,
+        expected_personal_root_id: &str,
+        deadline: std::time::Instant,
+        trace: &crate::creation_preparation::Trace,
+    ) -> Result<Vec<raiun_core::backend::CloudSpace>, BackendError> {
+        use crate::creation_preparation::Stage;
+        trace.enter(Stage::AccountRoot);
+        let spaces = self.discover_spaces_traced(deadline, trace)?;
+        let personal =
+            verified_personal(&spaces).map_err(|_| self.reject_cached_namespace_mismatch())?;
+        if personal.id != expected_personal_space_id
+            || derive_account_id(&self.client.configured_server_url(), &personal.id) != account_id
+            || account_id != self.scope.account_id
+        {
+            return Err(self.reject_cached_namespace_mismatch());
+        }
+        let personal = spaces
+            .iter()
+            .find(|space| space.id == expected_personal_space_id)
+            .ok_or_else(|| self.reject_cached_namespace_mismatch())?;
+        let root = self
+            .client
+            .stat_discovered_space_root_with_context(
+                personal,
+                RangeReadContext {
+                    deadline,
+                    token_generation: self.token_generation,
+                },
+            )
+            .map_err(|error| {
+                trace.cloud(error.kind);
+                self.reject_cached_cloud_error(error)
+            })?;
+        trace.enter(Stage::RootKind);
+        if !root.directory {
+            return Err(self.reject_cached_namespace_mismatch());
+        }
+        trace.enter(Stage::RootEncryption);
+        if root.encrypted {
+            return Err(self.reject_cached_namespace_mismatch());
+        }
+        trace.enter(Stage::RootIdentity);
+        if root.id != expected_personal_root_id {
+            return Err(self.reject_cached_namespace_mismatch());
         }
         Ok(spaces)
     }
@@ -3105,7 +3330,7 @@ impl OpenCloudPlaceholderBackend {
             }
             match self
                 .client
-                .try_lock_token_generation(self.token_generation)
+                .try_lock_provider_generation(self.token_generation)
                 // Token mismatch permanently fences this backend through
                 // ensure_active; publication is already locked here.
                 .map_err(map_cloud_error)?
@@ -3129,7 +3354,9 @@ impl OpenCloudPlaceholderBackend {
 
     fn ensure_active(&self) -> Result<(), BackendError> {
         if self.revoked.load(Ordering::Acquire)
-            || self.client.token_generation() != self.token_generation
+            || !self
+                .client
+                .provider_generation_is_current(self.token_generation)
         {
             Err(BackendError::Unavailable)
         } else {
@@ -3148,7 +3375,9 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
     }
     fn recovery_job_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire)
-            || self.client.token_generation() != self.token_generation
+            || !self
+                .client
+                .provider_generation_is_current(self.token_generation)
     }
     fn recovery_transfer_cancellation(&self) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
         let cancellation = self.client.transfer_budget().cancellation();
@@ -3254,7 +3483,7 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
             base_size: file.size,
         };
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     Err(BackendError::Unavailable)
                 } else {
@@ -3393,7 +3622,9 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
                 cancellation.is_cancelled()
                     || cancellation.is_expired()
                     || self.revoked.load(Ordering::Acquire)
-                    || self.client.token_generation() != self.token_generation
+                    || !self
+                        .client
+                        .provider_generation_is_current(self.token_generation)
             },
         );
         if cancellation.is_cancelled() {
@@ -3421,7 +3652,7 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
             Err(error) => return Err(self.reject_cached_cloud_error(error)),
         };
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -3555,7 +3786,9 @@ impl OpenCloudPlaceholderBackend {
                     cancellation.is_cancelled()
                         || cancellation.is_expired()
                         || self.revoked.load(Ordering::Acquire)
-                        || self.client.token_generation() != self.token_generation
+                        || !self
+                            .client
+                            .provider_generation_is_current(self.token_generation)
                 },
             );
         if cancellation.is_cancelled() {
@@ -3579,7 +3812,7 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         self.client
-            .with_token_generation(self.token_generation, || {
+            .with_provider_generation(self.token_generation, || {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
@@ -3865,6 +4098,33 @@ fn find_spaces_identity(state: &State, account_id: &str) -> Option<OpaqueIdentit
             matches!(binding, NamespaceDirectory::Spaces { account_id: current, .. } if current == account_id)
         })
         .map(|(identity, _)| *identity)
+}
+
+// Base names must be globally unique even for Graph roots whose DAV metadata
+// could later exclude them. Then no visibility subset can change the selected
+// name through ordinal allocation. None means use full discovery, not absence.
+fn unique_space_parent_target<'a>(
+    spaces: &'a [raiun_core::backend::CloudSpace],
+    name: &str,
+) -> Option<&'a raiun_core::backend::CloudSpace> {
+    let mut names = std::collections::HashSet::new();
+    let mut ids = std::collections::HashSet::new();
+    let mut selected = None;
+    for space in spaces.iter().filter(|space| !space.personal) {
+        let base = checked_space_display_name(
+            &space.name,
+            &space.id,
+            &mut std::collections::HashSet::new(),
+        )
+        .ok()?;
+        if !names.insert(base.to_lowercase()) || !ids.insert(space.id.as_str()) {
+            return None;
+        }
+        if base == name {
+            selected = Some(space);
+        }
+    }
+    selected.filter(|space| !space.encrypted)
 }
 
 fn checked_space_display_name(

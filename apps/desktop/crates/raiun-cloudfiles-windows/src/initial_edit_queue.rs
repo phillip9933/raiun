@@ -214,6 +214,16 @@ impl InitialEditQueue {
         Ok(())
     }
 
+    /// Current in-memory scheduling hint only. No receipt is removed and no
+    /// dispatch or root authority is granted. A later push waits for the next tick.
+    pub(crate) fn has_pending(&self) -> Result<bool, BackendError> {
+        Ok(!self
+            .pending
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?
+            .is_empty())
+    }
+
     pub(crate) fn take(&self) -> Result<Option<PendingInitialEdit>, BackendError> {
         Ok(self
             .pending

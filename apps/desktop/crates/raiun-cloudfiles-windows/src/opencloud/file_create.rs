@@ -1,5 +1,7 @@
 //! One explicit create attempt; remote facts never authorize native completion.
+use super::namespace::preparation_stage;
 use super::*;
+use crate::creation_preparation::{Stage as PreparationStage, Trace as PreparationTrace};
 use crate::namespace_intent::{
     CapturedAuthorization, NamespaceDestinationReport, NamespaceIntent, NamespaceOperation,
 };
@@ -21,6 +23,45 @@ pub(crate) struct Admission {
     backend: std::sync::Weak<OpenCloudPlaceholderBackend>,
 }
 impl Admission {
+    /// This token describes only the exact freshly verified parent used by
+    /// this admission. It is never selected from an event or caller scope.
+    #[allow(dead_code)] // Scope-only callers retain the conservative health policy.
+    pub(crate) fn fresh_create_space(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+    ) -> Result<crate::FreshCreateSpace, BackendError> {
+        self.check(backend)?;
+        let space = crate::FreshCreateSpace::from_verified_scope(self.parent.scope.clone());
+        self.check(backend)?;
+        Ok(space)
+    }
+    pub(crate) fn fresh_create_space_for_child(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        name: &str,
+    ) -> Result<crate::FreshCreateSpace, BackendError> {
+        self.check(backend)?;
+        if !valid_windows_component(name) {
+            return Err(BackendError::Unavailable);
+        }
+        let target = crate::fresh_create_target::FreshCreateTarget::from_verified_parent(
+            &self.parent.path,
+            &self.parent.remote.resource_id,
+            name,
+            crate::fresh_create_target::FreshCreateTargetKind::File,
+        )
+        .and_then(|target| {
+            target.with_verified_parent_ancestry(
+                &self.parent.scope.root_resource_id,
+                &self.parent.remote_ancestor_ids,
+            )
+        })
+        .ok_or(BackendError::Unavailable)?;
+        let space =
+            crate::FreshCreateSpace::from_verified_target(self.parent.scope.clone(), target);
+        self.check(backend)?;
+        Ok(space)
+    }
     fn child_path(&self, leaf: &str) -> Result<String, BackendError> {
         let components: Vec<_> = self.parent_components.iter().map(String::as_str).collect();
         let relative =
@@ -32,9 +73,17 @@ impl Admission {
         &self,
         backend: &Arc<OpenCloudPlaceholderBackend>,
     ) -> Result<(), BackendError> {
+        self.qualify_target_with_trace(backend, None)
+    }
+    fn qualify_target_with_trace(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        trace: Option<&PreparationTrace>,
+    ) -> Result<(), BackendError> {
+        preparation_stage(trace, PreparationStage::Current);
         self.check(backend)?;
         let metadata = self.job.cancellation().bounded_request();
-        namespace::qualify_create_target(
+        namespace::qualify_create_target_with_trace(
             backend,
             &self.parent.scope,
             &self.parent_components,
@@ -42,8 +91,10 @@ impl Admission {
                 deadline: metadata.deadline(),
                 token_generation: self.auth.token_generation,
             },
+            trace,
         )
         .map_err(|error| backend.reject_cached_cloud_error(error))?;
+        preparation_stage(trace, PreparationStage::Current);
         self.check(backend)
     }
     pub(crate) fn capture_job(&self) -> crate::StreamedRecoveryJob {
@@ -257,11 +308,17 @@ impl Admission {
         joined: VerifiedFileJoin,
         before_sdk: impl FnOnce() -> Result<(), BackendError>,
     ) -> Result<VerifiedCreateReadback, BackendError> {
-        self.qualify_target(backend)?;
+        self.check(backend)?;
         if self.attempted {
             return Err(BackendError::Unavailable);
         }
         self.attempted = true;
+        let permit = backend.fresh_create_send_gates.acquire(
+            &self.parent.scope.space_id,
+            &self.parent.scope.root_resource_id,
+            || self.check(backend),
+        )?;
+        self.qualify_target(backend)?;
         let intent = joined.record().intent().clone();
         let NamespaceOperation::CreateFile {
             destination,
@@ -301,7 +358,9 @@ impl Admission {
                 || !current(auth)
                 || original.upgrade().is_none_or(|b| {
                     b.revoked.load(Ordering::Acquire)
-                        || b.client.token_generation() != auth.token_generation
+                        || !b
+                            .client
+                            .provider_generation_is_current(auth.token_generation)
                 })
         });
         let reader = joined
@@ -315,43 +374,61 @@ impl Admission {
             deadline: self.job.deadline(),
             token_generation: self.auth.token_generation,
         };
-        let proof = if self.parent.path == "/" {
-            // Preserve the established explicit root wrapper's SDK behavior.
-            backend
-                .client
-                .recovery_create_blocking_reader_cancellable_with_context(
-                    &self.parent.scope.space_id,
-                    "/",
-                    &self.parent.scope.root_resource_id,
-                    relative,
-                    reader,
-                    content.byte_len,
-                    digest,
-                    context,
-                    cancelled,
-                )
+        let transport_parent = if self.parent.path == "/" {
+            None
         } else {
-            let parent = raiun_opencloud::RecoveryCreateParent {
-                path: &self.parent.path,
-                resource_id: &self.parent.remote.resource_id,
-                etag: &self.parent.remote.etag,
-            };
-            backend
+            self.check(backend)?;
+            let metadata = self.job.cancellation().bounded_request();
+            let parent = backend
                 .client
-                .recovery_create_blocking_reader_with_parent_cancellable_with_context(
+                .stat_with_context(
                     &self.parent.scope.space_id,
-                    "/",
-                    &self.parent.scope.root_resource_id,
-                    relative,
-                    &parent,
-                    reader,
-                    content.byte_len,
-                    digest,
-                    context,
-                    cancelled,
+                    &self.parent.path,
+                    RangeReadContext {
+                        deadline: metadata.deadline(),
+                        token_generation: self.auth.token_generation,
+                    },
                 )
-        }
-        .map_err(|_| BackendError::Unavailable)?;
+                .map_err(|_| BackendError::Unavailable)?;
+            self.check(backend)?;
+            if parent.path != self.parent.path
+                || parent.id != self.parent.remote.resource_id
+                || !parent.directory
+                || parent.encrypted
+                || !parent.writable
+                || !namespace::strong(&parent.etag)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            Some(parent)
+        };
+        // This first live send has a distinct, freshly checked transport
+        // condition. The original admission, intent and snapshot stay immutable.
+        let parent =
+            transport_parent
+                .as_ref()
+                .map(|parent| raiun_opencloud::RecoveryCreateParent {
+                    path: &parent.path,
+                    resource_id: &parent.id,
+                    etag: &parent.etag,
+                });
+        self.check(backend)?;
+        let proof = backend
+            .client
+            .fresh_create_blocking_reader_with_parent_accepted_cancellable_with_context(
+                &self.parent.scope.space_id,
+                "/",
+                &self.parent.scope.root_resource_id,
+                relative,
+                parent.as_ref(),
+                reader,
+                content.byte_len,
+                digest,
+                context,
+                cancelled,
+                Box::new(move || permit.accepted()),
+            )
+            .map_err(|_| BackendError::Unavailable)?;
         self.qualify_target(backend)?;
         let observed = proof.observed;
         if observed.entry.path != path
@@ -415,10 +492,41 @@ impl OpenCloudPlaceholderBackend {
         job: &crate::StreamedRecoveryJob,
         current: Current,
     ) -> Result<Admission, BackendError> {
+        self.admit_file_create_with_trace(components, root, auth, job, current, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn admit_file_create_traced(
+        self: &Arc<Self>,
+        components: &[&str],
+        root: crate::ConfiguredRootIdentity,
+        auth: CapturedAuthorization,
+        job: &crate::StreamedRecoveryJob,
+        current: Current,
+        trace: &PreparationTrace,
+    ) -> Result<Admission, BackendError> {
+        self.admit_file_create_with_trace(components, root, auth, job, current, Some(trace))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn admit_file_create_with_trace(
+        self: &Arc<Self>,
+        components: &[&str],
+        root: crate::ConfiguredRootIdentity,
+        auth: CapturedAuthorization,
+        job: &crate::StreamedRecoveryJob,
+        current: Current,
+        trace: Option<&PreparationTrace>,
+    ) -> Result<Admission, BackendError> {
+        preparation_stage(trace, PreparationStage::Job);
         job.check()?;
-        if !current(auth) || crate::personal_create_relative(components, "probe").is_none() {
+        preparation_stage(trace, PreparationStage::Current);
+        if !current(auth) {
             return Err(BackendError::Unavailable);
         }
+        preparation_stage(trace, PreparationStage::ParentRoute);
+        if crate::personal_create_relative(components, "probe").is_none() {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::Catalog);
         let catalog = self
             .identity_catalog
             .clone()
@@ -432,27 +540,40 @@ impl OpenCloudPlaceholderBackend {
             !owner(auth)
                 || original.upgrade().is_none_or(|b| {
                     b.revoked.load(Ordering::Acquire)
-                        || b.client.token_generation() != auth.token_generation
+                        || !b
+                            .client
+                            .provider_generation_is_current(auth.token_generation)
                 })
         }));
         // Bound this complete metadata phase while keeping the ORIGINAL job
         // deadline/epoch for admission/body. No backend lease escapes discovery.
         let metadata = job.cancellation().bounded_request();
+        preparation_stage(trace, PreparationStage::ParentRoute);
         let parent = {
             let _lease = self
                 .lease_gate
                 .read()
                 .map_err(|_| BackendError::Unavailable)?;
-            self.capture_namespace_parent_under_lease(components, root, auth, &metadata)?
+            match trace {
+                Some(trace) => self.capture_namespace_parent_under_lease_traced(
+                    components, root, auth, &metadata, trace,
+                ),
+                None => {
+                    self.capture_namespace_parent_under_lease(components, root, auth, &metadata)
+                }
+            }?
         };
         let prefix = if components.first().copied() == Some("Personal") {
             1
         } else {
             2
         };
-        if catalog_scope.local_root() != root
-            || parent.path != format!("/{}", components[prefix..].join("/"))
-        {
+        preparation_stage(trace, PreparationStage::Catalog);
+        if catalog_scope.local_root() != root {
+            return Err(BackendError::Unavailable);
+        }
+        preparation_stage(trace, PreparationStage::ParentRoute);
+        if parent.path != format!("/{}", components[prefix..].join("/")) {
             return Err(BackendError::Unavailable);
         }
         let result = Admission {
@@ -466,7 +587,7 @@ impl OpenCloudPlaceholderBackend {
             attempted: false,
             backend: Arc::downgrade(self),
         };
-        result.qualify_target(self)?;
+        result.qualify_target_with_trace(self, trace)?;
         Ok(result)
     }
 }

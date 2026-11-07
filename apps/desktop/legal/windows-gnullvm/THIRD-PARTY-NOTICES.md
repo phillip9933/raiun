@@ -112,6 +112,7 @@ The exact target lock hashes, declared license expressions, source references, r
 - `getrandom 0.3.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/getrandom-0.3.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/getrandom-0.3.4/LICENSE-MIT`
 - `getrandom 0.4.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/getrandom-0.4.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/getrandom-0.4.3/LICENSE-MIT`
 - `glob 0.3.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/glob-0.3.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/glob-0.3.4/LICENSE-MIT`
+- `h2 0.4.20` — MIT; `legal/windows-gnullvm/rust/h2-0.4.20/LICENSE`
 - `hashbrown 0.12.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/hashbrown-0.12.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hashbrown-0.12.3/LICENSE-MIT`
 - `hashbrown 0.14.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/hashbrown-0.14.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hashbrown-0.14.5/LICENSE-MIT`
 - `hashbrown 0.17.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/hashbrown-0.17.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hashbrown-0.17.1/LICENSE-MIT`
@@ -222,6 +223,8 @@ The exact target lock hashes, declared license expressions, source references, r
 - `reqwest 0.13.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/reqwest-0.13.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/reqwest-0.13.5/LICENSE-MIT`
 - `rfd 0.16.0` — MIT; `legal/windows-gnullvm/rust/rfd-0.16.0/LICENSE`
 - `ring 0.17.14` — Apache-2.0 AND ISC; `legal/windows-gnullvm/rust/ring-0.17.14/LICENSE`, `legal/windows-gnullvm/rust/ring-0.17.14/LICENSE-BoringSSL`, `legal/windows-gnullvm/rust/ring-0.17.14/LICENSE-other-bits`, `legal/windows-gnullvm/rust/ring-0.17.14/src/polyfill/once_cell/LICENSE-APACHE`, `legal/windows-gnullvm/rust/ring-0.17.14/src/polyfill/once_cell/LICENSE-MIT`, `legal/windows-gnullvm/rust/ring-0.17.14/third_party/fiat/LICENSE`
+- `rpassword 7.5.4` — Apache-2.0; `legal/windows-gnullvm/rust/rpassword-7.5.4/LICENSE-APACHE`
+- `rtoolbox 0.0.6` — Apache-2.0; `legal/windows-gnullvm/rust/rtoolbox-0.0.6/LICENSE-APACHE`
 - `rusqlite 0.32.1` — MIT; `legal/windows-gnullvm/rust/rusqlite-0.32.1/LICENSE`
 - `rustc-hash 2.1.3` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/rustc-hash-2.1.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rustc-hash-2.1.3/LICENSE-MIT`
 - `rustc_version 0.4.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/rustc_version-0.4.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rustc_version-0.4.1/LICENSE-MIT`
@@ -283,7 +286,7 @@ The exact target lock hashes, declared license expressions, source references, r
 - `tauri-plugin-dialog 2.7.3` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-dialog-2.7.3/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-dialog-2.7.3/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-dialog-2.7.3/LICENSE_MIT`
 - `tauri-plugin-fs 2.5.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-fs-2.5.2/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-fs-2.5.2/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-fs-2.5.2/LICENSE_MIT`
 - `tauri-plugin-opener 2.5.5` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-opener-2.5.5/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-opener-2.5.5/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-opener-2.5.5/LICENSE_MIT`
-- `tauri-plugin-single-instance 2.4.5` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE_MIT`
+- `tauri-plugin-single-instance 2.4.5` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE_MIT`, `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/RAIUN-VENDOR.md`
 - `tauri-plugin-updater 2.14.0` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-updater-2.14.0/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-updater-2.14.0/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-updater-2.14.0/LICENSE_MIT`
 - `tauri-runtime 2.12.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-runtime-2.12.2/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-runtime-2.12.2/LICENSE-MIT`
 - `tauri-runtime-wry 2.12.3` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-runtime-wry-2.12.3/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-runtime-wry-2.12.3/LICENSE-MIT`

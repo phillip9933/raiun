@@ -1,6 +1,10 @@
 //! Exact native directory admission and no-dehydration publication. Local
 //! components are hints until joined to current authenticated opaque routing.
 use super::*;
+use crate::creation_preparation::{
+    Failure, Stage as PreparationStage, Trace, wait_for_recovery_health,
+};
+use crate::fresh_create_target::{FreshCreateTargetKind, NativeCreateFacts};
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceIntent, NamespaceObjectKind,
     NamespaceOperation, NamespaceParent, StorageClassification,
@@ -8,6 +12,7 @@ use crate::namespace_intent::{
 use crate::namespace_reconcile::{
     DirectoryCompletionError, DirectoryCreateLocal, DirectoryCreateReadback,
 };
+use crate::native::native_fresh_create_inspection::FreshNativeInspection;
 use crate::{DirectoryCreateSession, VerifiedDirectoryPublication};
 use raiun_core::backend::{CloudError, ErrorKind};
 
@@ -637,12 +642,14 @@ struct DirectoryAttempt {
     lease: Option<DirectoryIntentLease>,
     submitted: bool,
     verified: bool,
+    trace: Arc<Trace>,
 }
 /// Move-only SDK task; no native handle, owner ticket or record lease.
 pub struct DirectoryCreateTask {
     key: Arc<ReplyKey>,
     kind: Option<Box<DirectoryTaskKind>>,
     _flight: TaskFlight,
+    trace: Arc<Trace>,
 }
 /// Original invocation reply. No public constructor or serializable proof.
 pub struct DirectoryCreateReply {
@@ -650,14 +657,38 @@ pub struct DirectoryCreateReply {
     phase: Phase,
     kind: DirectoryReplyKind,
 }
+impl DirectoryCreateReply {
+    /// A fixed diagnostic boundary, not authorization to retry a retained intent.
+    pub fn failure_context(&self) -> &'static str {
+        match &self.kind {
+            DirectoryReplyKind::Prepared(Err(failure)) => failure.message("Folder"),
+            DirectoryReplyKind::Prepared(Ok(_)) => {
+                "Folder creation paused: native directory admission or protected intent publication failed. Recovery files have been kept."
+            }
+            DirectoryReplyKind::Preflight(_, _) => {
+                "Folder creation paused: conditional cloud preflight or dispatch admission failed. Recovery files have been kept."
+            }
+            DirectoryReplyKind::Sent(_, _) => {
+                "Folder creation paused: cloud result verification or protected result persistence failed. Recovery files have been kept."
+            }
+            DirectoryReplyKind::Refreshed(_, _) => {
+                "Folder creation paused: verified directory publication or native completion failed. Recovery files have been kept."
+            }
+        }
+    }
+}
 pub enum DirectoryCreateStep {
     Task(DirectoryCreateTask),
+    /// No new ticket, native capture or durable intent was created.
+    BusyBeforeCapture,
     Finished(DirectoryCreateOutcome),
 }
 enum DirectoryTaskKind {
     Prepare {
         backend: Arc<crate::OpenCloudPlaceholderBackend>,
+        root_path: PathBuf,
         components: Vec<String>,
+        name: String,
         job: crate::StreamedRecoveryJob,
         current: DirectoryCurrent,
         recovery: Arc<dyn crate::PreparedEditRecovery>,
@@ -677,7 +708,16 @@ enum DirectoryTaskKind {
     ),
 }
 enum DirectoryReplyKind {
-    Prepared(Result<(OwnedDirectorySession, Arc<DirectoryIntentStore>), BackendError>),
+    Prepared(
+        Result<
+            (
+                OwnedDirectorySession,
+                Arc<DirectoryIntentStore>,
+                NativeCreateFacts,
+            ),
+            Failure,
+        >,
+    ),
     Preflight(
         OwnedDirectorySession,
         Result<(), raiun_core::backend::CloudError>,
@@ -689,8 +729,25 @@ enum DirectoryReplyKind {
     ),
 }
 impl DirectoryCreateTask {
+    /// Fixed diagnostic classification only; no phase advancement or authority.
+    pub fn activity_phase(&self) -> &'static str {
+        match self.kind.as_deref() {
+            Some(DirectoryTaskKind::Prepare { .. }) => "prepare",
+            Some(DirectoryTaskKind::Send(..)) => "send",
+            Some(DirectoryTaskKind::Refresh(_)) => "refresh",
+            Some(DirectoryTaskKind::Preflight(..)) | None => "unknown",
+        }
+    }
+
+    /// Fixed progress observation only. The caller must independently observe
+    /// its ORIGINAL job expiry; this grants no dispatch or completion authority.
+    pub fn deadline_context(&self) -> Arc<dyn Fn() -> &'static str + Send + Sync> {
+        let trace = Arc::clone(&self.trace);
+        Arc::new(move || trace.deadline_message("Folder"))
+    }
     /// Run on a joined SDK worker. The original deadline/epoch is never renewed.
     pub fn execute(mut self) -> DirectoryCreateReply {
+        let trace = Arc::clone(&self.trace);
         let (phase, kind) = match *self
             .kind
             .take()
@@ -698,41 +755,110 @@ impl DirectoryCreateTask {
         {
             DirectoryTaskKind::Prepare {
                 backend,
+                root_path,
                 components,
+                name,
                 job,
                 current,
                 recovery,
             } => {
                 let result = (|| {
+                    let mut health_wait = None;
+                    trace.enter(PreparationStage::Job);
                     job.check()?;
-                    if recovery.has_unresolved()?
-                        || recovery.has_unresolved_content_authenticated_legacy()?
-                    {
-                        return Err(BackendError::Unavailable);
-                    }
                     let refs: Vec<_> = components.iter().map(String::as_str).collect();
-                    let session = OwnedDirectorySession::prepare(
+                    let session = OwnedDirectorySession::prepare_traced(
                         backend,
                         &refs,
                         self.key.root,
                         self.key.authorization,
-                        job,
-                        current,
+                        job.clone(),
+                        current.clone(),
+                        &trace,
                     )?;
-                    let store = recovery
-                        .directory_intent_store(&session.captured.scope, self.key.authorization)?
-                        .ok_or(BackendError::Unavailable)?;
+                    trace.enter(PreparationStage::Current);
                     session.check()?;
-                    if recovery.has_unresolved()?
-                        || recovery.has_unresolved_content_authenticated_legacy()?
-                    {
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    let inspection = FreshNativeInspection::inspect(
+                        &root_path,
+                        self.key.root,
+                        &session.captured,
+                        &components,
+                        &name,
+                        FreshCreateTargetKind::Directory,
+                    )
+                    .map_err(|_| BackendError::Unavailable)?;
+                    let mut space = session
+                        .fresh_create_space_for_child(&components, &name)?
+                        .with_preparation_trace(Arc::clone(&trace));
+                    inspection
+                        .bind_space(&mut space)
+                        .map_err(|_| BackendError::Unavailable)?;
+                    trace.enter(PreparationStage::RecoveryStore);
+                    let existing = recovery.existing_directory_intent_store(
+                        &session.captured.scope,
+                        self.key.authorization,
+                    )?;
+                    let store = if let Some(store) = existing {
+                        // Read-only binding creates no recovery evidence and
+                        // grants no health or dispatch authority. The complete
+                        // joint query below still admits this exact candidate.
+                        store
+                    } else {
+                        // Unsupported stores and verified absence retain the
+                        // original health/create/recheck initialization path.
+                        if wait_for_recovery_health(&job, &trace, &mut health_wait, || {
+                            trace.enter(PreparationStage::Job);
+                            job.check()?;
+                            trace.enter(PreparationStage::Current);
+                            if !current(self.key.authorization) {
+                                return Err(BackendError::Unavailable);
+                            }
+                            session.check()?;
+                            trace.enter(PreparationStage::RecoveryBefore);
+                            recovery.has_unresolved_for_fresh_create_in_space(&space)
+                        })? {
+                            return Err(BackendError::Unavailable);
+                        }
+                        trace.enter(PreparationStage::Current);
+                        session.check()?;
+                        trace.enter(PreparationStage::RecoveryStore);
+                        recovery
+                            .directory_intent_store(
+                                &session.captured.scope,
+                                self.key.authorization,
+                            )?
+                            .ok_or(BackendError::Unavailable)?
+                    };
+                    trace.enter(PreparationStage::Current);
+                    session.check()?;
+                    if wait_for_recovery_health(&job, &trace, &mut health_wait, || {
+                        trace.enter(PreparationStage::Job);
+                        job.check()?;
+                        trace.enter(PreparationStage::Current);
+                        if !current(self.key.authorization) {
+                            return Err(BackendError::Unavailable);
+                        }
+                        session.check()?;
+                        trace.enter(PreparationStage::RecoveryAfter);
+                        recovery.has_unresolved_for_fresh_create_in_space(&space)
+                    })? {
                         return Err(BackendError::Unavailable);
                     }
-                    Ok((session, store))
-                })();
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    inspection.verify().map_err(|_| BackendError::Unavailable)?;
+                    trace.enter(PreparationStage::Current);
+                    session.check()?;
+                    Ok((session, store, inspection.facts().clone()))
+                })()
+                .map_err(|error| {
+                    trace.backend(error);
+                    trace.failure()
+                });
                 (Phase::Prepare, DirectoryReplyKind::Prepared(result))
             }
             DirectoryTaskKind::Preflight(session, intent) => {
+                trace.enter(PreparationStage::DirectoryPreflight);
                 let result = session.preflight(&intent);
                 (
                     Phase::Preflight,
@@ -740,17 +866,42 @@ impl DirectoryCreateTask {
                 )
             }
             DirectoryTaskKind::Send(session, intent, progress) => {
+                trace.enter(match session.original_budget_remaining() {
+                    Some(remaining) if remaining >= std::time::Duration::from_secs(15) => {
+                        PreparationStage::DirectorySend
+                    }
+                    Some(remaining) if remaining >= std::time::Duration::from_secs(5) => {
+                        PreparationStage::DirectorySendUnderFifteenSeconds
+                    }
+                    _ => PreparationStage::DirectorySendUnderFiveSeconds,
+                });
                 let result = match crate::namespace_reconcile::submitted_directory_dispatch(
                     &intent, progress,
                 ) {
                     Ok(dispatch) => session.send(&dispatch),
                     Err(_) => OwnedDirectorySend::Uncertain,
                 };
+                // This marks a returned worker result, not remote success.
+                // Rejected and uncertain outcomes retain their original rules.
+                trace.enter(PreparationStage::DirectorySendReplyReady);
                 (Phase::Send, DirectoryReplyKind::Sent(session, result))
             }
             DirectoryTaskKind::Refresh(pair) => {
                 let (session, intent, report) = *pair;
+                let remaining = session.original_budget_remaining();
+                trace.enter(match remaining {
+                    Some(remaining) if remaining >= std::time::Duration::from_secs(15) => {
+                        PreparationStage::DirectoryRefresh
+                    }
+                    Some(remaining) if remaining >= std::time::Duration::from_secs(5) => {
+                        PreparationStage::DirectoryRefreshUnderFifteenSeconds
+                    }
+                    _ => PreparationStage::DirectoryRefreshUnderFiveSeconds,
+                });
                 let result = session.refresh(&intent, &report);
+                if result.is_ok() {
+                    trace.enter(PreparationStage::DirectoryRefreshReplyReady);
+                }
                 (
                     Phase::Refresh,
                     DirectoryReplyKind::Refreshed(session, result),
@@ -769,10 +920,17 @@ impl DirectoryAttempt {
         let (done, flight) = TaskFlight::new();
         self.done = done;
         self.phase = phase;
+        self.trace.enter(match phase {
+            Phase::Prepare => PreparationStage::QueuedPrepare,
+            Phase::Preflight => PreparationStage::QueuedPreflight,
+            Phase::Send => PreparationStage::QueuedSend,
+            Phase::Refresh => PreparationStage::QueuedRefresh,
+        });
         DirectoryCreateStep::Task(DirectoryCreateTask {
             key: self.key.clone(),
             kind: Some(Box::new(kind)),
             _flight: flight,
+            trace: Arc::clone(&self.trace),
         })
     }
     fn incomplete(&self) -> DirectoryCreateOutcome {
@@ -816,12 +974,13 @@ impl ConfiguredRootConnection {
             return Err(Error::ProviderUnavailable);
         }
         if slot.attempt.is_some() {
-            return Ok(DirectoryCreateStep::Finished(
-                DirectoryCreateOutcome::Deferred,
-            ));
+            return Ok(DirectoryCreateStep::BusyBeforeCapture);
         }
-        let (tracker, recovery) = self.file_rename_guard_context(backend)?;
+        let (tracker, recovery) = self.file_create_guard_context(backend)?;
         let Some(admission) = tracker.try_begin_directory() else {
+            if tracker.known_busy_for_create() {
+                return Ok(DirectoryCreateStep::BusyBeforeCapture);
+            }
             return Ok(DirectoryCreateStep::Finished(
                 DirectoryCreateOutcome::Deferred,
             ));
@@ -875,13 +1034,16 @@ impl ConfiguredRootConnection {
             lease: None,
             submitted: false,
             verified: false,
+            trace: Arc::new(Trace::new()),
         };
         self.check_directory_attempt(&attempt)?;
         // Store the dispatch-ready bit only in owner/SDK currentness; the ticket
         // probe is armed by the actual successful one-use owner claim.
         let kind = DirectoryTaskKind::Prepare {
             backend: backend.clone(),
+            root_path: root.path.clone(),
             components: attempt.components.clone(),
+            name: attempt.name.clone(),
             job,
             current,
             recovery,
@@ -909,7 +1071,7 @@ impl ConfiguredRootConnection {
         }
         root.verify_identity(true)?;
         root.verify_registered()?;
-        let (tracker, recovery) = self.file_rename_guard_context(&attempt.backend)?;
+        let (tracker, recovery) = self.file_create_guard_context(&attempt.backend)?;
         if !Arc::ptr_eq(&tracker, &attempt.tracker) || !Arc::ptr_eq(&recovery, &attempt.recovery) {
             return Err(Error::ProviderUnavailable);
         }
@@ -953,6 +1115,7 @@ impl ConfiguredRootConnection {
             return Err(Error::ConnectionStateInvalid);
         }
         let mut attempt = slot.attempt.take().ok_or(Error::ConnectionStateInvalid)?;
+        attempt.trace.enter(PreparationStage::NativeContext);
         if disposition == ReplyDisposition::Retire
             || self.check_directory_attempt(&attempt).is_err()
         {
@@ -960,11 +1123,13 @@ impl ConfiguredRootConnection {
         }
         let step = match reply.kind {
             DirectoryReplyKind::Prepared(result) => {
-                let (session, store) = result.map_err(|_| Error::EditRecoveryUnavailable)?;
+                let (session, store, native_facts) =
+                    result.map_err(|_| Error::EditRecoveryUnavailable)?;
                 if !session.original_backend(&attempt.backend) {
                     return Err(Error::ProviderUnavailable);
                 }
                 let refs: Vec<_> = attempt.components.iter().map(String::as_str).collect();
+                attempt.trace.enter(PreparationStage::NativeParentPin);
                 let prepared = self.pin_admitted_directory(
                     &attempt.backend,
                     &refs,
@@ -975,8 +1140,40 @@ impl ConfiguredRootConnection {
                 )?;
                 let pins = prepared.pins;
                 self.check_directory_attempt(&attempt)?;
-                let published = store
-                    .publish_intent(NamespaceIntent {
+                let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+                let mut parents = Vec::with_capacity(pins.ancestors.len() + 2);
+                parents.push(LocalFileIdentity {
+                    volume_serial: root.identity.volume_serial,
+                    file_index: root.identity.file_index,
+                });
+                parents.extend(
+                    pins.ancestors
+                        .iter()
+                        .map(|(_, snapshot)| LocalFileIdentity {
+                            volume_serial: snapshot.identity.volume_serial,
+                            file_index: snapshot.identity.file_index,
+                        }),
+                );
+                parents.push(LocalFileIdentity {
+                    volume_serial: pins.parent_snapshot.identity.volume_serial,
+                    file_index: pins.parent_snapshot.identity.file_index,
+                });
+                let mut original_components = attempt.components.clone();
+                original_components.push(attempt.name.clone());
+                if !native_facts.matches(
+                    attempt.key.root,
+                    &original_components,
+                    FreshCreateTargetKind::Directory,
+                    pins.entry.local_file,
+                    &parents,
+                ) {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                attempt
+                    .trace
+                    .enter(PreparationStage::DirectoryIntentAdmission);
+                let (published, lease) = store
+                    .publish_intent_for_dispatch(NamespaceIntent {
                         schema_version: 1,
                         record_id: "0".repeat(32),
                         record_generation: attempt.key.generation,
@@ -990,9 +1187,8 @@ impl ConfiguredRootConnection {
                         DirectoryCreateOutcome::Retained,
                     ));
                 }
-                let lease = store
-                    .acquire_dispatch(&published.record.key)
-                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                let lease = lease.ok_or(Error::EditRecoveryUnavailable)?;
+                self.check_directory_attempt(&attempt)?;
                 let intent = lease.intent().clone();
                 attempt.pins = Some(pins);
                 attempt.lease = Some(lease);
@@ -1002,6 +1198,9 @@ impl ConfiguredRootConnection {
                 )
             }
             DirectoryReplyKind::Preflight(session, result) => {
+                attempt
+                    .trace
+                    .enter(PreparationStage::DirectoryResultPersistence);
                 if !session.original_backend(&attempt.backend) {
                     return Err(Error::ProviderUnavailable);
                 }
@@ -1050,6 +1249,9 @@ impl ConfiguredRootConnection {
                 )
             }
             DirectoryReplyKind::Sent(session, result) => {
+                attempt
+                    .trace
+                    .enter(PreparationStage::DirectoryResultPersistence);
                 if !session.original_backend(&attempt.backend) {
                     return Err(Error::ProviderUnavailable);
                 }
@@ -1098,6 +1300,9 @@ impl ConfiguredRootConnection {
                 }
             }
             DirectoryReplyKind::Refreshed(session, result) => {
+                attempt
+                    .trace
+                    .enter(PreparationStage::NativeDirectoryPublication);
                 if !session.original_backend(&attempt.backend) {
                     return Err(Error::ProviderUnavailable);
                 }
@@ -1144,6 +1349,9 @@ impl ConfiguredRootConnection {
                     return Err(Error::EditRecoveryUnavailable);
                 }
                 attempt
+                    .trace
+                    .enter(PreparationStage::LocalCompletionPersistence);
+                attempt
                     .lease
                     .as_mut()
                     .ok_or(Error::EditRecoveryUnavailable)?
@@ -1186,6 +1394,9 @@ impl ConfiguredRootConnection {
         )?;
         loop {
             step = match step {
+                DirectoryCreateStep::BusyBeforeCapture => {
+                    return Ok(DirectoryCreateOutcome::Deferred);
+                }
                 DirectoryCreateStep::Finished(outcome) => return Ok(outcome),
                 DirectoryCreateStep::Task(task) => {
                     self.advance_fresh_personal_directory_create(task.execute())?

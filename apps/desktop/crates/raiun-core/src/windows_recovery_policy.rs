@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 const GIB: u64 = 1024 * 1024 * 1024;
 const TIB: u64 = 1024 * GIB;
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WindowsRecoveryPolicy {
     pub max_file_bytes: u64,
     pub max_state_bytes: u64,
@@ -18,12 +17,59 @@ pub struct WindowsRecoveryPolicy {
 impl Default for WindowsRecoveryPolicy {
     fn default() -> Self {
         Self {
-            max_file_bytes: GIB,
+            // The aggregate protected-storage allowance is the default bound;
+            // do not impose an additional smaller per-file product limit.
+            max_file_bytes: 8 * GIB,
             max_state_bytes: 8 * GIB,
             max_state_entries: 20_000,
             max_scan_metadata_bytes: 64 * 1024 * 1024,
             total_timeout_seconds: 6 * 60 * 60,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for WindowsRecoveryPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Fields {
+            #[serde(deserialize_with = "present")]
+            max_file_bytes: Option<u64>,
+            #[serde(deserialize_with = "present")]
+            max_state_bytes: Option<u64>,
+            #[serde(deserialize_with = "present")]
+            max_state_entries: Option<usize>,
+            #[serde(deserialize_with = "present")]
+            max_scan_metadata_bytes: Option<u64>,
+            #[serde(deserialize_with = "present")]
+            total_timeout_seconds: Option<u64>,
+        }
+        fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+            T: Deserialize<'de>,
+        {
+            T::deserialize(deserializer).map(Some)
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        let defaults = Self::default();
+        let max_state_bytes = fields.max_state_bytes.unwrap_or(defaults.max_state_bytes);
+        Ok(Self {
+            // Explicit owner limits survive unchanged. An omitted file limit
+            // follows even an older, smaller configured quota rather than
+            // invalidating that configuration when defaults change.
+            max_file_bytes: fields.max_file_bytes.unwrap_or(max_state_bytes.min(TIB)),
+            max_state_bytes,
+            max_state_entries: fields
+                .max_state_entries
+                .unwrap_or(defaults.max_state_entries),
+            max_scan_metadata_bytes: fields
+                .max_scan_metadata_bytes
+                .unwrap_or(defaults.max_scan_metadata_bytes),
+            total_timeout_seconds: fields
+                .total_timeout_seconds
+                .unwrap_or(defaults.total_timeout_seconds),
+        })
     }
 }
 

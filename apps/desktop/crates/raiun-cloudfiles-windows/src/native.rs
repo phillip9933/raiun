@@ -66,6 +66,8 @@ pub(crate) use native_file_create::NativeFileCreateCompletion;
 pub(crate) use native_file_create::NativeFileCreateContinuation;
 #[path = "native_file_rename.rs"]
 pub(super) mod native_file_rename;
+#[path = "native_fresh_create_inspection.rs"]
+pub(super) mod native_fresh_create_inspection;
 #[path = "native_namespace_directory.rs"]
 pub(super) mod native_namespace_directory;
 #[path = "native_namespace_observer.rs"]
@@ -1878,6 +1880,45 @@ impl ConfiguredRootConnection {
                 .is_ok_and(|inventory| inventory.is_complete())
     }
 
+    /// Read only the original connection-bound provider's existing metadata.
+    /// Missing or uncertain providers remain unavailable; never set storage up.
+    pub(super) fn namespace_recovery_summary(
+        &self,
+    ) -> Result<crate::NamespaceRecoverySummary, BackendError> {
+        if !self.connected {
+            return Err(BackendError::Unavailable);
+        }
+        let root = self.root.as_ref().ok_or(BackendError::Unavailable)?;
+        root.verify_identity(true)
+            .map_err(|_| BackendError::Unavailable)?;
+        root.verify_registered()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.state
+            .recovery
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .namespace_recovery_summary()
+    }
+
+    pub(super) fn namespace_recovery_diagnostics(
+        &self,
+    ) -> Result<crate::NamespaceRecoverySummary, crate::NamespaceRecoveryDiagnosticError> {
+        use crate::NamespaceRecoveryDiagnosticError as DiagnosticError;
+        if !self.connected {
+            return Err(DiagnosticError::Connection);
+        }
+        let root = self.root.as_ref().ok_or(DiagnosticError::RootIdentity)?;
+        root.verify_identity(true)
+            .map_err(|_| DiagnosticError::RootIdentity)?;
+        root.verify_registered()
+            .map_err(|_| DiagnosticError::RootRegistration)?;
+        self.state
+            .recovery
+            .as_ref()
+            .ok_or(DiagnosticError::MissingProvider)?
+            .namespace_recovery_diagnostics()
+    }
+
     pub(super) fn vault_cleanup_diagnostics(&self) -> crate::VaultCleanupDiagnostics {
         crate::VaultCleanupDiagnostics {
             modified_closes: self
@@ -1887,6 +1928,10 @@ impl ConfiguredRootConnection {
             unverifiable_closes: self
                 .state
                 .unverifiable_placeholder_closes
+                .load(Ordering::Acquire),
+            observed_unverifiable_closes: self
+                .state
+                .observed_unverifiable_closes
                 .load(Ordering::Acquire),
             journaled_closes: self
                 .state
@@ -3372,6 +3417,18 @@ impl ConfiguredRootConnection {
             check_job()
         })
     }
+    pub(super) fn has_pending_initial_edit(&self) -> Result<bool, Error> {
+        if !self.connected {
+            return Err(Error::ConnectionStateInvalid);
+        }
+        // Advisory empty-queue scheduling only; every actual take retains its
+        // original root/path/registration checks before removing a receipt.
+        self.state
+            .initial_edits
+            .has_pending()
+            .map_err(|_| Error::EditRecoveryUnavailable)
+    }
+
     pub(super) fn take_initial_edit(&self) -> Result<Option<crate::PendingInitialEdit>, Error> {
         if !self.connected {
             return Err(Error::ConnectionStateInvalid);
@@ -4074,10 +4131,7 @@ unsafe extern "system" fn notify_file_close_completion_callback(
     let close_admission = Arc::clone(&guard.0.close_capture_admission);
     let mut close_permit = close_admission.begin_close();
     if info.is_null() || parameters.is_null() {
-        guard
-            .0
-            .unverifiable_placeholder_closes
-            .fetch_add(1, Ordering::AcqRel);
+        guard.0.record_unverifiable_close();
         return;
     }
     // SAFETY: Cloud Files owns both structures throughout this notification;
@@ -4085,10 +4139,7 @@ unsafe extern "system" fn notify_file_close_completion_callback(
     let info = unsafe { &*info };
     let parameters = unsafe { &*parameters };
     if !valid_close_completion_param_size(parameters.param_size as usize) {
-        guard
-            .0
-            .unverifiable_placeholder_closes
-            .fetch_add(1, Ordering::AcqRel);
+        guard.0.record_unverifiable_close();
         return;
     }
     guard
@@ -4103,10 +4154,7 @@ unsafe extern "system" fn notify_file_close_completion_callback(
     // covered by the validated documented or aligned ParamSize.
     let flags = unsafe { parameters.data.close_completion.flags };
     if flags & !CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED != 0 {
-        guard
-            .0
-            .unverifiable_placeholder_closes
-            .fetch_add(1, Ordering::AcqRel);
+        guard.0.record_unverifiable_close();
         return;
     }
     if flags == CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED
@@ -6025,6 +6073,9 @@ struct CallbackState {
     known_cached_pending: Mutex<std::collections::BTreeMap<[u8; 16], (String, u64, u64)>>,
     journaled_placeholder_closes: AtomicUsize,
     unverifiable_placeholder_closes: AtomicUsize,
+    // Actual close failures only. Reconnect inventory uncertainty remains in
+    // the aggregate above and must still fence cleanup/unregister/eviction.
+    observed_unverifiable_closes: AtomicUsize,
     close_completion_callbacks: AtomicUsize,
     last_close_param_size: AtomicUsize,
     last_close_file_id: AtomicU64,
@@ -6145,6 +6196,7 @@ impl CallbackState {
             known_cached_pending: Mutex::new(std::collections::BTreeMap::new()),
             journaled_placeholder_closes: AtomicUsize::new(0),
             unverifiable_placeholder_closes: AtomicUsize::new(0),
+            observed_unverifiable_closes: AtomicUsize::new(0),
             close_completion_callbacks: AtomicUsize::new(0),
             last_close_param_size: AtomicUsize::new(0),
             last_close_file_id: AtomicU64::new(0),
@@ -6216,6 +6268,20 @@ impl CallbackState {
                 .is_some_and(|recovery| recovery.has_unresolved().unwrap_or(true))
     }
 
+    fn add_unverifiable_count(counter: &AtomicUsize, count: usize) {
+        // Sticky refusal must never wrap back to zero and restore authority.
+        let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(current.saturating_add(count))
+        });
+    }
+
+    fn record_unverifiable_close(&self) {
+        // Publish the active-create refusal first. The legacy aggregate also
+        // retains every actual close failure for all existing safety guards.
+        Self::add_unverifiable_count(&self.observed_unverifiable_closes, 1);
+        Self::add_unverifiable_count(&self.unverifiable_placeholder_closes, 1);
+    }
+
     fn record_reconnect_scan(&self, scan: ReconnectScan) {
         if scan.modified_files != 0 {
             self.non_vault_modified_closes
@@ -6224,8 +6290,11 @@ impl CallbackState {
                 .fetch_add(scan.modified_files, Ordering::AcqRel);
         }
         if scan.unresolved_objects != 0 {
-            self.unverifiable_placeholder_closes
-                .fetch_add(scan.unresolved_objects, Ordering::AcqRel);
+            // Historical scan uncertainty is not an observed close failure.
+            Self::add_unverifiable_count(
+                &self.unverifiable_placeholder_closes,
+                scan.unresolved_objects,
+            );
         }
     }
 
@@ -6362,16 +6431,14 @@ impl CallbackState {
         let Some(_permit) = self.close_check_pool.try_acquire() else {
             self.invalidate_writable_cleanup();
             self.close_pool_refusals.fetch_add(1, Ordering::Relaxed);
-            self.unverifiable_placeholder_closes
-                .fetch_add(1, Ordering::AcqRel);
+            self.record_unverifiable_close();
             return None;
         };
         if flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED != 0 {
             self.invalidate_writable_cleanup();
             self.deleted_placeholder_closes
                 .fetch_add(1, Ordering::Relaxed);
-            self.unverifiable_placeholder_closes
-                .fetch_add(1, Ordering::AcqRel);
+            self.record_unverifiable_close();
             return None;
         }
         let result = self.capture_and_journal_modified_file(info, close_permit);
@@ -6420,8 +6487,7 @@ impl CallbackState {
                 // A close we cannot verify must block destructive unregister
                 // just like known modified content. This is intentionally
                 // conservative; disconnect preserves the root for recovery.
-                self.unverifiable_placeholder_closes
-                    .fetch_add(1, Ordering::AcqRel);
+                self.record_unverifiable_close();
                 None
             }
         }

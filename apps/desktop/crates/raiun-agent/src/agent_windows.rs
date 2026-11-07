@@ -81,6 +81,8 @@ mod windows_vault_requests;
 mod windows_headless;
 #[path = "windows_headless_edits.rs"]
 mod windows_headless_edits;
+#[path = "windows_native_activity.rs"]
+mod windows_native_activity;
 
 #[cfg(all(test, windows, debug_assertions))]
 #[path = "windows_file_rename_caller_native_test.rs"]
@@ -102,6 +104,8 @@ mod windows_profile_registry;
 mod windows_profiles;
 #[path = "windows_recovery_policy.rs"]
 mod windows_recovery_policy;
+include!("windows_saved_cloud_check.rs");
+include!("windows_session_renewal.rs");
 use windows_headless::{PreparedWindowsAuth, mount_only, runtime_mode};
 
 type ProtectedCapturePage = (
@@ -390,6 +394,9 @@ fn budget_client(
     generation: u64,
     provider: &ProviderManager,
     store: &dyn SessionStore,
+    account_state: &Mutex<AccountState>,
+    personal_space_id: &str,
+    personal_root_id: &str,
 ) -> Result<(Arc<OpenCloudClient>, windows_bandwidth::Scope), String> {
     if generation == 0 || provider.authorized_generation.load(Ordering::Acquire) != generation {
         return Err("The account changed before bandwidth admission".into());
@@ -421,7 +428,27 @@ fn budget_client(
     let client = Arc::try_unwrap(client)
         .map_err(|_| "The account client was already published")?
         .with_transfer_budget(budget);
-    Ok((Arc::new(client), scope))
+    let state = account_state
+        .lock()
+        .map_err(|_| "Account state is unavailable")?;
+    if state.active_generation != generation
+        || !state.online_authenticated
+        || state.logout_pending
+        || state.retiring
+        || state.offline_cached
+        || !WindowsAgent::same_session(state.session.as_ref(), Some(session))
+    {
+        return Err("The account changed before client publication".into());
+    }
+    let client = provider.share_account_client(
+        Arc::new(client),
+        session,
+        generation,
+        &scope,
+        personal_space_id,
+        personal_root_id,
+    )?;
+    Ok((client, scope))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -460,6 +487,10 @@ struct AccountState {
     logout_pending: bool,
     needs_refresh: bool,
     refreshing: bool,
+    // Routine same-account renewal does not revoke the native owner or block
+    // its admitted work. Security replacement keeps using `refreshing`.
+    routine_refresh_generation: Option<u64>,
+    pending_renewal: Option<PendingSessionRenewal>,
     refresh_retry_at: u64,
     authenticating: bool,
     headless_mount_retry_at: u64,
@@ -541,11 +572,13 @@ struct ProviderManager {
     // Serializes explicit mount preference with every automatic reconnect.
     mount_preference: Mutex<bool>,
     ordinary_edits: Arc<Mutex<Option<windows_headless_edits::CachedStatus>>>,
+    native_activity: Arc<windows_native_activity::Cache>,
     proxy: windows_proxy::Service,
     bandwidth: windows_bandwidth::Service,
     commands: std::sync::mpsc::SyncSender<ProviderCommand>,
     connected: Arc<AtomicBool>,
     authorized_generation: Arc<AtomicU64>,
+    account_client: Arc<Mutex<Option<RenewableAccountClient>>>,
     recovery_cursor_nonce: Option<[u8; 32]>,
     offline_jobs: Arc<windows_offline_jobs::OfflineJobs>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -812,7 +845,7 @@ enum ProviderCommand {
     },
     VaultCleanupDiagnostics {
         binding: ActiveProviderBinding,
-        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+        response: std::sync::mpsc::SyncSender<Result<Value, &'static str>>,
     },
     VaultLockCleanupStatus {
         binding: ActiveProviderBinding,
@@ -961,10 +994,14 @@ impl ProviderManager {
         let headless = mount_only();
         let ordinary_edits = Arc::new(Mutex::new(None));
         let worker_ordinary_edits = Arc::clone(&ordinary_edits);
+        let native_activity = Arc::new(windows_native_activity::Cache::default());
+        let worker_native_activity = Arc::clone(&native_activity);
         let (commands, receiver) = std::sync::mpsc::sync_channel(4);
         let connected = Arc::new(AtomicBool::new(false));
         let worker_connected = Arc::clone(&connected);
         let authorized_generation = Arc::new(AtomicU64::new(1));
+        let account_client = Arc::new(Mutex::new(None::<RenewableAccountClient>));
+        let worker_account_client = Arc::clone(&account_client);
         let worker_generation = Arc::clone(&authorized_generation);
         let initial_save_activation =
             Arc::new(AtomicBool::new(WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED));
@@ -1001,6 +1038,7 @@ impl ProviderManager {
                 let mut vault_custody: Option<Arc<windows_vault_custody::WindowsVaultCustody>> = None;
                 let mut retired_vaults: Vec<Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>> = Vec::new();
                 let mut active_binding: Option<ActiveProviderBinding> = None;
+                let mut native_activity_owner: Option<windows_native_activity::Owner> = None;
                 let mut last_vault_cleanup_error: Option<raiun_cloudfiles_windows::Error> = None;
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
                 let mut cleanup_holds = windows_vault_cleanup_holds::PendingCleanupHolds::<PendingNativeVaultCleanup>::new();
@@ -1020,6 +1058,13 @@ impl ProviderManager {
                     };
                     // Sweep on every command and the existing bounded idle tick.
                     cleanup_holds.sweep(Instant::now());
+                    if native_activity_owner.is_some()
+                        && (active_binding.as_ref().is_none_or(|binding| binding.generation != worker_generation.load(Ordering::Acquire))
+                            || connection.is_none() || namespace_dispatcher.is_none() || create_workers.is_none())
+                    {
+                        worker_native_activity.retire();
+                        native_activity_owner = None;
+                    }
                     if active_binding.as_ref().is_some_and(|binding| worker_generation.load(Ordering::Acquire) != binding.generation) {
                         cleanup_holds.clear();
                     }
@@ -1031,6 +1076,7 @@ impl ProviderManager {
                             let result = (|| {
                                 if headless { return Err("Folder sync is unavailable in mount-only mode".into()); }
                                 if worker_generation.load(Ordering::Acquire) != generation { return Err("The account changed before folder setup".into()); }
+                                if !registered_account_client(&worker_account_client, generation, &setup.client) { return Err("Folder credentials changed before publication".into()); }
                                 if folders.as_ref().is_some_and(|runtime| runtime.generation == generation) { return Ok(()); }
                                 let runtime = windows_folder_sync::Runtime::open(*setup, &worker_generation)?;
                                 let (paused, paused_space_ids) = runtime.pause_snapshot()?;
@@ -1490,12 +1536,53 @@ impl ProviderManager {
                         }
                         ProviderCommand::VaultCleanupDiagnostics { binding, response } => {
                             let result = if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
-                                Err("The Windows drive changed before support inspection".to_owned())
+                                Err("context_changed")
                             } else if let Some(active) = connection.as_ref() {
+                                let windows_drive_activity = worker_native_activity.snapshot(&binding, &worker_generation, &worker_connected);
                                 let observation = active.vault_cleanup_diagnostics();
+                                let history_started = Instant::now();
+                                let history_result = active.namespace_recovery_diagnostics();
+                                let namespace_history_query_elapsed_ms = u64::try_from(history_started.elapsed().as_millis()).ok();
+                                let (namespace_history, namespace_history_error) = match history_result {
+                                    Ok(summary) => (Some(summary), None),
+                                    Err(error) => (None, Some(json!({
+                                        "boundary": error.boundary(),
+                                        "class": error.class(),
+                                        "reason": error.reason(),
+                                    }))),
+                                };
+                                let namespace_history = namespace_history.map(|summary| {
+                                    let classifications: Vec<_> = summary.file_pending_classifications.iter().map(|row| {
+                                        let mut value = json!(row);
+                                        value["personal_space_relation"] = json!(row.relation_to_verified_space(
+                                            &binding.personal_space_id,
+                                            &binding.personal_root_resource_id,
+                                        ));
+                                        value
+                                    }).collect();
+                                    json!({
+                                    "rename_records": summary.rename_records,
+                                    "rename_unresolved": summary.rename_unresolved,
+                                    "directory_records": summary.directory_records,
+                                    "directory_unresolved": summary.directory_unresolved,
+                                    "directory_pending_classifications": summary.directory_pending_classifications,
+                                    "file_records": summary.file_records,
+                                    "file_unresolved": summary.file_unresolved,
+                                    "file_acknowledged_join_gaps": summary.file_acknowledged_join_gaps,
+                                    "file_pending_classifications": classifications,
+                                    "delete_records": summary.delete_records,
+                                    "delete_unresolved": summary.delete_unresolved,
+                                    })
+                                });
                                 Ok(json!({
+                                    "namespace_history_status": if namespace_history.is_some() { "available" } else { "unavailable" },
+                                    "namespace_history_query_elapsed_ms": namespace_history_query_elapsed_ms,
+                                    "windows_drive_activity": windows_drive_activity,
+                                    "namespace_history_error": namespace_history_error,
+                                    "namespace_history": namespace_history,
                                     "modified_closes": observation.modified_closes,
                                     "unverifiable_closes": observation.unverifiable_closes,
+                                    "observed_unverifiable_closes": observation.observed_unverifiable_closes,
                                     "journaled_closes": observation.journaled_closes,
                                     "close_callbacks": observation.close_callbacks,
                                     "close_pool_refusals": observation.close_pool_refusals,
@@ -1505,9 +1592,9 @@ impl ProviderManager {
                                     "inventory_complete": observation.inventory_complete,
                                     "last_cleanup_error": last_vault_cleanup_error.map(|error| format!("{error:?}")),
                                 }))
-                            } else { Err("The Windows drive is not connected".to_owned()) };
-                            let result = if worker_generation.load(Ordering::Acquire) == binding.generation { result }
-                                else { Err("The Windows drive changed during support inspection".to_owned()) };
+                            } else { Err("not_connected") };
+                            let result = if vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) { result }
+                                else { Err("context_changed") };
                             let _ = response.send(result);
                         }
                         ProviderCommand::VaultLockCleanupStatus { binding, space_id, root_resource_id, root_path, response } => {
@@ -1643,6 +1730,8 @@ impl ProviderManager {
                             let candidate_backend = Arc::clone(&next_backend);
                             let result = if worker_generation.load(Ordering::Acquire) != generation {
                                 Err("The account changed before the Windows drive could connect".to_owned())
+                            } else if next_backend.vault_read_context(expected_identity).map_or(true, |(client, _)| !registered_account_client(&worker_account_client, generation, &client)) {
+                                Err("The Windows drive credentials changed before publication".to_owned())
                             } else if connection.is_some() {
                                 Err("A Windows drive connection is already active".to_owned())
                             } else {
@@ -1710,18 +1799,9 @@ impl ProviderManager {
                                         .map_err(|_| "Could not connect the Windows Cloud Files drive".to_owned())
                                 });
                                 match lease {
-                                    Ok((active, custody, composite))
+                                    Ok((mut active, custody, composite))
                                         if worker_generation.load(Ordering::Acquire) == generation =>
                                     {
-                                        last_vault_cleanup_error = None;
-                                        active_binding = Some(candidate_binding.clone());
-                                        if let Ok(mut status) = worker_ordinary_edits.lock() {
-                                            *status = Some(windows_headless_edits::CachedStatus {
-                                                binding: candidate_binding.clone(),
-                                                source: active.ordinary_edit_status_source(), last_outcome:None,
-                                            });
-                                        }
-                                        vault_custody = custody;
                                         // The separately opted-in legacy directory fixture remains exclusive.
                                         // Shared directory routing is held until typed classification is admitted.
                                         let shared_directory_ready = windows_namespace_dispatcher::DIRECTORY_ROUTING_READY;
@@ -1739,7 +1819,8 @@ impl ProviderManager {
                                                 Err(_)=>if let Ok(mut notice)=worker_rename_error.lock() {notice.record(generation,worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD);},
                                             }
                                         }
-                                        namespace_dispatcher = if namespace_producer.is_none() && (next_file_rename_producer.is_some() || shared_directory.is_some() || directory_phase_enabled) {
+                                        let dispatcher_required = namespace_producer.is_none() && (next_file_rename_producer.is_some() || shared_directory.is_some() || directory_phase_enabled);
+                                        namespace_dispatcher = if dispatcher_required {
                                             let make_dispatcher = || {
                                                 if directory_phase_enabled {
                                                     if create_workers.is_none() { return Err(windows_file_create_producer::HOLD); }
@@ -1763,16 +1844,74 @@ impl ProviderManager {
                                                 }
                                             }
                                         } else { None };
-                                        connection = Some(active);
-                                        backend = Some(next_backend);
-                                        worker_connected.store(true, Ordering::Release);
-                                        Ok(())
+                                        // Callers may mkdir/copy immediately after Connect
+                                        // readiness. Arm only the dispatcher route here;
+                                        // the exclusive legacy producer owns its own observer.
+                                        let observer_ready = if dispatcher_required {
+                                            match namespace_dispatcher.as_mut() {
+                                                Some(dispatcher) => dispatcher.arm_observer(&mut active, &next_backend, expected_identity),
+                                                None => Err("Windows namespace observation could not start; pending files have been kept."),
+                                            }
+                                        } else { Ok(()) };
+                                        let observer_ready = observer_ready.and_then(|()| {
+                                            if worker_generation.load(Ordering::Acquire) != generation || next_backend.is_revoked() {
+                                                Err("The account changed before Windows namespace readiness was published; pending files have been kept.")
+                                            } else { Ok(()) }
+                                        });
+                                        match observer_ready {
+                                            Ok(()) => {
+                                                last_vault_cleanup_error = None;
+                                                active_binding = Some(candidate_binding.clone());
+                                                if let Ok(mut status) = worker_ordinary_edits.lock() {
+                                                    *status = Some(windows_headless_edits::CachedStatus {
+                                                        binding: candidate_binding.clone(),
+                                                        source: active.ordinary_edit_status_source(), last_outcome:None,
+                                                    });
+                                                }
+                                                vault_custody = custody;
+                                                connection = Some(active);
+                                                backend = Some(next_backend);
+                                                worker_connected.store(true, Ordering::Release);
+                                                native_activity_owner = worker_native_activity.bind(&candidate_binding);
+                                                if let (Some(owner), Some(dispatcher)) = (native_activity_owner.as_ref(), namespace_dispatcher.as_ref()) {
+                                                    worker_native_activity.publish(owner, &candidate_binding, &worker_generation, &worker_connected, dispatcher.activity_snapshot(create_workers.as_ref()), false, None);
+                                                }
+                                                Ok(())
+                                            }
+                                            Err(message) => {
+                                                // A failed arm can still own pending native IO.
+                                                // Retain the whole original connection unless
+                                                // every cancel/join/disconnect is confirmed.
+                                                next_backend.begin_revocation();
+                                                let workers_drained = stop_create_workers(namespace_dispatcher.as_mut(), Some(&active), &mut create_workers).is_ok();
+                                                if let Some(dispatcher) = namespace_dispatcher.as_mut() { dispatcher.hold(); }
+                                                namespace_dispatcher = None;
+                                                namespace_producer = None;
+                                                let observer_drained = active.stop_namespace_observer(Duration::from_millis(250)).is_ok();
+                                                let delete_drained = active.cancel_file_delete_in_place().is_ok();
+                                                if workers_drained && delete_drained { next_backend.revoke(); }
+                                                if !workers_drained || !observer_drained || !delete_drained || active.disconnect_in_place().is_err() {
+                                                    active_binding = Some(candidate_binding.clone());
+                                                    vault_custody = custody;
+                                                    connection = Some(active);
+                                                    backend = Some(next_backend);
+                                                    // Physical connection retained for draining,
+                                                    // never a successful readiness receipt.
+                                                    worker_connected.store(true, Ordering::Release);
+                                                    Err("Windows namespace readiness failed and disconnect is still pending; pending files have been kept.".into())
+                                                } else {
+                                                    Err(message.to_owned())
+                                                }
+                                            }
+                                        }
                                     }
-                                    Ok((mut active, _custody, _composite)) => {
+                                    Ok((mut active, custody, _composite)) => {
                                         next_backend.begin_revocation();
                                         let delete_drained = active.cancel_file_delete_in_place().is_ok();
                                         if delete_drained { next_backend.revoke(); }
                                         if !delete_drained || active.disconnect_in_place().is_err() {
+                                            active_binding = Some(candidate_binding.clone());
+                                            vault_custody = custody;
                                             connection = Some(active);
                                             backend = Some(next_backend);
                                             worker_connected.store(true, Ordering::Release);
@@ -2010,6 +2149,8 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Disconnect(response) => {
+                            worker_native_activity.retire();
+                            native_activity_owner = None;
                             if let Err(error) = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers) {
                                 if let Ok(mut notice) = worker_rename_error.lock() { notice.record(worker_generation.load(Ordering::Acquire),worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD); }
                                 let _ = response.send(Err(error));
@@ -2048,6 +2189,8 @@ impl ProviderManager {
                                 let _ = response.send(Err("The original cached drive changed before reconnect".into()));
                                 continue;
                             }
+                            worker_native_activity.retire();
+                            native_activity_owner = None;
                             if let Err(error) = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers) {
                                 if let Ok(mut notice) = worker_rename_error.lock() { notice.record(worker_generation.load(Ordering::Acquire),worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD); }
                                 let _ = response.send(Err(error));
@@ -2077,6 +2220,8 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Stop(response) => {
+                            worker_native_activity.retire();
+                            native_activity_owner = None;
                             if let Err(error) = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers) {
                                 if let Ok(mut notice) = worker_rename_error.lock() { notice.record(worker_generation.load(Ordering::Acquire),worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD); }
                                 let _ = response.send(Err(error));
@@ -2105,24 +2250,73 @@ impl ProviderManager {
                         }
                     }
                     }
-                    if let (Some(dispatcher),Some(active),Some(workers))=(namespace_dispatcher.as_mut(),connection.as_ref(),create_workers.as_mut()) {
-                        dispatcher.drain_create(active,workers);
+                    // Transport loss is a sticky fact of this original owner.
+                    // Surface it before generic backend revocation can mask it,
+                    // and use the existing hold/cancel/drain path only.
+                    let observer_terminal = connection.as_ref()
+                        .and_then(|active| active.namespace_observer_terminal_reason());
+                    if let Some(reason) = observer_terminal {
+                        if let (Some(dispatcher), Some(active)) = (namespace_dispatcher.as_mut(), connection.as_ref()) {
+                            dispatcher.hold_observer_loss(active, reason);
+                        }
+                        if let Some(binding) = active_binding.as_ref() {
+                            if let Ok(mut notice) = worker_rename_error.lock() {
+                                let current_generation = worker_generation.load(Ordering::Acquire);
+                                if notice.get(current_generation, true).is_none() {
+                                    notice.record(binding.generation, current_generation, windows_namespace_dispatcher::observer_hold(reason));
+                                }
+                            }
+                        }
                     }
-                    let mut dispatched_initial = false;
-                    if worker_initial_save_activation.load(Ordering::Acquire) {
+                    if let (Some(dispatcher),Some(active),Some(workers))=(namespace_dispatcher.as_mut(),connection.as_ref(),create_workers.as_mut()) {
+                        if let (Some(owner), Some(binding)) = (native_activity_owner.as_ref(), active_binding.as_ref()) {
+                            worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, dispatcher.activity_snapshot(Some(&*workers)), true, None);
+                        }
+                        let owner_started = Instant::now();
+                        dispatcher.drain_create(active,workers);
+                        let owner_elapsed = owner_started.elapsed();
+                        if let (Some(owner), Some(binding)) = (native_activity_owner.as_ref(), active_binding.as_ref()) {
+                            worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, dispatcher.activity_snapshot(Some(&*workers)), false, Some(owner_elapsed));
+                        }
+                    }
+                    let mut dispatched_initial = observer_terminal.is_some();
+                    if !dispatched_initial && worker_initial_save_activation.load(Ordering::Acquire) {
                         // Fresh initial-save work retains priority; never scan recovery here.
-                        let result = dispatch_one_initial_edit(
+                        if let (Some(owner), Some(binding), Some(dispatcher)) = (native_activity_owner.as_ref(), active_binding.as_ref(), namespace_dispatcher.as_ref()) {
+                            let mut activity = dispatcher.activity_snapshot(create_workers.as_ref());
+                            activity.last_wait = "existing_initial_save";
+                            worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, activity, true, None);
+                        }
+                        let owner_started = Instant::now();
+                        let result = dispatch_one_initial_edit_checked(
                             connection.as_ref(), backend.as_ref(), active_binding.as_ref(),
                             &worker_generation);
+                        let owner_elapsed = owner_started.elapsed();
+                        if let (Some(owner), Some(binding), Some(dispatcher)) = (native_activity_owner.as_ref(), active_binding.as_ref(), namespace_dispatcher.as_ref()) {
+                            let mut activity = dispatcher.activity_snapshot(create_workers.as_ref());
+                            activity.last_wait = "existing_initial_save";
+                            worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, activity, false, Some(owner_elapsed));
+                        }
                         dispatched_initial = !matches!(&result, Ok(None));
                         if dispatched_initial {
-                            windows_headless_edits::record_initial_outcome(&worker_ordinary_edits, active_binding.as_ref(), &result);
+                            let summary = result.map_err(|failure| failure.message().to_owned());
+                            windows_headless_edits::record_initial_outcome(&worker_ordinary_edits, active_binding.as_ref(), &summary);
+                        }
+                        if let Err(failure) = result {
+                            if let Some(binding) = active_binding.as_ref() {
+                                if let Ok(mut notice) = worker_rename_error.lock() {
+                                    let current_generation = worker_generation.load(Ordering::Acquire);
+                                    if notice.get(current_generation, true).is_none() {
+                                        notice.record_hresult(binding.generation, current_generation, failure.message(), failure.hresult());
+                                    }
+                                }
+                            }
                         }
                         #[cfg(all(test, debug_assertions))]
                         if dispatched_initial {
                             if let Ok(mut observation) = worker_initial_save_test_observation.lock() {
                                 *observation = Some(match &result {
-                                    Err(message) => format!("error: {message}"),
+                                    Err(failure) => format!("error: {}", failure.message()),
                                     Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { .. })) => "verified_applied".into(),
                                     Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Conflict(_))) => "conflict".into(),
                                     Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Ambiguous)) => "ambiguous".into(),
@@ -2142,12 +2336,27 @@ impl ProviderManager {
                         }
                         if let (Some(producer), Some(active), Some(backend), Some(binding)) =
                             (namespace_dispatcher.as_mut(),connection.as_mut(),backend.as_ref(),active_binding.as_ref()) {
+                            if let Some(owner) = native_activity_owner.as_ref() {
+                                worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, producer.activity_snapshot(create_workers.as_ref()), true, None);
+                            }
+                            let owner_started = Instant::now();
                             let result=if let Some(workers)=create_workers.as_mut() {
                                 producer.tick_with_create(active,backend,binding.identity,false,Some(workers))
                             } else {producer.tick(active,backend,binding.identity,false)};
+                            let owner_elapsed = owner_started.elapsed();
+                            if let Some(owner) = native_activity_owner.as_ref() {
+                                worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, producer.activity_snapshot(create_workers.as_ref()), false, Some(owner_elapsed));
+                            }
                             if let Err(message) = result {
                                 if let Ok(mut notice) = worker_rename_error.lock() {
-                                    notice.record(binding.generation,worker_generation.load(Ordering::Acquire),message);
+                                    let current_generation = worker_generation.load(Ordering::Acquire);
+                                    if notice.get(current_generation, true).is_none() {
+                                        if let Some(reason) = active.namespace_observer_terminal_reason() {
+                                            notice.record(binding.generation, current_generation, windows_namespace_dispatcher::observer_hold(reason));
+                                        } else {
+                                            notice.record_hresult(binding.generation,current_generation,message,producer.failure_hresult());
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2188,6 +2397,7 @@ impl ProviderManager {
                         }
                     }
                 }
+                worker_native_activity.retire();
                 let create_drained = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers).is_ok();
                 cleanup_holds.clear();
                 worker_jobs.cancel_all();
@@ -2223,11 +2433,13 @@ impl ProviderManager {
             directory_phase_test_activation: AtomicBool::new(false),
             mount_preference: Mutex::new(!headless),
             ordinary_edits,
+            native_activity,
             proxy: windows_proxy::Service::default(),
             bandwidth: windows_bandwidth::Service::default(),
             commands,
             connected,
             authorized_generation,
+            account_client,
             folder_generation,
             folder_revocation,
             folder_error,
@@ -2687,14 +2899,20 @@ impl ProviderManager {
             .map_err(|_| "Vault pending inspection did not complete within its bound".to_owned())?
     }
 
-    fn vault_cleanup_diagnostics(&self, binding: ActiveProviderBinding) -> Result<Value, String> {
+    fn vault_cleanup_diagnostics(
+        &self,
+        binding: ActiveProviderBinding,
+    ) -> Result<Value, &'static str> {
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
             .try_send(ProviderCommand::VaultCleanupDiagnostics { binding, response })
-            .map_err(|_| "Windows support inspection is unavailable")?;
+            .map_err(|_| "unavailable")?;
         result
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| "Windows support inspection was unavailable within its bound".to_owned())?
+            .recv_timeout(Duration::from_secs(25))
+            .map_err(|error| match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => "timed_out",
+                std::sync::mpsc::RecvTimeoutError::Disconnected => "unavailable",
+            })?
     }
 
     // true = exact pending cleanup; false = unknown, never complete.
@@ -3119,6 +3337,16 @@ impl ProviderManager {
     }
 
     fn authorize_generation(&self, generation: u64) {
+        self.native_activity.retire();
+        if let Ok(mut registry) = self.account_client.lock()
+            && registry
+                .as_ref()
+                .is_some_and(|owner| owner.generation != generation)
+        {
+            if let Some(owner) = registry.take() {
+                let _ = owner.client.invalidate_credentials();
+            }
+        }
         self.cancel_fresh_close();
         self.bandwidth.authorize_generation(generation);
         // InstallFolders checks/publishes under this same lock. Revocation and
@@ -3956,6 +4184,7 @@ impl WindowsAgent {
                 Ok((self.upload_windows_vault_capture_request(request)?, false))
             }
             "windows_recovery_retry" => Ok((self.retry_recovered_edit(request)?, false)),
+            "windows_recovery_check_cloud" => Ok((self.check_saved_edit_cloud(request)?, false)),
             "windows_device_cache_quota_set" => {
                 Ok((self.windows_device_cache_quota_set(request)?, false))
             }
@@ -4026,6 +4255,7 @@ impl WindowsAgent {
                     .map_err(|_| "Account state is unavailable")?;
                 let generation = state.active_generation;
                 let configuration = state.root_configuration.clone();
+                let windows_drive_activity = windows_native_activity::status(self, &state);
                 let binding = configuration.as_ref().and_then(|configuration| {
                     let owner = configuration.registration_ownership.as_ref()?;
                     Some(ActiveProviderBinding {
@@ -4040,6 +4270,7 @@ impl WindowsAgent {
                     })
                 });
                 let mut value = json!({
+                    "windows_drive_activity": &windows_drive_activity,
                     "schema_version": 1,
                     "app_version": env!("CARGO_PKG_VERSION"),
                     "target_os": std::env::consts::OS,
@@ -4059,8 +4290,16 @@ impl WindowsAgent {
                     },
                 });
                 drop(state);
-                let mut cleanup = binding
-                    .and_then(|binding| self.provider.vault_cleanup_diagnostics(binding).ok());
+                let (mut cleanup_status, mut cleanup) = if !mounted {
+                    ("not_connected", None)
+                } else if let Some(binding) = binding {
+                    match self.provider.vault_cleanup_diagnostics(binding) {
+                        Ok(value) => ("available", Some(value)),
+                        Err(status) => (status, None),
+                    }
+                } else {
+                    ("unavailable", None)
+                };
                 let state = self
                     .state
                     .lock()
@@ -4070,7 +4309,17 @@ impl WindowsAgent {
                     || state.root_configuration != configuration
                 {
                     cleanup = None;
+                    cleanup_status = "context_changed";
                 }
+                if !windows_native_activity::still_current(self, &state, &windows_drive_activity) {
+                    value["windows_drive_activity"] =
+                        json!(windows_native_activity::Observation::unavailable());
+                    if let Some(cleanup) = cleanup.as_mut() {
+                        cleanup["windows_drive_activity"] =
+                            json!(windows_native_activity::Observation::unavailable());
+                    }
+                }
+                value["runtime"]["vault_cleanup_status"] = json!(cleanup_status);
                 value["runtime"]["vault_cleanup"] = cleanup.unwrap_or(Value::Null);
                 Ok((value, false))
             }
@@ -4287,7 +4536,7 @@ impl WindowsAgent {
             .provider
             .pause_snapshot(state.active_generation, state.online_authenticated);
         let rename_error = self.provider.rename_error.lock().ok().and_then(|notice| {
-            notice.get(
+            notice.rendered(
                 state.active_generation,
                 mounted
                     && state.active_generation
@@ -4314,7 +4563,7 @@ impl WindowsAgent {
                 "registration_state": value.registration_ownership.as_ref().map(|owner| owner.state.as_str()),
                 "recovery_scope_token": self.provider.configuration_recovery_scope_token(value, state.active_generation).ok(),
             })),
-            "error": state.error.as_deref().or(rename_error).or(folder_error.as_deref()).or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
+            "error": state.error.as_deref().or(rename_error.as_deref()).or(folder_error.as_deref()).or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
             "autostart": autostart,
             "recovery_folder": null,
             "encrypted_edit_recovery_available": false,
@@ -4328,6 +4577,7 @@ impl WindowsAgent {
             "bandwidth_limits_supported": true,
             "network_proxy_supported": true,
             "windows_recovery_retry_supported": true,
+            "windows_recovery_cloud_check_supported": true,
             "proxy_edit_requires_sign_out": state.session.is_some(),
             "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
             "vaults_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
@@ -4342,7 +4592,10 @@ impl WindowsAgent {
             "session_cleanup_uncertain": state.session_cleanup_uncertain,
             "account_removing": state.retiring,
         });
+        status["renewing_sign_in"] =
+            json!(state.routine_refresh_generation == Some(state.active_generation));
         windows_headless::annotate_status(&mut status, runtime_mode()?);
+        status["windows_drive_activity"] = json!(windows_native_activity::status(self, &state));
         status["vault_move_supported"] = json!(WINDOWS_VAULT_SESSIONS_ENABLED);
         status["vault_copy_verify_supported"] = json!(WINDOWS_VAULT_SESSIONS_ENABLED);
         if mount_only() {
@@ -4472,7 +4725,7 @@ impl WindowsAgent {
         let same_session = state.session.as_ref().is_some_and(|current| {
             current.server == context.session.server
                 && current.client_id == context.session.client_id
-                && current.access_token == context.session.access_token
+                && Self::same_session_authority(Some(current), Some(&context.session))
                 && current.expires_at
                     > unix_time_now().saturating_add(windows_headless::retry_seconds())
         });
@@ -4688,7 +4941,7 @@ impl WindowsAgent {
             || state.session.as_ref().is_none_or(|current| {
                 current.server != verified.session.server
                     || current.client_id != verified.session.client_id
-                    || current.access_token != verified.session.access_token
+                    || !Self::same_session_authority(Some(current), Some(&verified.session))
                     || current.expires_at
                         <= unix_time_now().saturating_add(windows_headless::retry_seconds())
             })
@@ -4774,7 +5027,7 @@ impl WindowsAgent {
         let server_origin = client
             .server_origin()
             .ok_or("The connected account server origin is invalid")?;
-        let (_, account_id, personal_root_id, spaces, context) =
+        let (personal_space_id, account_id, personal_root_id, spaces, _context) =
             verified_account_roots(&client, &session.server)?;
         if account_id != owner.account_id
             || spaces
@@ -4793,7 +5046,25 @@ impl WindowsAgent {
             agent_generation,
             &self.provider,
             self.session_store.as_ref(),
+            &self.state,
+            &personal_space_id,
+            &personal_root_id,
         )?;
+        let client = Arc::new(
+            client
+                .as_ref()
+                .clone()
+                .with_verified_provider_credentials(
+                    client.token_generation(),
+                    &personal_space_id,
+                    &personal_root_id,
+                )
+                .map_err(|_| "Could not retain the verified account credentials")?,
+        );
+        let context = RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(30),
+            token_generation: client.token_generation(),
+        };
         let provider_scope = raiun_cloudfiles_windows::ProviderScope::new(
             client.as_ref(),
             configuration.profile_scope.clone(),
@@ -4930,7 +5201,7 @@ impl WindowsAgent {
         {
             return Err("Could not bind recovery to the current account and drive folder".into());
         }
-        let client_generation = client.token_generation();
+        let client_generation = client.provider_context_generation();
         let remote = Arc::new(
             raiun_cloudfiles_windows::OpenCloudRecoveryRemote::new(
                 Arc::clone(&client),
@@ -4959,7 +5230,7 @@ impl WindowsAgent {
                     current.server != session.server
                         || current.client_id != session.client_id
                         || current.app_token_username != session.app_token_username
-                        || current.access_token != session.access_token
+                        || !Self::same_session_authority(Some(current), Some(&session))
                 })
                 || state.root_configuration.as_ref() != Some(&configuration)
             {
@@ -4995,8 +5266,14 @@ impl WindowsAgent {
             }
             let fresh = outcome
                 == raiun_cloudfiles_windows::FileCreateContinuationOutcome::LocallyCompleted;
-            return Ok(json!({"remote_verified":fresh,
-                "local_completion":if fresh {"completed"} else {"historical_link_completed"},
+            let state = match outcome {
+                raiun_cloudfiles_windows::FileCreateContinuationOutcome::LocallyCompleted => "verified_applied",
+                raiun_cloudfiles_windows::FileCreateContinuationOutcome::HistoricalLinkCompleted => "historical_link_completed",
+                raiun_cloudfiles_windows::FileCreateContinuationOutcome::HistoricalReviewRequired => "review_required",
+            };
+            return Ok(json!({"state":state,
+                "retained":true,"remote_verified":fresh,
+                "local_completion":if fresh {"completed"} else {"unavailable"},
                 "continued_create":true,"original_snapshot_retained":true,
                 "profile_id":self.profile_scope.as_str(),"auth_generation":agent_generation,
                 "recovery_scope_token":recovery_scope_token}));
@@ -5062,7 +5339,7 @@ impl WindowsAgent {
             || state.session.as_ref().is_none_or(|current| {
                 current.server != session.server
                     || current.client_id != session.client_id
-                    || current.access_token != session.access_token
+                    || !Self::same_session_authority(Some(current), Some(&session))
             })
             || !self
                 .provider
@@ -5350,7 +5627,8 @@ impl WindowsAgent {
                     .opencloud_client()
                     .map_err(|_| "Could not prepare the connected account")?,
             );
-            let (_, account_id, _, spaces, _) = verified_account_roots(&client, &session.server)?;
+            let (personal_space_id, account_id, personal_root_id, spaces, _) =
+                verified_account_roots(&client, &session.server)?;
             let server = url::Url::parse(&session.server)
                 .map_err(|_| "The account server is invalid")?
                 .to_string();
@@ -5386,6 +5664,9 @@ impl WindowsAgent {
                 generation,
                 &self.provider,
                 self.session_store.as_ref(),
+                &self.state,
+                &personal_space_id,
+                &personal_root_id,
             )?;
             let origin = client
                 .server_origin()
@@ -5404,6 +5685,7 @@ impl WindowsAgent {
                             || current.client_id != session.client_id
                             || current.app_token_username != session.app_token_username
                             || current.expected_issuer != session.expected_issuer
+                            || !Self::same_session(Some(current), Some(&session))
                     })
                 {
                     return Err("The account changed during folder setup".into());
@@ -5452,6 +5734,7 @@ impl WindowsAgent {
             if !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.retiring
                 || state.logout_pending
             {
@@ -5769,6 +6052,7 @@ impl WindowsAgent {
                 state.online_authenticated
                     && !state.authenticating
                     && !state.refreshing
+                    && state.routine_refresh_generation != Some(state.active_generation)
                     && state.session.is_some()
                     && state.root_configuration.is_some()
             });
@@ -5803,7 +6087,11 @@ impl WindowsAgent {
             let state = state_mutex
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
-            if !state.online_authenticated || state.authenticating || state.refreshing {
+            if !state.online_authenticated
+                || state.authenticating
+                || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
+            {
                 return Err("Connect the account before mounting its Windows drive".into());
             }
             let session = state
@@ -5882,6 +6170,7 @@ impl WindowsAgent {
                 || !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.root_configuration.as_ref() != Some(&configuration)
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
@@ -5918,7 +6207,21 @@ impl WindowsAgent {
             generation,
             provider,
             session_store.as_ref(),
+            state_mutex,
+            &owner.personal_drive_id,
+            &personal_root_resource_id,
         )?;
+        let client = Arc::new(
+            client
+                .as_ref()
+                .clone()
+                .with_verified_provider_credentials(
+                    client.token_generation(),
+                    &owner.personal_drive_id,
+                    &personal_root_resource_id,
+                )
+                .map_err(|_| "Could not retain the verified Windows account credentials")?,
+        );
         let scope = raiun_cloudfiles_windows::ProviderScope::new(
             &client,
             configuration.profile_scope.clone(),
@@ -5997,6 +6300,7 @@ impl WindowsAgent {
                 || !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
@@ -6037,6 +6341,7 @@ impl WindowsAgent {
                 || !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
@@ -6095,6 +6400,7 @@ impl WindowsAgent {
                 || !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
+                || state.routine_refresh_generation == Some(state.active_generation)
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
@@ -6146,6 +6452,9 @@ impl WindowsAgent {
             }
         }
 
+        if self.try_start_routine_refresh()? {
+            return Ok(());
+        }
         let (session, generation, original_root) = {
             let mut state = self
                 .state
@@ -6912,6 +7221,21 @@ impl WindowsAgent {
         }
     }
 
+    // Only for work already bound to this Agent generation and exact root.
+    // Benign OAuth renewal changes bearer/refresh material, never these fields;
+    // account/security replacement must advance the Agent generation first.
+    fn same_session_authority(left: Option<&auth::Session>, right: Option<&auth::Session>) -> bool {
+        let (Some(left), Some(right)) = (left, right) else {
+            return false;
+        };
+        left.server == right.server
+            && left.client_id == right.client_id
+            && left.app_token_username == right.app_token_username
+            && left.token_endpoint == right.token_endpoint
+            && left.expected_issuer == right.expected_issuer
+            && left.proxy == right.proxy
+    }
+
     // Borrow credentials solely for exact currentness checks; never stage/log tokens.
     fn same_session(left: Option<&auth::Session>, right: Option<&auth::Session>) -> bool {
         let (Some(left), Some(right)) = (left, right) else {
@@ -7461,34 +7785,98 @@ fn verified_account_roots(
     ))
 }
 
+// Preserve the existing test/convenience result surface. Production uses the
+// typed helper so fixed phase/HRESULT context survives into the existing Notice.
+#[cfg(test)]
 fn dispatch_one_initial_edit(
     connection: Option<&raiun_cloudfiles_windows::ConfiguredRootConnection>,
     backend: Option<&Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>>,
     binding: Option<&ActiveProviderBinding>,
     generation: &Arc<AtomicU64>,
 ) -> Result<Option<raiun_cloudfiles_windows::ReconciliationOutcome>, String> {
+    dispatch_one_initial_edit_checked(connection, backend, binding, generation)
+        .map_err(|failure| failure.message().to_owned())
+}
+
+fn initial_save_native_failure(
+    message: &'static str,
+    error: raiun_cloudfiles_windows::Error,
+) -> windows_file_create_producer::FailureContext {
+    let hresult = match error {
+        raiun_cloudfiles_windows::Error::Native { hresult, .. } => Some(hresult as u32),
+        _ => None,
+    };
+    windows_file_create_producer::FailureContext::new(message, hresult)
+}
+
+fn dispatch_one_initial_edit_checked(
+    connection: Option<&raiun_cloudfiles_windows::ConfiguredRootConnection>,
+    backend: Option<&Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>>,
+    binding: Option<&ActiveProviderBinding>,
+    generation: &Arc<AtomicU64>,
+) -> Result<
+    Option<raiun_cloudfiles_windows::ReconciliationOutcome>,
+    windows_file_create_producer::FailureContext,
+> {
+    use windows_file_create_producer::FailureContext;
     let (Some(connection), Some(backend), Some(binding)) = (connection, backend, binding) else {
         return Ok(None);
     };
-    if binding.generation == 0
-        || generation.load(Ordering::Acquire) != binding.generation
-        || backend.is_revoked()
-    {
-        return Err("The account changed before initial save".into());
+    if binding.generation == 0 || generation.load(Ordering::Acquire) != binding.generation {
+        return Err("Fresh-save verification paused: account currentness check failed; pending files have been kept.".into());
+    }
+    if let Some(reason) = connection.namespace_observer_terminal_reason() {
+        return Err(windows_namespace_dispatcher::observer_hold(reason).into());
+    }
+    if backend.is_revoked() {
+        // A terminal transport latch precedes backend revocation. Recheck
+        // after observing it so a race cannot replace its original reason.
+        if let Some(reason) = connection.namespace_observer_terminal_reason() {
+            return Err(windows_namespace_dispatcher::observer_hold(reason).into());
+        }
+        // Only the first typed cloud category is retained in memory; no raw
+        // server detail or later global error can replace the original fact.
+        use raiun_core::backend::ErrorKind;
+        let message = match backend.revoked_cloud_error_kind() {
+            Some(ErrorKind::Unauthorized) => {
+                "Fresh-save verification paused: cloud authentication failure fenced the drive; pending files have been kept."
+            }
+            Some(ErrorKind::Forbidden) => {
+                "Fresh-save verification paused: cloud permission denial fenced the drive; pending files have been kept."
+            }
+            Some(ErrorKind::NotFound) => {
+                "Fresh-save verification paused: a cloud item was not found and the drive was fenced; pending files have been kept."
+            }
+            Some(ErrorKind::Conflict) => {
+                "Fresh-save verification paused: cloud validation reported a conflict and the drive was fenced; pending files have been kept."
+            }
+            _ => {
+                "Fresh-save verification paused: the original drive backend was revoked; pending files have been kept."
+            }
+        };
+        return Err(message.into());
+    }
+    // Empty fresh-queue state is scheduling information only. A concurrent
+    // enqueue waits for the next tick; nonempty work retains every root proof
+    // before take/pop and never gains mutation authority from this hint.
+    if !connection.has_pending_initial_edit().map_err(|error| {
+        initial_save_native_failure("Fresh-save verification paused: fresh queue availability check failed; pending files have been kept.", error)
+    })? {
+        return Ok(None);
     }
     let root_lease = pin_registered_configured_root(&binding.path, binding.identity)
-        .map_err(|_| "The connected Windows root changed".to_owned())?;
+        .map_err(|error| initial_save_native_failure("Fresh-save verification paused: registered root lease check failed; pending files have been kept.", error))?;
     if root_lease.identity() != binding.identity {
-        return Err("The Windows root changed".into());
+        return Err("Fresh-save verification paused: root identity check failed; pending files have been kept.".into());
     }
     let Some(mut pending) = connection
         .take_initial_edit()
-        .map_err(|_| "The fresh edit handoff is unavailable".to_owned())?
+        .map_err(|error| initial_save_native_failure("Fresh-save verification paused: fresh handoff inspection failed; pending files have been kept.", error))?
     else {
         return Ok(None);
     };
     if !pending.matches_provider(backend.scope(), binding.identity) {
-        return Err("The fresh edit belongs to a different provider".into());
+        return Err("Fresh-save verification paused: fresh receipt provider check failed; pending files have been kept.".into());
     }
     let expected = binding.generation;
     let generation_check = Arc::clone(generation);
@@ -7510,42 +7898,41 @@ fn dispatch_one_initial_edit(
             };
             let dispatched = pending
                 .dispatch_verified(&remote)
-                .map_err(|_| "The initial save requires recovery review".to_owned())?;
+                .map_err(|_| FailureContext::from("Fresh-save verification paused: fresh receipt dispatch failed; pending files have been kept."))?;
             if let Some(proof) = dispatched.proof {
                 let location = dispatched.location.ok_or_else(|| {
                     #[cfg(all(test, debug_assertions))]
                     eprintln!("synthetic_save_completion_missing_location");
-                    "The saved edit needs local recovery review".to_owned()
+                    FailureContext::from("Fresh-save verification paused: verified result has no local location; pending files have been kept.")
                 })?;
                 if generation.load(Ordering::Acquire) != binding.generation
                     || location.root_identity() != binding.identity
                     || location.local_file_identity() != proof.metadata().local_file
                 {
-                    return Err("The local save binding changed".to_owned());
+                    return Err(FailureContext::from("Fresh-save verification paused: local completion binding check failed; pending files have been kept."));
                 }
                 let publication = session
                     .prepare_verified_edit(location.identity(), &proof)
-                    .map_err(|_| "The saved cloud version changed".to_owned())?;
+                    .map_err(|_| FailureContext::from("Fresh-save verification paused: verified publication preparation failed; pending files have been kept."))?;
                 let components: Vec<&str> =
                     location.components().iter().map(String::as_str).collect();
                 connection
                     .acknowledge_verified_edit(&components, &publication)
                     .map_err(|error| {
+                        let failure = initial_save_native_failure("Fresh-save verification paused: native completion failed; pending files have been kept.", error);
                         #[cfg(all(test, debug_assertions))]
-                        eprintln!("synthetic_save_completion_rejected: {error}");
-                        #[cfg(not(all(test, debug_assertions)))]
-                        let _ = error;
-                        "The saved edit needs local recovery review".to_owned()
+                        eprintln!("synthetic_save_completion_rejected: {}", failure.message());
+                        failure
                     })?;
             } else if matches!(
                 dispatched.outcome,
                 raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { .. }
             ) {
-                return Err("The saved edit needs fresh verification".to_owned());
+                return Err(FailureContext::from("Fresh-save verification paused: verified outcome has no readback proof; pending files have been kept."));
             }
             Ok(Some(dispatched.outcome))
         })
-        .map_err(|_| "Could not verify the fresh edit's current Space root".to_owned())?
+        .map_err(|_| FailureContext::from("Fresh-save verification paused: current Space session check failed; pending files have been kept."))?
 }
 
 enum RecoveryRemoteHandle<'a> {
@@ -7586,6 +7973,31 @@ impl AgentGenerationRecoveryRemote<'_> {
 }
 
 impl raiun_cloudfiles_windows::RecoveryRemote for AgentGenerationRecoveryRemote<'_> {
+    fn check_created_copy(
+        &self,
+        scope: &raiun_cloudfiles_windows::EditJournalScope,
+        relative_path: &str,
+        parent: &raiun_cloudfiles_windows::RemoteEditBaseline,
+        expected_resource_id: Option<&str>,
+        content_len: u64,
+        sha256: [u8; 32],
+        job: &raiun_cloudfiles_windows::StreamedRecoveryJob,
+    ) -> Result<raiun_cloudfiles_windows::SavedEditCloudCheck, raiun_core::backend::CloudError>
+    {
+        self.ensure_current(scope)?;
+        let result = self.inner.remote().check_created_copy(
+            scope,
+            relative_path,
+            parent,
+            expected_resource_id,
+            content_len,
+            sha256,
+            job,
+        );
+        self.ensure_current(scope)?;
+        result
+    }
+
     fn begin_recovery_job(
         &self,
         policy: raiun_cloudfiles_windows::StreamedRecoveryPolicy,
@@ -8392,6 +8804,11 @@ fn request_value(request: &Value) -> Result<(), String> {
         .map_err(|_| "Raiun agent is not running for this Windows user".to_owned())?;
     write_json_line(&mut stream, &request)
         .map_err(|_| "Could not send control request".to_owned())?;
+    if request["action"].as_str() == Some("windows_recovery_check_cloud") {
+        // This read-only full-content comparison can use the configured
+        // recovery job's 24-hour maximum; connecting/sending stays bounded.
+        stream.set_io_timeout(Duration::from_secs(24 * 60 * 60 + 30));
+    }
     let mut response = Vec::new();
     stream
         .take(raiun_control::MAX_CONTROL_MESSAGE_BYTES as u64 + 1)

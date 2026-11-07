@@ -192,7 +192,7 @@ impl OpenCloudPlaceholderBackend {
                     .as_secs();
                 let now = i64::try_from(now).map_err(|_| BackendError::Unavailable)?;
                 self.client
-                    .with_token_generation(self.token_generation, || {
+                    .with_provider_generation(self.token_generation, || {
                         if self.revoked.load(Ordering::Acquire) {
                             return Err(BackendError::Unavailable);
                         }

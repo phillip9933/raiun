@@ -8,6 +8,37 @@ pub(crate) fn validate(
     generation: u64,
     scope_token: &str,
 ) -> Result<(), &'static str> {
+    validate_action(
+        request,
+        profile,
+        generation,
+        scope_token,
+        "windows_recovery_retry",
+    )
+}
+
+pub(crate) fn validate_check(
+    request: &Value,
+    profile: &str,
+    generation: u64,
+    scope_token: &str,
+) -> Result<(), &'static str> {
+    validate_action(
+        request,
+        profile,
+        generation,
+        scope_token,
+        "windows_recovery_check_cloud",
+    )
+}
+
+fn validate_action(
+    request: &Value,
+    profile: &str,
+    generation: u64,
+    scope_token: &str,
+    action: &str,
+) -> Result<(), &'static str> {
     const ERROR: &str = "Reopen saved edits for the current account and Windows drive";
     let object = request.as_object().ok_or(ERROR)?;
     const KEYS: [&str; 6] = [
@@ -20,7 +51,7 @@ pub(crate) fn validate(
     ];
     if object.len() != KEYS.len()
         || !KEYS.iter().all(|key| object.contains_key(*key))
-        || request["action"].as_str() != Some("windows_recovery_retry")
+        || request["action"].as_str() != Some(action)
         || request["profile_id"].as_str() != Some(profile)
         || generation == 0
         || request["expected_generation"].as_u64() != Some(generation)
