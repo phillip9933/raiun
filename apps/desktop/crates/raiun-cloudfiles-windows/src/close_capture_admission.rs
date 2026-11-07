@@ -900,4 +900,4 @@ mod owned_deleted_close_tests {
 #[path = "independent_create_admission.rs"]
 mod independent_create;
 #[cfg(windows)]
-pub(crate) use independent_create::IndependentCreateAdmission;
+pub(crate) use independent_create::{IndependentCreateAdmission, IndependentCreateAdmissionError};

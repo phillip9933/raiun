@@ -1526,7 +1526,15 @@ impl ProviderManager {
                                 Err("context_changed")
                             } else if let Some(active) = connection.as_ref() {
                                 let observation = active.vault_cleanup_diagnostics();
-                                let namespace_history = active.namespace_recovery_summary().ok().map(|summary| {
+                                let (namespace_history, namespace_history_error) = match active.namespace_recovery_diagnostics() {
+                                    Ok(summary) => (Some(summary), None),
+                                    Err(error) => (None, Some(json!({
+                                        "boundary": error.boundary(),
+                                        "class": error.class(),
+                                        "reason": error.reason(),
+                                    }))),
+                                };
+                                let namespace_history = namespace_history.map(|summary| {
                                     let classifications: Vec<_> = summary.file_pending_classifications.iter().map(|row| {
                                         let mut value = json!(row);
                                         value["personal_space_relation"] = json!(row.relation_to_verified_space(
@@ -1551,6 +1559,7 @@ impl ProviderManager {
                                 });
                                 Ok(json!({
                                     "namespace_history_status": if namespace_history.is_some() { "available" } else { "unavailable" },
+                                    "namespace_history_error": namespace_history_error,
                                     "namespace_history": namespace_history,
                                     "modified_closes": observation.modified_closes,
                                     "unverifiable_closes": observation.unverifiable_closes,

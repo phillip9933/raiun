@@ -1,6 +1,6 @@
 //! Explicit same-owner ordinary Personal file create; never recovered replay.
 use super::*;
-use crate::close_capture_admission::IndependentCreateAdmission;
+use crate::close_capture_admission::{IndependentCreateAdmission, IndependentCreateAdmissionError};
 use crate::creation_preparation::{
     Failure, Stage as PreparationStage, Trace, wait_for_recovery_health,
 };
@@ -696,27 +696,40 @@ impl FileCreateTask {
                     inspection
                         .bind_space(&mut space)
                         .map_err(|_| BackendError::Unavailable)?;
-                    if wait_for_recovery_health(&prep.job, &trace, &mut health_wait, || {
-                        trace.enter(PreparationStage::Job);
-                        prep.job.check()?;
-                        trace.enter(PreparationStage::Current);
-                        if !(prep.current)(self.key.authorization) {
+                    trace.enter(PreparationStage::RecoveryStore);
+                    let existing = prep.recovery.existing_file_rename_store(
+                        &admission.parent.scope,
+                        self.key.authorization,
+                    )?;
+                    let rename = if let Some(rename) = existing {
+                        // Binding existing storage is read-only and grants no
+                        // health or capture authority. The full joint query
+                        // below still admits this exact original candidate.
+                        rename
+                    } else {
+                        // Verified absence or unsupported implementations keep
+                        // the original health/create/recheck initialization.
+                        if wait_for_recovery_health(&prep.job, &trace, &mut health_wait, || {
+                            trace.enter(PreparationStage::Job);
+                            prep.job.check()?;
+                            trace.enter(PreparationStage::Current);
+                            if !(prep.current)(self.key.authorization) {
+                                return Err(BackendError::Unavailable);
+                            }
+                            admission.check(&self.backend)?;
+                            trace.enter(PreparationStage::RecoveryBefore);
+                            prep.recovery
+                                .has_unresolved_for_fresh_create_in_space(&space)
+                        })? {
                             return Err(BackendError::Unavailable);
                         }
+                        trace.enter(PreparationStage::Current);
                         admission.check(&self.backend)?;
-                        trace.enter(PreparationStage::RecoveryBefore);
+                        trace.enter(PreparationStage::RecoveryStore);
                         prep.recovery
-                            .has_unresolved_for_fresh_create_in_space(&space)
-                    })? {
-                        return Err(BackendError::Unavailable);
-                    }
-                    trace.enter(PreparationStage::Current);
-                    admission.check(&self.backend)?;
-                    trace.enter(PreparationStage::RecoveryStore);
-                    let rename = prep
-                        .recovery
-                        .file_rename_store(&admission.parent.scope, self.key.authorization)?
-                        .ok_or(BackendError::Unavailable)?;
+                            .file_rename_store(&admission.parent.scope, self.key.authorization)?
+                            .ok_or(BackendError::Unavailable)?
+                    };
                     trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
                     if wait_for_recovery_health(&prep.job, &trace, &mut health_wait, || {
@@ -875,16 +888,24 @@ impl ConfiguredRootConnection {
             ));
         }
         let (tracker, recovery) = self.file_create_guard_context(backend)?;
-        let Some(ticket) = tracker.try_begin_independent_create(
+        let ticket = match tracker.try_begin_independent_create(
             parent_components
                 .iter()
                 .map(|part| (*part).to_owned())
                 .chain(std::iter::once(name.to_owned()))
                 .collect(),
-        ) else {
-            return Ok(FileCreateStep::Finished(
-                crate::FreshFileCreateOutcome::BusyBeforeCapture,
-            ));
+        ) {
+            Ok(ticket) => ticket,
+            Err(IndependentCreateAdmissionError::Busy) => {
+                return Ok(FileCreateStep::Finished(
+                    crate::FreshFileCreateOutcome::BusyBeforeCapture,
+                ));
+            }
+            Err(IndependentCreateAdmissionError::Refused) => {
+                return Err(Error::CreateAdmission {
+                    stage: crate::CreateAdmissionStage::CloseAdmission,
+                });
+            }
         };
         let observation = ticket.observation_probe();
         let dispatch = ticket.dispatch_probe();

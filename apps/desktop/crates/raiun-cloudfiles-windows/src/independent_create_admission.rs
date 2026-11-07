@@ -22,14 +22,23 @@ pub(crate) struct IndependentCreateAdmission {
     _owner_thread: PhantomData<Rc<()>>,
 }
 
+pub(crate) enum IndependentCreateAdmissionError {
+    Busy,
+    Refused,
+}
+
 impl CloseCaptureAdmission {
     pub(crate) fn try_begin_independent_create(
         self: &Arc<Self>,
         components: Vec<String>,
-    ) -> Option<IndependentCreateAdmission> {
-        let mut state = self.try_state()?;
-        if self.unknown.load(Ordering::Acquire)
-            || state.active_closes != 0
+    ) -> Result<IndependentCreateAdmission, IndependentCreateAdmissionError> {
+        let mut state = self
+            .try_state()
+            .ok_or(IndependentCreateAdmissionError::Refused)?;
+        if self.unknown.load(Ordering::Acquire) {
+            return Err(IndependentCreateAdmissionError::Refused);
+        }
+        if state.active_closes != 0
             || state.rename_claimed
             || state.ordinary_creates.len() >= 4
             || state.ordinary_creates.iter().any(|claim| {
@@ -40,9 +49,12 @@ impl CloseCaptureAdmission {
                     .all(|(a, b)| a.eq_ignore_ascii_case(b))
             })
         {
-            return None;
+            return Err(IndependentCreateAdmissionError::Busy);
         }
-        let id = state.create_nonce.checked_add(1)?;
+        let id = state
+            .create_nonce
+            .checked_add(1)
+            .ok_or(IndependentCreateAdmissionError::Refused)?;
         state.create_nonce = id;
         let observation = self.create_observation.load(Ordering::Acquire);
         let (dispatch, lifetime) = DispatchProbeLifetime::new(self.clone(), observation);
@@ -52,7 +64,7 @@ impl CloseCaptureAdmission {
             dispatched: false,
             completed: false,
         });
-        Some(IndependentCreateAdmission {
+        Ok(IndependentCreateAdmission {
             tracker: self.clone(),
             id,
             epoch: state.dirty_epoch,

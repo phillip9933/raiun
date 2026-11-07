@@ -390,6 +390,81 @@ pub struct NamespaceRecoverySummary {
     pub delete_unresolved: usize,
 }
 
+/// Same-call support failure only. Carries typed classes, never paths, payloads,
+/// partial counts or recovery authority.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NamespaceRecoveryDiagnosticError {
+    Connection,
+    RootIdentity,
+    RootRegistration,
+    MissingProvider,
+    ProviderScope,
+    RecoveryContext,
+    RecoveryStateOpen,
+    RecoveryStateAbsence,
+    Provider(BackendError),
+    HistoryPolicy(BackendError),
+    Store(streamed_store::StoreError),
+}
+#[cfg(windows)]
+impl NamespaceRecoveryDiagnosticError {
+    pub fn boundary(self) -> &'static str {
+        match self {
+            Self::Connection => "connection",
+            Self::RootIdentity => "root_identity",
+            Self::RootRegistration => "root_registration",
+            Self::MissingProvider => "prepared_provider",
+            Self::ProviderScope => "provider_scope",
+            Self::RecoveryContext => "recovery_context",
+            Self::RecoveryStateOpen => "recovery_state_open",
+            Self::RecoveryStateAbsence => "recovery_state_absence",
+            Self::Provider(_) => "provider_inspection",
+            Self::HistoryPolicy(_) => "history_policy",
+            Self::Store(_) => "namespace_store_inspection",
+        }
+    }
+    pub fn class(self) -> &'static str {
+        use streamed_store::StoreError;
+        match self {
+            Self::Provider(error) | Self::HistoryPolicy(error) => match error {
+                BackendError::NotFound => "not_found",
+                BackendError::Cancelled => "cancelled",
+                BackendError::InvalidRange => "invalid_range",
+                BackendError::Unavailable => "unavailable",
+            },
+            Self::Store(error) => match error {
+                StoreError::Io => "io",
+                StoreError::Busy => "busy",
+                StoreError::Invalid => "invalid",
+                StoreError::Quota => "quota",
+                StoreError::ScanLimit => "scan_limit",
+                StoreError::IncompleteEvidence => "incomplete_evidence",
+                StoreError::CorruptEvidence => "corrupt_evidence",
+                StoreError::PublicationUncertain => "publication_uncertain",
+                StoreError::Snapshot(_) => "snapshot",
+            },
+            _ => "unavailable",
+        }
+    }
+    pub fn reason(self) -> &'static str {
+        use streamed_snapshot::SnapshotError;
+        match self {
+            Self::Store(streamed_store::StoreError::Snapshot(error)) => match error {
+                SnapshotError::Io => "snapshot_io",
+                SnapshotError::InvalidBinding => "snapshot_invalid_binding",
+                SnapshotError::BindingMismatch => "snapshot_binding_mismatch",
+                SnapshotError::LimitExceeded => "snapshot_limit_exceeded",
+                SnapshotError::SourceLengthMismatch => "snapshot_source_length_mismatch",
+                SnapshotError::Malformed => "snapshot_malformed",
+                SnapshotError::ProtectionFailed => "snapshot_protection_failed",
+                SnapshotError::Cancelled => "snapshot_cancelled",
+            },
+            _ => self.class(),
+        }
+    }
+}
+
 /// Fixed, non-path-bearing creation admission boundaries.
 #[cfg(windows)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1527,6 +1602,14 @@ impl ConfiguredRootConnection {
     /// Authenticated namespace metadata counts only, never recovery authority.
     pub fn namespace_recovery_summary(&self) -> Result<NamespaceRecoverySummary, BackendError> {
         self.inner.namespace_recovery_summary()
+    }
+
+    /// One existing metadata inspection, retaining only safe typed failure
+    /// classes. Unavailable counts remain unknown, never a healthy zero.
+    pub fn namespace_recovery_diagnostics(
+        &self,
+    ) -> Result<NamespaceRecoverySummary, NamespaceRecoveryDiagnosticError> {
+        self.inner.namespace_recovery_diagnostics()
     }
 
     /// Revoke/drain this retained route before cleaning recorded plaintext.

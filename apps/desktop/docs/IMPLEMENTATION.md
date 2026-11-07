@@ -5189,3 +5189,32 @@ At refresh entry, fixed diagnostic labels record whether the original budget
 had under five or under fifteen seconds remaining. This neither extends that
 budget nor attributes the preceding cost to a particular operation. Actual
 completion and timing still require the same bounded basic file workflow.
+
+The file Prepare worker uses the same existing-only binding pattern for its
+rename/snapshot store. An existing verified root is opened without writes before
+one complete final joint health query under the original native inspection pins.
+Verified absence or unsupported storage retains the original two-query
+initialization path; unsafe storage errors remain failures. Original account,
+root, state path, protector, policy and authorization checks remain, as do owner
+binding, snapshot reservation, protected capture, source oplock/USN checks, body
+verification, conditional send and native completion. This removes one repeated
+full health query per successful existing-store preparation; it does not cache
+healthy results or establish measured transfer acceleration.
+
+
+Windows independent-file admission now distinguishes known active work from
+unavailable bookkeeping in the same lock observation. Active closes, rename
+ownership, create capacity and overlapping paths retain their existing busy
+scheduling. Unknown or unavailable bookkeeping and exhausted claim identities
+return the existing fixed admission refusal instead of silently waiting as if
+another transfer were active. No tracker state, capture ticket, mutation epoch
+or original deadline is reset.
+
+The existing support diagnostic carries an allowlisted failure category through
+its single namespace-history query. A failed query still publishes unavailable
+history and unknown counts; the category neither admits work nor repairs or
+replays history. This avoids losing the reason before support can distinguish a
+busy store, scan limit or other local refusal. Aggregate reconnect uncertainty
+and incomplete historical inventory are not evidence of a current close failure.
+The incomplete native copy did not establish which of these conditions occurred,
+and these source changes do not establish a completed copy or speed improvement.

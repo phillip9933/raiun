@@ -312,6 +312,21 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Read-only storage binding in this SAME prepared account/root context.
+    /// None is verified absence or unsupported; storage verification errors
+    /// must remain Err. This grants no health, capture or dispatch authority.
+    #[cfg(windows)]
+    fn existing_file_rename_store(
+        &self,
+        _scope: &crate::EditJournalScope,
+        _authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>,
+        BackendError,
+    > {
+        Ok(None)
+    }
+
     /// Optional directory journal from this SAME prepared account/root context.
     /// Storage does not grant directory dispatch or native publication authority.
     #[cfg(windows)]
@@ -483,6 +498,16 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     #[cfg(windows)]
     fn namespace_recovery_summary(&self) -> Result<crate::NamespaceRecoverySummary, BackendError> {
         Err(BackendError::Unavailable)
+    }
+
+    /// Same single inspection as the summary, retaining typed support errors.
+    /// Existing fixture implementations need not add a diagnostic adapter.
+    #[cfg(windows)]
+    fn namespace_recovery_diagnostics(
+        &self,
+    ) -> Result<crate::NamespaceRecoverySummary, crate::NamespaceRecoveryDiagnosticError> {
+        self.namespace_recovery_summary()
+            .map_err(crate::NamespaceRecoveryDiagnosticError::Provider)
     }
 
     /// Read-only content-recovery admission check for this exact retained

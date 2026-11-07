@@ -1720,6 +1720,18 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
     }
 
     #[cfg(windows)]
+    fn existing_file_rename_store(
+        &self,
+        scope: &EditJournalScope,
+        authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>,
+        BackendError,
+    > {
+        namespace_storage::prepared_existing_store(self, scope, authorization)
+    }
+
+    #[cfg(windows)]
     fn directory_intent_store(
         &self,
         scope: &EditJournalScope,
@@ -2050,6 +2062,14 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
 
     #[cfg(windows)]
     fn namespace_recovery_summary(&self) -> Result<crate::NamespaceRecoverySummary, BackendError> {
+        self.namespace_recovery_diagnostics()
+            .map_err(|_| BackendError::Unavailable)
+    }
+
+    #[cfg(windows)]
+    fn namespace_recovery_diagnostics(
+        &self,
+    ) -> Result<crate::NamespaceRecoverySummary, crate::NamespaceRecoveryDiagnosticError> {
         let summary = namespace_storage::namespace_history_diagnostics(
             self.namespace_rename.as_ref(),
             self.streamed.as_ref(),
@@ -2062,7 +2082,8 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         let _ = crate::streamed_store::namespace_rename_store::history_unresolved(
             &summary,
             self.namespace_rename.is_some(),
-        )?;
+        )
+        .map_err(crate::NamespaceRecoveryDiagnosticError::HistoryPolicy)?;
         Ok(crate::NamespaceRecoverySummary {
             rename_records: summary.records,
             rename_unresolved: summary.unresolved,

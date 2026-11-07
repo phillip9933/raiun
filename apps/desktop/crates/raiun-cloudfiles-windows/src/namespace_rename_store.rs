@@ -524,6 +524,24 @@ impl FileRenameStore {
         Ok(Arc::new(Self { base }))
     }
 
+    /// Bind only an existing v2 root without creating a quota lock, catalog,
+    /// scope or journal entry. The caller still needs full fresh health checks.
+    #[cfg(windows)]
+    pub(crate) fn open_existing_admitted(
+        state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        scope: EditJournalScope,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+    ) -> Result<Option<Arc<Self>>, StoreError> {
+        validate_scope(&scope)?;
+        policy.validate()?;
+        let Some(root) = windows::existing_root(state, V2_STORE_ROOT)? else {
+            return Ok(None);
+        };
+        let base = SnapshotStore::from_directory(root, scope, protector, policy)?;
+        Self::new(base).map(Some)
+    }
+
     /// Publish a new intent under the existing v2 quota lock. Only the exact
     /// newly created and reopened record returns Fresh; retained history never
     /// supplies dispatch authority.

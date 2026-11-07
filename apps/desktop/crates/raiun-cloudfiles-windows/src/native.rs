@@ -1900,6 +1900,25 @@ impl ConfiguredRootConnection {
             .namespace_recovery_summary()
     }
 
+    pub(super) fn namespace_recovery_diagnostics(
+        &self,
+    ) -> Result<crate::NamespaceRecoverySummary, crate::NamespaceRecoveryDiagnosticError> {
+        use crate::NamespaceRecoveryDiagnosticError as DiagnosticError;
+        if !self.connected {
+            return Err(DiagnosticError::Connection);
+        }
+        let root = self.root.as_ref().ok_or(DiagnosticError::RootIdentity)?;
+        root.verify_identity(true)
+            .map_err(|_| DiagnosticError::RootIdentity)?;
+        root.verify_registered()
+            .map_err(|_| DiagnosticError::RootRegistration)?;
+        self.state
+            .recovery
+            .as_ref()
+            .ok_or(DiagnosticError::MissingProvider)?
+            .namespace_recovery_diagnostics()
+    }
+
     pub(super) fn vault_cleanup_diagnostics(&self) -> crate::VaultCleanupDiagnostics {
         crate::VaultCleanupDiagnostics {
             modified_closes: self
