@@ -132,6 +132,12 @@ impl<T: Send + 'static, R: Send + 'static> Executor<T, R> {
             self.ready.push(result);
         }
     }
+    /// Scheduling only: retain every reply and its outstanding capacity until
+    /// the original owner consumes it through the existing identity checks.
+    pub(crate) fn has_ready(&mut self) -> bool {
+        self.collect();
+        !self.ready.is_empty()
+    }
     /// A wave's metadata phases finish before any native capture is advanced.
     /// Buffered replies retain capacity until their exact owner consumes them.
     pub(crate) fn all_completed(&mut self) -> bool {

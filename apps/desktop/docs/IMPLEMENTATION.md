@@ -5273,6 +5273,21 @@ there is no shared authorization or metadata cache between operations. These
 source-level reductions do not establish the cause or completion of the partial
 Windows copy, or a measured speed improvement.
 
+### Windows ready-result scheduling
+
+The Windows creation owner performs a fully guarded observer poll before checking
+whether an existing SDK completion is ready. When the existing advancement gates
+permit work, a ready completion ends further intake for that tick, avoiding up
+to 63 additional guarded observer polls before its original owner can advance
+it. Collection keeps the reply and
+its capacity slot; existing wave barriers, task identity, currentness, expiry and
+native completion checks remain authoritative. With no ready result, the existing
+64-batch intake bound and all queue limits and ordering remain unchanged. Blocked
+advancement also retains the original intake bound. Terminal observer loss still
+revokes the backend and stops work. This removes avoidable
+owner latency; the actual case-27 timing contribution and cloud outcome remain
+unproven. Expired jobs are not resumed and their deadlines are not reset.
+
 ### Windows drive activity visibility
 
 The Windows native creation driver is separate from the Sync Folders transfer

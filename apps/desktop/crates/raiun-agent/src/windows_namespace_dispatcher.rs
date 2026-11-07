@@ -817,8 +817,25 @@ mod connected {
             }
             // Bound owner-side intake work without limiting transport to one
             // completed batch per idle tick. No candidate/HTTP work runs here.
+            // This snapshot controls intake only. The original post-intake
+            // gates below must still admit advancement using current state.
+            let can_service_create_result = !save_or_command_active
+                && !self.mkdir.as_ref().is_some_and(mkdir::Producer::is_paused)
+                && !connection.namespace_file_operation_pending();
             for _ in 0..64 {
                 if !self.pump_observer(connection, backend, root)? {
+                    break;
+                }
+                // Validate at least one complete original observer batch, then
+                // let an already-returned SDK result reach its original owner
+                // before more guarded intake. Collection neither consumes a
+                // reply nor releases capacity; all later barriers, currentness
+                // and original deadline checks still apply.
+                if can_service_create_result
+                    && workers
+                        .as_deref_mut()
+                        .is_some_and(create::Workers::has_ready)
+                {
                     break;
                 }
             }
