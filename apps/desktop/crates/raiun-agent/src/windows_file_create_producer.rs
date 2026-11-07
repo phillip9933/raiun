@@ -23,6 +23,14 @@ pub(crate) enum Reply {
     Directory(Box<DirectoryCreateReply>),
 }
 impl Task {
+    fn activity_phase(&self) -> &'static str {
+        match self {
+            Self::File(task) => task.activity_phase(),
+            Self::Directory(task) => task.activity_phase(),
+            Self::Vault(_) => "unknown",
+        }
+    }
+
     fn directory_deadline_context(&self) -> Option<Arc<dyn Fn() -> &'static str + Send + Sync>> {
         match self {
             Self::Directory(task) => Some(task.deadline_context()),
@@ -238,6 +246,20 @@ struct Candidate {
 struct Flight {
     id: u64,
     requires_pre_capture_barrier: bool,
+    phase: &'static str,
+    accepted_at: Instant,
+}
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct LaneObservation {
+    pub(crate) kind: &'static str,
+    pub(crate) phase: &'static str,
+    pub(crate) last_wait: &'static str,
+    pub(crate) active: bool,
+    pub(crate) held: bool,
+    pub(crate) deferred: bool,
+    pub(crate) flight: bool,
+    pub(crate) retry: bool,
+    pub(crate) age_since_accepted_ms: Option<u64>,
 }
 struct Lane {
     backend: Weak<OpenCloudPlaceholderBackend>,
@@ -255,6 +277,7 @@ struct Lane {
     ordinary_candidate: bool,
     retry_after_wave: bool,
     prepare_retry_after: Option<Instant>,
+    last_wait: &'static str,
 }
 impl Lane {
     pub(crate) fn new(
@@ -281,6 +304,7 @@ impl Lane {
             ordinary_candidate: false,
             retry_after_wave: false,
             prepare_retry_after: None,
+            last_wait: "unknown",
         }
     }
     pub(crate) fn is_current(
@@ -332,6 +356,7 @@ impl Lane {
         }
     }
     pub(crate) fn stop(&mut self, connection: &ConfiguredRootConnection) {
+        self.last_wait = "stopped";
         self.held = true;
         self.cancel_on_drop.take();
         if let Some(candidate) = &self.candidate {
@@ -440,6 +465,7 @@ impl Lane {
             });
         }
         if collect_only {
+            self.last_wait = "collect_only";
             return Ok(false);
         }
         if let Some(reason) = self.original_job_stop_reason() {
@@ -454,6 +480,7 @@ impl Lane {
         let step = if let Some(flight) = self.flight {
             let id = flight.id;
             let Some(done) = workers.poll_for(id) else {
+                self.last_wait = "own_reply";
                 return Ok(false);
             };
             self.flight = None;
@@ -608,24 +635,29 @@ impl Lane {
                     self.deferred = Some(task);
                     self.retry_after_wave = true;
                     self.prepare_retry_after = Some(Instant::now() + Duration::from_millis(10));
+                    self.last_wait = "prepare_deferred";
                     return Ok(false);
                 }
                 Step::BusyVaultTask(task) => {
                     self.directory_deadline_context = task.directory_deadline_context();
                     self.deferred = Some(task);
+                    self.last_wait = "other_prepare_busy";
                     return Ok(false);
                 }
                 Step::BusyFile => {
                     // A closed-writer retry must not rediscover metadata while
                     // sibling captures are unresolved in the same wave.
                     self.retry_after_wave = self.ordinary_candidate;
+                    self.last_wait = "admission_busy";
                     return Ok(false);
                 }
                 Step::Ordinary => {
                     self.ordinary_candidate = true;
+                    self.last_wait = "ordinary_selected";
                     return Ok(false);
                 }
                 Step::Completed => {
+                    self.last_wait = "completed";
                     self.ordinary_candidate = false;
                     self.candidate = None;
                     self.directory_deadline_context = None;
@@ -646,6 +678,7 @@ impl Lane {
             .prepare_retry_after
             .is_some_and(|deadline| Instant::now() < deadline)
         {
+            self.last_wait = "prepare_retry_delay";
             return Ok(false);
         }
         if let Some(task) = self.deferred.take() {
@@ -654,6 +687,7 @@ impl Lane {
                 return Err(kind_hold!(kind, "executor task kind mismatch").into());
             }
             let requires_pre_capture_barrier = task.requires_pre_capture_barrier();
+            let phase = task.activity_phase();
             match workers.submit(task) {
                 Ok(id) => {
                     // Retain classification only with this exact accepted ID.
@@ -661,10 +695,16 @@ impl Lane {
                     self.flight = Some(Flight {
                         id,
                         requires_pre_capture_barrier,
+                        phase,
+                        accepted_at: Instant::now(),
                     });
                     self.prepare_retry_after = None;
+                    self.last_wait = "accepted";
                 }
-                Err(task) => self.deferred = Some(task),
+                Err(task) => {
+                    self.deferred = Some(task);
+                    self.last_wait = "worker_capacity_or_unavailable";
+                }
             }
         }
         Ok(false)
@@ -684,6 +724,7 @@ impl Drop for Lane {
 pub(crate) struct Producer {
     lanes: Vec<Lane>,
     round_ready: bool,
+    last_wait: &'static str,
 }
 impl Producer {
     pub(crate) fn new(
@@ -708,7 +749,43 @@ impl Producer {
                 })
                 .collect(),
             round_ready: false,
+            last_wait: "unknown",
         }
+    }
+    pub(crate) fn last_wait(&self) -> &'static str {
+        self.last_wait
+    }
+    pub(crate) fn lane_observations(&self) -> Vec<LaneObservation> {
+        let now = Instant::now();
+        self.lanes
+            .iter()
+            .take(super::windows_create_executor::WORKERS)
+            .map(|lane| LaneObservation {
+                kind: match lane.candidate.as_ref().map(|candidate| candidate.kind) {
+                    Some(CreateKind::File) => "file",
+                    Some(CreateKind::Directory) => "directory",
+                    None => "other",
+                },
+                phase: lane
+                    .flight
+                    .map(|flight| flight.phase)
+                    .or_else(|| lane.deferred.as_ref().map(Task::activity_phase))
+                    .unwrap_or("unknown"),
+                last_wait: lane.last_wait,
+                active: lane.active(),
+                held: lane.held,
+                deferred: lane.deferred.is_some(),
+                flight: lane.flight.is_some(),
+                retry: lane.retry_after_wave || lane.prepare_retry_after.is_some(),
+                age_since_accepted_ms: lane.flight.map(|flight| {
+                    u64::try_from(
+                        now.saturating_duration_since(flight.accepted_at)
+                            .as_millis(),
+                    )
+                    .unwrap_or(u64::MAX)
+                }),
+            })
+            .collect()
     }
     pub(crate) fn is_current(
         &self,
@@ -761,6 +838,7 @@ impl Producer {
         self.round_ready = workers.all_completed();
     }
     pub(crate) fn stop(&mut self, connection: &ConfiguredRootConnection) {
+        self.last_wait = "stopped";
         for lane in &mut self.lanes {
             lane.stop(connection);
         }
@@ -798,6 +876,7 @@ impl Producer {
             Some(index) => index,
             None => {
                 if self.active() && !inherit {
+                    self.last_wait = "active_lane_exclusive";
                     return Ok(false);
                 }
                 self.lanes
@@ -821,6 +900,8 @@ impl Producer {
                 .enumerate()
                 .any(|(other, lane)| other != index && lane.active() && !lane.retry_after_wave)
         {
+            self.last_wait = "sibling_drain";
+            self.lanes[index].last_wait = "sibling_drain";
             return Ok(false);
         }
         let reply_ready = match self.lanes[index].flight {
@@ -851,8 +932,11 @@ impl Producer {
         // Prepare, Directory and Vault keep the exact original full barrier.
         // Post-capture advancement still waits for every metadata/health task.
         if !reply_ready {
+            self.last_wait = "metadata_round";
+            lane.last_wait = "metadata_round";
             return Ok(false);
         }
+        self.last_wait = "lane_advance";
         lane.step(
             connection,
             backend,

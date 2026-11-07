@@ -28,6 +28,12 @@ pub(crate) struct Completion<R> {
     pub(crate) id: u64,
     pub(crate) result: Result<R, Failure>,
 }
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct ExecutorActivity {
+    pub(crate) outstanding: usize,
+    pub(crate) collected_ready: usize,
+    pub(crate) uncollected_or_running: Option<usize>,
+}
 pub(crate) struct Executor<T: Send + 'static, R: Send + 'static> {
     sender: Option<mpsc::SyncSender<(u64, T)>>,
     results: mpsc::Receiver<Completion<R>>,
@@ -38,6 +44,15 @@ pub(crate) struct Executor<T: Send + 'static, R: Send + 'static> {
     next: u64,
 }
 impl<T: Send + 'static, R: Send + 'static> Executor<T, R> {
+    /// Last owner-collected state only. Never poll or consume a completion.
+    pub(crate) fn activity_snapshot(&self) -> ExecutorActivity {
+        ExecutorActivity {
+            outstanding: self.outstanding.len(),
+            collected_ready: self.ready.len(),
+            uncollected_or_running: self.outstanding.len().checked_sub(self.ready.len()),
+        }
+    }
+
     pub(crate) fn start(execute: fn(T) -> R) -> Result<Self, std::io::Error> {
         let (sender, receiver) = mpsc::sync_channel::<(u64, T)>(WORKERS);
         let receiver = Arc::new(Mutex::new(receiver));

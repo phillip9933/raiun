@@ -5272,3 +5272,33 @@ keep the original read sequence. Every operation still reads current bytes;
 there is no shared authorization or metadata cache between operations. These
 source-level reductions do not establish the cause or completion of the partial
 Windows copy, or a measured speed improvement.
+
+### Windows drive activity visibility
+
+The Windows native creation driver is separate from the Sync Folders transfer
+engine. Its jobs do not appear in that engine's transfer history or active count.
+The overview now labels that count as Sync Folder activity, and overview and
+Transfers show a separate last-observed drive upload/folder-creation summary.
+Missing observations remain unavailable. Held jobs are shown for review rather
+than counted as running; queue hints are never presented as remaining files.
+
+The existing status and diagnostics responses expose bounded, memory-only
+`windows_drive_activity` observations for the exact current connection, account
+generation and physical root. These contain fixed wait labels, at most four
+creation lanes, accepted-task age and last-collected executor counts. Snapshot
+getters do not poll, drain, scan or advance work. Old connection publications are
+rejected, and changed or unavailable context yields unknown values. Observation
+age and recorded owner-step entry describe the last sample, not process liveness
+or a file-manager copy's completion.
+
+Completed owner drain/tick and existing initial-save sample durations include
+polls and are not wall time or throughput. Initial-save work has its own fixed
+observation label because it takes priority over creation. The existing diagnostic separately times its own namespace
+history query; that duration does not measure an upload. Its activity sample is
+taken before that query and invalidated if context changes. No additional RPC,
+history scan, storage record, scheduling decision, deadline or recovery authority
+is introduced. These observations support finding the unfinished work boundary;
+they do not establish native/cloud completion or the cause of the partial copies.
+Diagnostic observation age is measured at its pre-query capture, excluding the
+history-query duration and response delay. It is not response-time freshness;
+ordinary status observations have no added history query.

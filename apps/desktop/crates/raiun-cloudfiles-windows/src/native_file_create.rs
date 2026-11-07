@@ -642,6 +642,16 @@ impl ReplyKind {
     }
 }
 impl FileCreateTask {
+    /// Fixed diagnostic classification only; no phase advancement or authority.
+    pub fn activity_phase(&self) -> &'static str {
+        match self.kind.as_ref() {
+            Some(TaskKind::Prepare(_)) => "prepare",
+            Some(TaskKind::Send(_)) => "send",
+            Some(TaskKind::Refresh(_)) => "refresh",
+            None => "unknown",
+        }
+    }
+
     /// Scheduling classification only. Prepare must retain the complete wave
     /// barrier before any native capture. No result or mutation authority is
     /// exposed, and an absent/unclassified task retains that barrier.

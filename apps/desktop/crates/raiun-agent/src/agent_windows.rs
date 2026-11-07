@@ -81,6 +81,8 @@ mod windows_vault_requests;
 mod windows_headless;
 #[path = "windows_headless_edits.rs"]
 mod windows_headless_edits;
+#[path = "windows_native_activity.rs"]
+mod windows_native_activity;
 
 #[cfg(all(test, windows, debug_assertions))]
 #[path = "windows_file_rename_caller_native_test.rs"]
@@ -570,6 +572,7 @@ struct ProviderManager {
     // Serializes explicit mount preference with every automatic reconnect.
     mount_preference: Mutex<bool>,
     ordinary_edits: Arc<Mutex<Option<windows_headless_edits::CachedStatus>>>,
+    native_activity: Arc<windows_native_activity::Cache>,
     proxy: windows_proxy::Service,
     bandwidth: windows_bandwidth::Service,
     commands: std::sync::mpsc::SyncSender<ProviderCommand>,
@@ -991,6 +994,8 @@ impl ProviderManager {
         let headless = mount_only();
         let ordinary_edits = Arc::new(Mutex::new(None));
         let worker_ordinary_edits = Arc::clone(&ordinary_edits);
+        let native_activity = Arc::new(windows_native_activity::Cache::default());
+        let worker_native_activity = Arc::clone(&native_activity);
         let (commands, receiver) = std::sync::mpsc::sync_channel(4);
         let connected = Arc::new(AtomicBool::new(false));
         let worker_connected = Arc::clone(&connected);
@@ -1033,6 +1038,7 @@ impl ProviderManager {
                 let mut vault_custody: Option<Arc<windows_vault_custody::WindowsVaultCustody>> = None;
                 let mut retired_vaults: Vec<Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>> = Vec::new();
                 let mut active_binding: Option<ActiveProviderBinding> = None;
+                let mut native_activity_owner: Option<windows_native_activity::Owner> = None;
                 let mut last_vault_cleanup_error: Option<raiun_cloudfiles_windows::Error> = None;
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
                 let mut cleanup_holds = windows_vault_cleanup_holds::PendingCleanupHolds::<PendingNativeVaultCleanup>::new();
@@ -1052,6 +1058,13 @@ impl ProviderManager {
                     };
                     // Sweep on every command and the existing bounded idle tick.
                     cleanup_holds.sweep(Instant::now());
+                    if native_activity_owner.is_some()
+                        && (active_binding.as_ref().is_none_or(|binding| binding.generation != worker_generation.load(Ordering::Acquire))
+                            || connection.is_none() || namespace_dispatcher.is_none() || create_workers.is_none())
+                    {
+                        worker_native_activity.retire();
+                        native_activity_owner = None;
+                    }
                     if active_binding.as_ref().is_some_and(|binding| worker_generation.load(Ordering::Acquire) != binding.generation) {
                         cleanup_holds.clear();
                     }
@@ -1525,8 +1538,12 @@ impl ProviderManager {
                             let result = if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
                                 Err("context_changed")
                             } else if let Some(active) = connection.as_ref() {
+                                let windows_drive_activity = worker_native_activity.snapshot(&binding, &worker_generation, &worker_connected);
                                 let observation = active.vault_cleanup_diagnostics();
-                                let (namespace_history, namespace_history_error) = match active.namespace_recovery_diagnostics() {
+                                let history_started = Instant::now();
+                                let history_result = active.namespace_recovery_diagnostics();
+                                let namespace_history_query_elapsed_ms = u64::try_from(history_started.elapsed().as_millis()).ok();
+                                let (namespace_history, namespace_history_error) = match history_result {
                                     Ok(summary) => (Some(summary), None),
                                     Err(error) => (None, Some(json!({
                                         "boundary": error.boundary(),
@@ -1559,6 +1576,8 @@ impl ProviderManager {
                                 });
                                 Ok(json!({
                                     "namespace_history_status": if namespace_history.is_some() { "available" } else { "unavailable" },
+                                    "namespace_history_query_elapsed_ms": namespace_history_query_elapsed_ms,
+                                    "windows_drive_activity": windows_drive_activity,
                                     "namespace_history_error": namespace_history_error,
                                     "namespace_history": namespace_history,
                                     "modified_closes": observation.modified_closes,
@@ -1853,6 +1872,10 @@ impl ProviderManager {
                                                 connection = Some(active);
                                                 backend = Some(next_backend);
                                                 worker_connected.store(true, Ordering::Release);
+                                                native_activity_owner = worker_native_activity.bind(&candidate_binding);
+                                                if let (Some(owner), Some(dispatcher)) = (native_activity_owner.as_ref(), namespace_dispatcher.as_ref()) {
+                                                    worker_native_activity.publish(owner, &candidate_binding, &worker_generation, &worker_connected, dispatcher.activity_snapshot(create_workers.as_ref()), false, None);
+                                                }
                                                 Ok(())
                                             }
                                             Err(message) => {
@@ -2126,6 +2149,8 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Disconnect(response) => {
+                            worker_native_activity.retire();
+                            native_activity_owner = None;
                             if let Err(error) = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers) {
                                 if let Ok(mut notice) = worker_rename_error.lock() { notice.record(worker_generation.load(Ordering::Acquire),worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD); }
                                 let _ = response.send(Err(error));
@@ -2164,6 +2189,8 @@ impl ProviderManager {
                                 let _ = response.send(Err("The original cached drive changed before reconnect".into()));
                                 continue;
                             }
+                            worker_native_activity.retire();
+                            native_activity_owner = None;
                             if let Err(error) = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers) {
                                 if let Ok(mut notice) = worker_rename_error.lock() { notice.record(worker_generation.load(Ordering::Acquire),worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD); }
                                 let _ = response.send(Err(error));
@@ -2193,6 +2220,8 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Stop(response) => {
+                            worker_native_activity.retire();
+                            native_activity_owner = None;
                             if let Err(error) = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers) {
                                 if let Ok(mut notice) = worker_rename_error.lock() { notice.record(worker_generation.load(Ordering::Acquire),worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD); }
                                 let _ = response.send(Err(error));
@@ -2240,14 +2269,34 @@ impl ProviderManager {
                         }
                     }
                     if let (Some(dispatcher),Some(active),Some(workers))=(namespace_dispatcher.as_mut(),connection.as_ref(),create_workers.as_mut()) {
+                        if let (Some(owner), Some(binding)) = (native_activity_owner.as_ref(), active_binding.as_ref()) {
+                            worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, dispatcher.activity_snapshot(Some(&*workers)), true, None);
+                        }
+                        let owner_started = Instant::now();
                         dispatcher.drain_create(active,workers);
+                        let owner_elapsed = owner_started.elapsed();
+                        if let (Some(owner), Some(binding)) = (native_activity_owner.as_ref(), active_binding.as_ref()) {
+                            worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, dispatcher.activity_snapshot(Some(&*workers)), false, Some(owner_elapsed));
+                        }
                     }
                     let mut dispatched_initial = observer_terminal.is_some();
                     if !dispatched_initial && worker_initial_save_activation.load(Ordering::Acquire) {
                         // Fresh initial-save work retains priority; never scan recovery here.
+                        if let (Some(owner), Some(binding), Some(dispatcher)) = (native_activity_owner.as_ref(), active_binding.as_ref(), namespace_dispatcher.as_ref()) {
+                            let mut activity = dispatcher.activity_snapshot(create_workers.as_ref());
+                            activity.last_wait = "existing_initial_save";
+                            worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, activity, true, None);
+                        }
+                        let owner_started = Instant::now();
                         let result = dispatch_one_initial_edit_checked(
                             connection.as_ref(), backend.as_ref(), active_binding.as_ref(),
                             &worker_generation);
+                        let owner_elapsed = owner_started.elapsed();
+                        if let (Some(owner), Some(binding), Some(dispatcher)) = (native_activity_owner.as_ref(), active_binding.as_ref(), namespace_dispatcher.as_ref()) {
+                            let mut activity = dispatcher.activity_snapshot(create_workers.as_ref());
+                            activity.last_wait = "existing_initial_save";
+                            worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, activity, false, Some(owner_elapsed));
+                        }
                         dispatched_initial = !matches!(&result, Ok(None));
                         if dispatched_initial {
                             let summary = result.map_err(|failure| failure.message().to_owned());
@@ -2287,9 +2336,17 @@ impl ProviderManager {
                         }
                         if let (Some(producer), Some(active), Some(backend), Some(binding)) =
                             (namespace_dispatcher.as_mut(),connection.as_mut(),backend.as_ref(),active_binding.as_ref()) {
+                            if let Some(owner) = native_activity_owner.as_ref() {
+                                worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, producer.activity_snapshot(create_workers.as_ref()), true, None);
+                            }
+                            let owner_started = Instant::now();
                             let result=if let Some(workers)=create_workers.as_mut() {
                                 producer.tick_with_create(active,backend,binding.identity,false,Some(workers))
                             } else {producer.tick(active,backend,binding.identity,false)};
+                            let owner_elapsed = owner_started.elapsed();
+                            if let Some(owner) = native_activity_owner.as_ref() {
+                                worker_native_activity.publish(owner, binding, &worker_generation, &worker_connected, producer.activity_snapshot(create_workers.as_ref()), false, Some(owner_elapsed));
+                            }
                             if let Err(message) = result {
                                 if let Ok(mut notice) = worker_rename_error.lock() {
                                     let current_generation = worker_generation.load(Ordering::Acquire);
@@ -2340,6 +2397,7 @@ impl ProviderManager {
                         }
                     }
                 }
+                worker_native_activity.retire();
                 let create_drained = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers).is_ok();
                 cleanup_holds.clear();
                 worker_jobs.cancel_all();
@@ -2375,6 +2433,7 @@ impl ProviderManager {
             directory_phase_test_activation: AtomicBool::new(false),
             mount_preference: Mutex::new(!headless),
             ordinary_edits,
+            native_activity,
             proxy: windows_proxy::Service::default(),
             bandwidth: windows_bandwidth::Service::default(),
             commands,
@@ -3278,6 +3337,7 @@ impl ProviderManager {
     }
 
     fn authorize_generation(&self, generation: u64) {
+        self.native_activity.retire();
         if let Ok(mut registry) = self.account_client.lock()
             && registry
                 .as_ref()
@@ -4195,6 +4255,7 @@ impl WindowsAgent {
                     .map_err(|_| "Account state is unavailable")?;
                 let generation = state.active_generation;
                 let configuration = state.root_configuration.clone();
+                let windows_drive_activity = windows_native_activity::status(self, &state);
                 let binding = configuration.as_ref().and_then(|configuration| {
                     let owner = configuration.registration_ownership.as_ref()?;
                     Some(ActiveProviderBinding {
@@ -4209,6 +4270,7 @@ impl WindowsAgent {
                     })
                 });
                 let mut value = json!({
+                    "windows_drive_activity": &windows_drive_activity,
                     "schema_version": 1,
                     "app_version": env!("CARGO_PKG_VERSION"),
                     "target_os": std::env::consts::OS,
@@ -4248,6 +4310,14 @@ impl WindowsAgent {
                 {
                     cleanup = None;
                     cleanup_status = "context_changed";
+                }
+                if !windows_native_activity::still_current(self, &state, &windows_drive_activity) {
+                    value["windows_drive_activity"] =
+                        json!(windows_native_activity::Observation::unavailable());
+                    if let Some(cleanup) = cleanup.as_mut() {
+                        cleanup["windows_drive_activity"] =
+                            json!(windows_native_activity::Observation::unavailable());
+                    }
                 }
                 value["runtime"]["vault_cleanup_status"] = json!(cleanup_status);
                 value["runtime"]["vault_cleanup"] = cleanup.unwrap_or(Value::Null);
@@ -4525,6 +4595,7 @@ impl WindowsAgent {
         status["renewing_sign_in"] =
             json!(state.routine_refresh_generation == Some(state.active_generation));
         windows_headless::annotate_status(&mut status, runtime_mode()?);
+        status["windows_drive_activity"] = json!(windows_native_activity::status(self, &state));
         status["vault_move_supported"] = json!(WINDOWS_VAULT_SESSIONS_ENABLED);
         status["vault_copy_verify_supported"] = json!(WINDOWS_VAULT_SESSIONS_ENABLED);
         if mount_only() {

@@ -729,6 +729,16 @@ enum DirectoryReplyKind {
     ),
 }
 impl DirectoryCreateTask {
+    /// Fixed diagnostic classification only; no phase advancement or authority.
+    pub fn activity_phase(&self) -> &'static str {
+        match self.kind.as_deref() {
+            Some(DirectoryTaskKind::Prepare { .. }) => "prepare",
+            Some(DirectoryTaskKind::Send(..)) => "send",
+            Some(DirectoryTaskKind::Refresh(_)) => "refresh",
+            Some(DirectoryTaskKind::Preflight(..)) | None => "unknown",
+        }
+    }
+
     /// Fixed progress observation only. The caller must independently observe
     /// its ORIGINAL job expiry; this grants no dispatch or completion authority.
     pub fn deadline_context(&self) -> Arc<dyn Fn() -> &'static str + Send + Sync> {

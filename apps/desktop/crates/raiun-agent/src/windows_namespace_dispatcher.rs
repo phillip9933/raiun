@@ -452,6 +452,18 @@ mod connected {
         pub(crate) directory_offers: u64,
         pub(crate) provider_directory_skipped: bool,
     }
+    #[derive(Clone, serde::Serialize)]
+    pub(crate) struct ActivitySnapshot {
+        pub(crate) last_wait: &'static str,
+        pub(crate) held: bool,
+        pub(crate) waiting_batches: usize,
+        pub(crate) queued_hints: usize,
+        pub(crate) cursor_remaining: usize,
+        pub(crate) pending_files: usize,
+        pub(crate) create_last_wait: Option<&'static str>,
+        pub(crate) lanes: Vec<create::LaneObservation>,
+        pub(crate) executor: Option<super::super::windows_create_executor::ExecutorActivity>,
+    }
     pub(crate) struct Dispatcher {
         rename: Option<Box<rename::Producer>>,
         mkdir: Option<mkdir::Producer>,
@@ -466,6 +478,7 @@ mod connected {
         hold_reason: Option<create::FailureContext>,
         pending_files: Vec<(Vec<String>, u64)>,
         file_wave_started: bool,
+        last_wait: &'static str,
         #[cfg(all(test, debug_assertions))]
         fixture_directory: bool,
         #[cfg(all(test, debug_assertions))]
@@ -533,6 +546,7 @@ mod connected {
                 hold_reason: None,
                 pending_files: Vec::new(),
                 file_wave_started: false,
+                last_wait: "unknown",
                 #[cfg(all(test, debug_assertions))]
                 fixture_directory: false,
                 #[cfg(all(test, debug_assertions))]
@@ -544,6 +558,26 @@ mod connected {
         pub(crate) fn with_create(mut self, producer: create::Producer) -> Self {
             self.create = Some(producer);
             self
+        }
+        /// Copy existing owner observations only; never poll, drain or advance.
+        pub(crate) fn activity_snapshot(
+            &self,
+            workers: Option<&create::Workers>,
+        ) -> ActivitySnapshot {
+            ActivitySnapshot {
+                last_wait: self.last_wait,
+                held: self.cursor.held || self.hold_reason.is_some(),
+                waiting_batches: self.waiting_batches.len(),
+                queued_hints: self.queued_hints,
+                cursor_remaining: self.cursor.work.len().saturating_sub(self.cursor.index),
+                pending_files: self.pending_files.len(),
+                create_last_wait: self.create.as_ref().map(create::Producer::last_wait),
+                lanes: self
+                    .create
+                    .as_ref()
+                    .map_or_else(Vec::new, create::Producer::lane_observations),
+                executor: workers.map(|workers| workers.activity_snapshot()),
+            }
         }
         pub(crate) fn stop_create(&mut self, connection: &ConfiguredRootConnection) {
             if let Some(create) = &mut self.create {
@@ -592,6 +626,7 @@ mod connected {
             self.rename.as_deref()
         }
         pub(crate) fn hold(&mut self) {
+            self.last_wait = "held";
             self.hold_reason.get_or_insert(HOLD.into());
             self.cursor.hold();
             self.batch = None;
@@ -646,6 +681,7 @@ mod connected {
             // A held owner is never polled or replayed. Preserve its original
             // fixed reason instead of replacing it with generic HOLD next tick.
             if let Some(reason) = self.hold_reason {
+                self.last_wait = "held";
                 return Err(reason.message());
             }
             let result =
@@ -775,6 +811,7 @@ mod connected {
             save_or_command_active: bool,
             mut workers: Option<&mut create::Workers>,
         ) -> Result<(), &'static str> {
+            self.last_wait = "advancing";
             if !self.current(backend, root) {
                 return Err(HOLD);
             }
@@ -786,10 +823,12 @@ mod connected {
                 }
             }
             if connection.namespace_file_operation_pending() {
+                self.last_wait = "native_file_operation_pending";
                 return Ok(());
             }
             if save_or_command_active || self.mkdir.as_ref().is_some_and(mkdir::Producer::is_paused)
             {
+                self.last_wait = "save_or_command_paused";
                 return Ok(());
             }
             if let (Some(create), Some(workers)) = (&mut self.create, workers.as_deref_mut()) {
@@ -848,6 +887,7 @@ mod connected {
                     // A directory, rename, parent change, or next batch cannot
                     // overtake unfinished original captures from this wave.
                     if !self.pending_files.is_empty() {
+                        self.last_wait = "file_wave_pending";
                         return Ok(());
                     }
                     self.file_wave_started = false;
@@ -858,6 +898,7 @@ mod connected {
             }
             if self.batch.is_none() {
                 let Some((batch, weight)) = self.waiting_batches.pop_front() else {
+                    self.last_wait = "no_batch";
                     return Ok(());
                 };
                 let NotificationBatch::Hints(hints) = &batch else {
@@ -952,6 +993,7 @@ mod connected {
                 )
                 .map_err(plan_hold)?;
                 if work.is_empty() {
+                    self.last_wait = "batch_has_no_work";
                     return Ok(());
                 }
                 self.cursor.admit(work).map_err(plan_hold)?;
@@ -1208,6 +1250,7 @@ mod connected {
             if !self.cursor.pending() && self.pending_files.is_empty() {
                 self.batch = None;
             }
+            self.last_wait = "awaiting_progress";
             Ok(())
         }
     }
