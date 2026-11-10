@@ -1191,3 +1191,18 @@ body{min-width:0}
 :root[data-theme] .sharing-section-intro { padding: 4px 0; border: 0; border-radius: 0; background: transparent; }
 
 .pending-write-copy .pending-write-guidance{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45;margin-top:3px}
+
+/* Single-item Settings cards keep their description and action together. */
+.settings-card-single .settings-single-row{padding:0;flex-wrap:wrap;align-items:center}
+.settings-single-row>.settings-heading{flex:1 1 300px;min-width:0;align-items:flex-start;padding:0;border:0}
+.settings-single-row .settings-icon{flex-shrink:0}
+.settings-single-row .settings-heading>div{min-width:0}
+.settings-single-row .settings-heading b{margin-top:8px}
+.settings-single-row small{white-space:normal;overflow:visible;text-overflow:clip}
+
+/* Transfers has one workspace at a time; activity filters belong to Activity. */
+.transfers-workspace .transfer-workspace-tabs{flex-wrap:wrap;gap:8px;margin-bottom:18px}
+.transfers-workspace .transfer-workspace-tabs .filter-tab{display:inline-flex;align-items:center;gap:8px;min-height:44px;font-size:14px}
+.transfers-workspace .transfer-activity-filters{gap:16px;margin-bottom:12px}
+.transfers-workspace .transfer-activity-filters .filter-tab{font-size:12px;padding-bottom:9px}
+.transfers-workspace [data-render-region]:empty{display:none}

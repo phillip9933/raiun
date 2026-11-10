@@ -112,8 +112,8 @@ export function pendingWritePresentation(item: PendingOfflineWrite): { label: st
       staged: { label: 'Saved locally', help: 'A local copy is saved. It has not been queued for upload.' },
       ready: { label: 'Queued for upload', help: 'The file is queued. Cloud delivery is not confirmed.' },
       claimed: { label: 'Uploading', help: 'An upload attempt is in progress. Cloud delivery is not confirmed.' },
-      uncertain: { label: 'Upload not confirmed', help: 'Raiun could not verify this file on the server. Your saved file is kept on this PC. It will not be resent automatically, and this file and its parent folders stay protected from deletion.' },
-      conflict: { label: 'Needs review', help: 'The local copy is retained for review. This create will not be retried automatically.' }
+      uncertain: { label: 'Stopped · needs review', help: 'This upload is already stopped and will not retry automatically. Cloud delivery is unknown. Check whether the cloud copy matches, or save a backup outside Raiun. The saved file and its parent folders remain protected from deletion until resolved.' },
+      conflict: { label: 'Stopped · needs review', help: 'This upload is stopped and will not retry automatically. Compare the cloud copy or save a separate backup. Cancelling cannot undo a file that may already have reached the cloud; the saved copy remains protected.' }
     };
     const status = presentation[item.create_state];
     return status;

@@ -6,6 +6,7 @@ import { open, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import './raiun-tokens.css';
+import { patchRenderRegions } from './render-regions';
 import { transferPresentation, transferTabSummary, transferCounts, type TransferTab } from './transfer-presentation';
 import { parseCacheLimit, cacheLimitDraft, formatStorageBytes, validateCacheLimitReply, type CacheLimitUnit } from './offline-storage';
 import { pickerUsesModal } from './guest-sharing';
@@ -56,6 +57,7 @@ type RecoveryCopy = { spool_key: string; space_id: string | null; remote_path: s
 type RecoveryPage = { items: RecoveryCopy[]; next_after: string | null; scanned_entries: number; warning_count: number; unrecognized_entries: number; truncated: boolean };
 type EncryptedEditRecoveryItem = { record_id: string | null; bytes: number | null; state: 'building' | 'pending' | 'uncertain' | 'committed' | 'clean' | 'corrupt'; warning: string | null };
 type EncryptedEditRecoveryPage = { items: EncryptedEditRecoveryItem[]; next_after: string | null; scanned_entries: number; warning_count: number; truncated: boolean; counts: { building: number; pending: number; uncertain: number; committed: number; clean: number; corrupt: number } };
+type TransfersWorkspace = 'activity' | 'saved' | 'encrypted';
 type Transfer = { id: number; origin?: string | null; space_id?: string | null; path?: string | null; direction?: string | null; operation?: string | null; duration_ms?: number | null; message?: string | null; state?: string | null; bytes_total?: number | null; bytes_done?: number | null; error?: string | null; updated_at?: number | null };
 type RemoteEntry = { id?: string; etag?: string; path: string; directory: boolean; size?: number; writable?: boolean; encrypted?: boolean; windows_portability_warnings?: string[] };
 type VaultMountWriteUnavailableReason = 'vault_locked' | 'route_not_installed' | 'route_read_only' | 'drive_not_mounted' | 'private_spool_unavailable' | 'write_backend_unavailable' | 'offline_read_only' | 'offline_existing_file_overwrite_only';
@@ -110,7 +112,7 @@ let appVersionLabel = isTauri() ? 'Loading…' : 'Browser layout preview';
 const offlineUi = { policies: new Map<string, OfflinePolicy>(), availabilityStates: new Map<string, OfflineAvailabilityState>(), policyLoading: new Set<string>(), policySaving: new Set<string>(), folderPolicies: new Map<string, 'recent' | 'cloud_only'>(), folderPolicyLoading: new Map<string, symbol>(), folderPolicySaving: new Map<string, symbol>(), folderListing: null as { epoch: number; generation: number; spaceId: string; path: string } | null, pins: new Map<string, PersistedOfflinePin[]>(), pinsLoading: new Set<string>(), pinsRemoving: new Set<string>(), pin: null as OfflinePinStatus | null, error: '', pollTimer: 0 as number };
 const offlineWorkspaceUi = { view: 'browse' as 'browse' | 'storage', windowsKind: 'folders' as 'folders' | 'files', disclosureScope: '', expanded: new Set<string>() };
 const pairExclusionsUi = { open: new Set<string>(), edits: new Map<string, PairSettingsDraft>(), drafts: new Map<string, string>(), kinds: new Map<string, FolderExclusionKind>(), errors: new Map<string, string>(), busy: new Set<string>() };
-const pendingWritesUi = { authGeneration: null as number | null, accountScope: null as string | null, items: [] as PendingOfflineWrite[], expandedScopes: new Set<string>(), nextAfter: null as string | null, pendingCount: 0, conflictCount: 0, truncated: false, loaded: false, loading: false, refreshQueued: false, error: '', accountEpoch: -1, generation: 0, retryingSpaces: new Set<string>(), checkingUploads: new Set<string>(), uploadCheckMessages: new Map<string, string>(), exportingWrites: new Set<string>(), reconcileJobs: new Map<string, { job_id: string; space_id: string; accountEpoch: number }>(), retryTimers: new Map<string, number>() };
+const pendingWritesUi = { authGeneration: null as number | null, accountScope: null as string | null, items: [] as PendingOfflineWrite[], expandedScopes: new Set<string>(), nextAfter: null as string | null, pendingCount: 0, conflictCount: 0, truncated: false, loaded: false, loading: false, refreshQueued: false, error: '', accountEpoch: -1, generation: 0, retryingSpaces: new Set<string>(), checkingUploads: new Set<string>(), uploadCheckMessages: new Map<string, string>(), uploadCheckOutcomes: new Map<string, 'missing' | 'different' | 'unavailable'>(), stoppingSpaces: new Set<string>(), exportingWrites: new Set<string>(), reconcileJobs: new Map<string, { job_id: string; space_id: string; accountEpoch: number; authGeneration: number; cancelRequested?: boolean }>(), retryTimers: new Map<string, number>() };
 const encryptedRetryLatestUi = { scopes: [] as { key: string; spaceId: string; rootResourceId: string }[], scopesTruncated: false, discoveryLoading: false, discoveryError: '', statuses: new Map<string, VaultEditLatestResult>(), errors: new Map<string, string>(), loading: new Set<string>(), accountEpoch: -1, generation: 0, timer: 0 as number, running: false };
 const windowsRecoveryController = new WindowsRecoveryController();
 const windowsOfflineFileController = new WindowsOfflineFileController();
@@ -144,8 +146,8 @@ type InterruptedCreateRetryUi = { key: string; spaceId: string; rootResourceId: 
 const interruptedCreateRetryUi: { job: InterruptedCreateRetryUi | null; timer: number; generation: number } = { job: null, timer: 0, generation: 0 };
 const cachedVaultRootsUi = { roots: [] as CachedVaultRoot[], nextAfter: null as CachedVaultRootsPage['next_after'], truncated: false, loading: false, error: '', selected: '', generation: 0, accountEpoch: -1 };
 
-const state: { page: Page; status: Status | null; statusErrorDismissed: string; agentReachable: boolean; pairs: Pair[]; transfers: Transfer[]; conflicts: Record<string, ConflictPage>; resolvingConflict: boolean; recoveryPage: RecoveryPage | null; recoveryLoading: boolean; recoveryError: string; encryptedEditRecoveryPage: EncryptedEditRecoveryPage | null; encryptedEditRecoveryLoading: boolean; encryptedEditRecoveryError: string; spaces: Space[]; spacesServer: string | null; spacesLoading: boolean; spacesError: string; transferFilter: string; busy: boolean; addOpen: boolean; localPath: string; spaceId: string; remotePath: string; folderDirection: FolderDirection; existingCopyHandling: 'update_safe' | 'review'; folderAdvancedOpen: boolean; mediaFilter: MediaFilterValue; folderExclusions: FolderExclusion[]; folderExclusionKind: FolderExclusionKind; folderExclusionDraft: string; folderExclusionError: string; mediaOrganization: MediaOrganizationValue; mediaInterval: string; vaultBinding: VaultBinding | null; vaultWritable: boolean; vaultDialog: VaultDialogState | null; vaultGeneration: number; vaultAccessOpen: boolean; vaultAccessSpaceId: string; pickerPurpose: 'pair' | 'encrypted_access' | 'offline' | 'guest'; pickerGeneration: number; mode: SyncMode; pickerOpen: boolean; pickerPath: string; pickerEntries: RemoteEntry[]; pickerError: string; pickerWritable: Record<string, boolean>; pickerFolderName: string; pickerCreatingFolder: boolean; accounts: Account[]; removedAccounts: RemovedAccount[]; accountRemovalSupported: boolean; selectedAccount: string; accountEpoch: number; accountSwitching: boolean; accountsLoading: boolean; accountsError: string; accountSwitchTarget: string; mutationBusy: number; nativeDialogBusy: boolean; addAccountOpen: boolean; addAccountStep: 'details' | 'waiting'; addAccountLabel: string; addAccountRoot: string; addAccountServer: string; addAccountClientId: string; addAccountAuthMessage: string; addAccountAuthStarted: boolean; addAccountError: string; addAccountCreatedId: string; addAccountBusy: boolean; spaceActionBusy: Record<string, 'pause' | 'sync' | 'disconnect'>; message: string; error: string; autostart: boolean | null; server: string; serverEdited: boolean; statusServer: string; clientId: string; clientIdEditedServer: string | null; clientIdServer: string } = {
-  page: 'overview', status: null, statusErrorDismissed: '', agentReachable: false, pairs: [], transfers: [], spaces: [], spacesServer: null, spacesLoading: false, spacesError: '', transferFilter: 'active', busy: false, addOpen: false,
+const state: { page: Page; status: Status | null; statusErrorDismissed: string; agentReachable: boolean; pairs: Pair[]; transfers: Transfer[]; conflicts: Record<string, ConflictPage>; resolvingConflict: boolean; recoveryPage: RecoveryPage | null; recoveryLoading: boolean; recoveryError: string; encryptedEditRecoveryPage: EncryptedEditRecoveryPage | null; encryptedEditRecoveryLoading: boolean; encryptedEditRecoveryError: string; spaces: Space[]; spacesServer: string | null; spacesLoading: boolean; spacesError: string; transferWorkspace: TransfersWorkspace; transferFilter: string; busy: boolean; addOpen: boolean; localPath: string; spaceId: string; remotePath: string; folderDirection: FolderDirection; existingCopyHandling: 'update_safe' | 'review'; folderAdvancedOpen: boolean; mediaFilter: MediaFilterValue; folderExclusions: FolderExclusion[]; folderExclusionKind: FolderExclusionKind; folderExclusionDraft: string; folderExclusionError: string; mediaOrganization: MediaOrganizationValue; mediaInterval: string; vaultBinding: VaultBinding | null; vaultWritable: boolean; vaultDialog: VaultDialogState | null; vaultGeneration: number; vaultAccessOpen: boolean; vaultAccessSpaceId: string; pickerPurpose: 'pair' | 'encrypted_access' | 'offline' | 'guest'; pickerGeneration: number; mode: SyncMode; pickerOpen: boolean; pickerPath: string; pickerEntries: RemoteEntry[]; pickerError: string; pickerWritable: Record<string, boolean>; pickerFolderName: string; pickerCreatingFolder: boolean; accounts: Account[]; removedAccounts: RemovedAccount[]; accountRemovalSupported: boolean; selectedAccount: string; accountEpoch: number; accountSwitching: boolean; accountsLoading: boolean; accountsError: string; accountSwitchTarget: string; mutationBusy: number; nativeDialogBusy: boolean; addAccountOpen: boolean; addAccountStep: 'details' | 'waiting'; addAccountLabel: string; addAccountRoot: string; addAccountServer: string; addAccountClientId: string; addAccountAuthMessage: string; addAccountAuthStarted: boolean; addAccountError: string; addAccountCreatedId: string; addAccountBusy: boolean; spaceActionBusy: Record<string, 'pause' | 'sync' | 'disconnect'>; message: string; error: string; autostart: boolean | null; server: string; serverEdited: boolean; statusServer: string; clientId: string; clientIdEditedServer: string | null; clientIdServer: string } = {
+  page: 'overview', status: null, statusErrorDismissed: '', agentReachable: false, pairs: [], transfers: [], spaces: [], spacesServer: null, spacesLoading: false, spacesError: '', transferWorkspace: 'activity', transferFilter: 'all', busy: false, addOpen: false,
   conflicts: {}, resolvingConflict: false, recoveryPage: null, recoveryLoading: false, recoveryError: '', encryptedEditRecoveryPage: null, encryptedEditRecoveryLoading: false, encryptedEditRecoveryError: '', localPath: '', spaceId: '', remotePath: '', folderDirection: 'both_ways', existingCopyHandling: 'update_safe', folderAdvancedOpen: false, mediaFilter: 'all', folderExclusions: [], folderExclusionKind: 'path', folderExclusionDraft: '', folderExclusionError: '', mediaOrganization: 'preserve_relative_path', mediaInterval: '3600', vaultBinding: null, vaultWritable: false, vaultDialog: null, vaultGeneration: 0, vaultAccessOpen: false, vaultAccessSpaceId: '', pickerPurpose: 'pair', pickerGeneration: 0, mode: 'two_way', pickerOpen: false, pickerPath: '/', pickerEntries: [], pickerError: '', pickerWritable: {}, pickerFolderName: '', pickerCreatingFolder: false, accounts: [], removedAccounts: [], accountRemovalSupported: false, selectedAccount: '', accountEpoch: 0, accountSwitching: false, accountsLoading: false, accountsError: '', accountSwitchTarget: '', mutationBusy: 0, nativeDialogBusy: false, addAccountOpen: false, addAccountStep: 'details', addAccountLabel: '', addAccountRoot: '', addAccountServer: '', addAccountClientId: '', addAccountAuthMessage: '', addAccountAuthStarted: false, addAccountError: '', addAccountCreatedId: '', addAccountBusy: false, spaceActionBusy: {}, message: '', error: '', autostart: null, server: '', serverEdited: false, statusServer: '', clientId: '', clientIdEditedServer: null, clientIdServer: ''
 };
 const sharingWorkspace = new SharingController({
@@ -184,6 +186,8 @@ let unlockIntentInitializationReady = false;
 const profileIndependentActions = new Set(['accounts', 'account_add', 'account_select', 'account_restore']);
 let renderedPage: Page | null = null;
 let renderedAccount = '';
+let renderedAccountEpoch = -1;
+let renderedAuthGeneration: number | null = null;
 let lastRenderedMarkup = '';
 type VaultDialogFocusReturn = {
   accountEpoch: number;
@@ -859,7 +863,7 @@ function render() {
     : null;
   const focusedOfflineSummary = sameView && app.contains(active) && active instanceof HTMLElement && active.tagName === 'SUMMARY'
     ? { key: active.parentElement?.dataset.offlineDisclosure, epoch: state.accountEpoch, profile: state.selectedAccount } : null;
-  const stableButtonFocusKeys = ['action', 'page', 'accountId', 'pairId', 'spaceId', 'writeId', 'rootResourceId', 'vaultPinRemove', 'vaultPinStart', 'offlineView', 'offlineKind', 'loadOfflinePolicy', 'pinOffline', 'unpinOffline', 'loadFolderPolicy', 'setFolderPolicy', 'folderPath', 'folderListingPath', 'folderCurrent', 'keepOfflineFile', 'offlineOptions', 'sharingAction', 'sharingId', 'sharingItemId', 'sharingRecipientId', 'sharingSection', 'sharingInventory', 'sharingMethod'];
+  const stableButtonFocusKeys = ['action', 'page', 'accountId', 'pairId', 'spaceId', 'writeId', 'rootResourceId', 'vaultPinRemove', 'vaultPinStart', 'offlineView', 'offlineKind', 'loadOfflinePolicy', 'pinOffline', 'unpinOffline', 'loadFolderPolicy', 'setFolderPolicy', 'folderPath', 'folderListingPath', 'folderCurrent', 'keepOfflineFile', 'offlineOptions', 'sharingAction', 'sharingId', 'sharingItemId', 'sharingRecipientId', 'sharingSection', 'sharingInventory', 'sharingMethod', 'transferWorkspace', 'filter'];
   const focusedButton = app.contains(active) && active instanceof HTMLButtonElement
     && (!!active.id || stableButtonFocusKeys.some(key => key in active.dataset))
     ? {
@@ -887,7 +891,7 @@ function render() {
   const nav = [['overview', 'Overview', 'overview'], ['folders', 'Sync Folders', 'folders'], ['offline', 'Offline files', 'download'], ['encrypted', 'Encrypted files', 'lock'], ['guest', 'Sharing', 'users'], ['transfers', 'Transfers', 'transfers'], ['settings', 'Settings', 'settings']] as const;
   const markup = `
     <div class="shell">
-      <aside class="sidebar">
+      <aside class="sidebar" data-render-region="sidebar">
         <div class="brand"><img class="brand-logo" src="${raiunLogo}" alt="" /><div><strong>raiun</strong><span>DESKTOP</span></div></div>
         <section class="account-section" aria-label="Accounts">
           <div class="side-label">YOUR ACCOUNTS</div>
@@ -905,7 +909,7 @@ function render() {
         <div class="sidebar-bottom"><button class="agent-status agent-status-toggle" data-action="toggle-pause" ${reachable && connected && featureAvailable('pause_supported') ? '' : 'disabled'} aria-label="${state.status?.paused ? 'Resume sync' : 'Pause sync'}"><span class="status-mark ${connected && providerAvailable(state.status?.provider_supported) ? 'online' : 'offline'}">${svg(connected && providerAvailable(state.status?.provider_supported) ? (state.status?.paused ? 'play' : 'pause') : 'alert')}</span><span class="agent-status-copy"><b>${connection === 'unavailable' ? 'Agent unavailable' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'Reconnecting sign-in' : 'Working offline' : connection === 'sign_in' ? 'Sign-in needed' : !providerAvailable(state.status?.provider_supported) ? 'Drive unavailable' : !featureAvailable('pause_supported') ? 'Drive connected' : (state.status?.paused ? 'Sync paused' : 'Sync running')}</b><small>${!providerAvailable(state.status?.provider_supported) ? 'Windows drive support is not enabled' : connection === 'unavailable' ? 'Waiting for Raiun agent' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'Retrying saved sign-in' : 'Reconnecting to server' : connection === 'sign_in' ? 'Connect your OpenCloud account' : !featureAvailable('pause_supported') ? 'Cloud drive available' : (state.status?.paused ? 'Click to resume' : 'Click to pause')}</small></span></button><div class="version">RAIUN DESKTOP <span id="app-version">${esc(appVersionLabel)}</span></div></div>
       </aside>
       <main class="main-area">
-        <header class="topbar ${noAccountsAvailable() ? '' : 'selected-account-accent'}"><div class="topbar-account" aria-label="Selected account" aria-live="polite">${!noAccountsAvailable() ? accountAvatarMarkup(state.selectedAccount, state.status?.auth_generation) : ''}<b>${noAccountsAvailable() ? 'No account selected' : state.accountSwitching && targetAccount ? `Switching to ${esc(targetAccount.label)}…` : esc(selectedAccountLabel())}</b></div><div class="top-actions"><button class="icon-button" id="refresh" aria-label="Refresh status" title="Refresh">${svg('refresh')}</button></div></header>
+        <header data-render-region="topbar" class="topbar ${noAccountsAvailable() ? '' : 'selected-account-accent'}"><div class="topbar-account" aria-label="Selected account" aria-live="polite">${!noAccountsAvailable() ? accountAvatarMarkup(state.selectedAccount, state.status?.auth_generation) : ''}<b>${noAccountsAvailable() ? 'No account selected' : state.accountSwitching && targetAccount ? `Switching to ${esc(targetAccount.label)}…` : esc(selectedAccountLabel())}</b></div><div class="top-actions"><button class="icon-button" id="refresh" aria-label="Refresh status" title="Refresh">${svg('refresh')}</button></div></header>
         <section class="content">${pageMarkup()}</section>
       </main>
     </div>
@@ -918,9 +922,14 @@ function render() {
     ${state.vaultDialog ? vaultDialog() : ''}
     ${state.vaultAccessOpen && state.page !== 'encrypted' ? encryptedAccessModal() : ''}`;
   if (markup !== lastRenderedMarkup) {
-    app.innerHTML = markup;
+    const canPatchTransfers = sameView && state.page === 'transfers'
+      && renderedAccountEpoch === state.accountEpoch
+      && renderedAuthGeneration === (state.status?.auth_generation ?? null);
+    if (!canPatchTransfers || !patchRenderRegions(app, lastRenderedMarkup, markup, bind)) {
+      app.innerHTML = markup;
+      bind();
+    }
     lastRenderedMarkup = markup;
-    bind();
   }
   if (sameView) {
     const main = app.querySelector<HTMLElement>('.main-area');
@@ -932,6 +941,8 @@ function render() {
   }
   renderedPage = state.page;
   renderedAccount = state.selectedAccount;
+  renderedAccountEpoch = state.accountEpoch;
+  renderedAuthGeneration = state.status?.auth_generation ?? null;
   if (sameView && focusedInput) {
     const replacement = document.getElementById(focusedInput.id);
     if (replacement instanceof HTMLInputElement || replacement instanceof HTMLTextAreaElement) {
@@ -1346,19 +1357,25 @@ function pendingOfflineWritesSection() {
     const spacePaused = state.status?.paused_space_ids?.includes(spaceId) === true;
     const pauseReason = globallyPaused ? 'Sync is paused. Resume it to retry uploads.' : spacePaused ? 'Folder sync is paused for this Space. Resume it to retry uploads.' : '';
     const retryDisabled = !state.status?.connected || pendingWritesUi.retryingSpaces.has(spaceId) || !!pauseReason;
+    const retryJob = pendingWritesUi.reconcileJobs.get(spaceId);
+    const stopping = pendingWritesUi.stoppingSpaces.has(spaceId) || retryJob?.cancelRequested === true;
+    const stopRetry = retryJob ? `<button class="button subtle" data-action="stop-pending-retry" data-space-id="${esc(spaceId)}" title="Stop this retry batch. An upload already in progress may finish; saved local files are kept." ${stopping || state.accountSwitching || !state.agentReachable || state.status?.auth_generation !== retryJob.authGeneration ? 'disabled' : ''}>${stopping ? 'Stopping retry…' : 'Stop retry'}</button>` : '';
     const showRetry = pending > 0 && canRetryLegacyPendingWrites(pendingWritesUi.items, spaceId) && !renderedRetrySpaces.has(spaceId);
     if (showRetry) renderedRetrySpaces.add(spaceId);
     const retryScope = (rootsBySpace.get(spaceId)?.size ?? 0) > 1
       ? 'Retries pending edits across all saved roots in this Space.'
       : 'Retries pending edits in this Space.';
-    return `<section class="pending-write-space"><div class="pending-write-heading"><div><b>${esc(label)}</b>${savedRootDisclosure(rootResourceId, scopeKey, rootRegionId, rootExpanded, esc)}<small>${pending ? `${pending} ${hasCreateJobs ? 'pending' : 'waiting to upload'}` : ''}${pending && conflicts ? ' · ' : ''}${conflicts ? `${conflicts} need review` : ''}${pending && !hasCreateJobs && !state.status?.connected ? ' · Sign in to retry uploads' : ''}${pending && !hasCreateJobs && pauseReason ? ` · ${pauseReason}` : ''}${pending && hasCreateJobs && globallyPaused ? ' · Uploads paused. Resume sync to continue.' : ''}</small></div>${showRetry ? `<button class="button subtle" data-action="retry-pending-writes" data-space-id="${esc(spaceId)}" title="${pauseReason || retryScope}" ${retryDisabled ? 'disabled' : ''}>${pendingWritesUi.retryingSpaces.has(spaceId) ? 'Retrying…' : 'Retry uploads for this Space'}</button>` : ''}</div><div class="pending-write-list">${items.map(item => {
-      const presentation = pendingWritePresentation(item);
+    return `<section class="pending-write-space"><div class="pending-write-heading"><div><b>${esc(label)}</b>${savedRootDisclosure(rootResourceId, scopeKey, rootRegionId, rootExpanded, esc)}<small>${pending ? `${pending} ${hasCreateJobs ? 'pending' : 'waiting to upload'}` : ''}${pending && conflicts ? ' · ' : ''}${conflicts ? `${conflicts} need review` : ''}${pending && !hasCreateJobs && !state.status?.connected ? ' · Sign in to retry uploads' : ''}${pending && !hasCreateJobs && pauseReason ? ` · ${pauseReason}` : ''}${pending && hasCreateJobs && globallyPaused ? ' · Uploads paused. Resume sync to continue.' : ''}</small></div>${showRetry ? `<button class="button subtle" data-action="retry-pending-writes" data-space-id="${esc(spaceId)}" title="${pauseReason || retryScope}" ${retryDisabled ? 'disabled' : ''}>${pendingWritesUi.retryingSpaces.has(spaceId) ? 'Retrying…' : 'Retry uploads for this Space'}</button>` : ''}${stopRetry}</div><div class="pending-write-list">${items.map(item => {
+      const presentation = { ...pendingWritePresentation(item) };
       const exportKey = pendingWriteExportKey(item.space_id, item.write_id);
       const exporting = pendingWritesUi.exportingWrites.has(exportKey);
       const checkKey = pendingUploadCheckKey(item, state.accountEpoch, state.selectedAccount, pendingWritesUi.authGeneration, pendingWritesUi.accountScope);
       const checkable = item.create_state === 'uncertain' || item.create_state === 'conflict';
       const checking = checkKey ? pendingWritesUi.checkingUploads.has(checkKey) : false;
       const checkMessage = checkKey ? pendingWritesUi.uploadCheckMessages.get(checkKey) : '';
+      const checkOutcome = checkKey ? pendingWritesUi.uploadCheckOutcomes.get(checkKey) : undefined;
+      if (checking) presentation.label = 'Checking cloud copy…';
+      else if (checkOutcome) presentation.label = { missing: 'Cloud file not found', different: 'Cloud copy differs', unavailable: 'Cloud check unavailable' }[checkOutcome];
       const canCheck = checkable && !!checkKey && state.status?.saved_upload_check_supported === true && state.status?.auth_generation === pendingWritesUi.authGeneration;
       const checkButton = canCheck ? `<button class="small-action pending-write-check" data-action="check-saved-upload" data-space-id="${esc(item.space_id)}" data-write-id="${esc(item.write_id)}" data-root-resource-id="${esc(item.root_resource_id || '')}" aria-label="Check cloud copy of ${esc(lastPath(item.path))}" title="Read-only check: compare the saved file with the server. This does not upload, retry, replace or delete anything." ${checking || state.status?.connected !== true || state.accountSwitching ? 'disabled' : ''}>${checking ? 'Checking…' : 'Check cloud copy'}</button>` : '';
       const exportButton = pendingWritesUi.authGeneration != null && pendingWritesUi.accountScope && item.root_resource_id && ['pending', 'conflict'].includes(item.state) ? `<button class="small-action pending-write-save" data-action="save-pending-write-copy" data-space-id="${esc(item.space_id)}" data-write-id="${esc(item.write_id)}" data-root-resource-id="${esc(item.root_resource_id || '')}" aria-label="Save a local copy of ${esc(lastPath(item.path))}" title="Save a separate backup outside the Raiun drive. This does not upload the file, clear this entry or unblock deletion." ${exporting || state.nativeDialogBusy || state.accountSwitching ? 'disabled' : ''}>${exporting ? 'Saving…' : 'Save backup copy…'}</button>` : '';
@@ -1367,19 +1384,38 @@ function pendingOfflineWritesSection() {
   }).join('');
   const total = pendingWritesUi.pendingCount + pendingWritesUi.conflictCount;
   const summary = loadedForAccount ? `<small class="pending-writes-count">${pendingWritesUi.pendingCount} waiting · ${pendingWritesUi.conflictCount} need review</small>` : '';
-  return `<section class="pending-writes-card"><div class="pending-writes-heading"><div><h2>Saved uploads and edits</h2>${summary}<p>Saved local files remain on this PC while offline. “Waiting” means saved here, not confirmed in the cloud. When connected, Check cloud copy performs a read-only comparison for uncertain new files; it never sends or replaces a file. Missing, different, or unavailable results stay here for review. No automatic retry or overwrite occurs. Save backup copy makes another local file and leaves this entry unchanged.</p></div><button class="button subtle" data-action="refresh-pending-writes" ${pendingWritesUi.loading ? 'disabled' : ''}>${pendingWritesUi.loading ? 'Checking…' : loadedForAccount ? 'Refresh list' : 'Check saved edits'}</button></div>${pendingWritesUi.error ? `<div class="pending-writes-error" role="alert">${esc(pendingWritesUi.error)}</div>` : ''}${pendingWritesUi.loading && !pendingWritesUi.items.length ? `<div class="pending-writes-empty" role="status"><span class="spinner"></span> Checking saved edits…</div>` : !loadedForAccount ? `<div class="pending-writes-empty">Check for local edits waiting to upload.</div>` : total === 0 && !pendingWritesUi.truncated ? `<div class="pending-writes-empty" role="status">No saved edits are waiting to upload or review.</div>` : `${pendingWritesUi.truncated ? '<div class="pending-writes-warning" role="status">The list is limited; load more to see additional saved edits.</div>' : ''}${rows || '<div class="pending-writes-empty">No items on this page.</div>'}${pendingWritesUi.nextAfter ? `<div class="pending-writes-more"><button class="button subtle" data-action="more-pending-writes" ${pendingWritesUi.loading ? 'disabled' : ''}>${pendingWritesUi.loading ? 'Loading…' : 'Load more'}</button></div>` : ''}`}</section>`;
+  return `<section class="pending-writes-card"><div class="pending-writes-heading"><div><h2>Saved uploads and edits</h2>${summary}<p>Files saved on this PC that are waiting to upload or need review. Stopped uploads will not retry automatically. A cloud check compares copies without uploading or deleting; saving a backup leaves the review entry intact.</p></div><button class="button subtle" data-action="refresh-pending-writes" ${pendingWritesUi.loading || pendingWritesUi.checkingUploads.size > 0 || pendingWritesUi.exportingWrites.size > 0 ? 'disabled' : ''}>${pendingWritesUi.loading ? 'Checking…' : loadedForAccount ? 'Refresh list' : 'Check saved edits'}</button>${state.status?.recovery_folder ? `<button class="button subtle" data-action="open-recovery" ${!state.agentReachable || state.accountSwitching ? 'disabled' : ''}>Open saved-copy folder</button>` : ''}</div>${pendingWritesUi.error ? `<div class="pending-writes-error" role="alert">${esc(pendingWritesUi.error)}</div>` : ''}${pendingWritesUi.loading && !pendingWritesUi.items.length ? `<div class="pending-writes-empty" role="status"><span class="spinner"></span> Checking saved edits…</div>` : !loadedForAccount ? `<div class="pending-writes-empty">Check for local edits waiting to upload.</div>` : total === 0 && !pendingWritesUi.truncated ? `<div class="pending-writes-empty" role="status">No saved edits are waiting to upload or review.</div>` : `${pendingWritesUi.truncated ? '<div class="pending-writes-warning" role="status">The list is limited; load more to see additional saved edits.</div>' : ''}${rows || '<div class="pending-writes-empty">No items on this page.</div>'}${pendingWritesUi.nextAfter ? `<div class="pending-writes-more"><button class="button subtle" data-action="more-pending-writes" ${pendingWritesUi.loading ? 'disabled' : ''}>${pendingWritesUi.loading ? 'Loading…' : 'Load more'}</button></div>` : ''}`}</section>`;
 }
 function windowsDriveActivityPanel(): string {
   if (!isWindowsAgentStatus(state.status) || !state.agentReachable || !state.status?.connected) return '';
   const message = windowsDriveActivityText(state.status.windows_drive_activity);
   return `<section class="notice-card" aria-label="Windows drive creation activity"><div class="notice-icon">${svg('transfers')}</div><div class="notice-copy"><b>${esc(message.title)}</b><p>${esc(message.detail)}</p></div></section>`;
 }
+function selectTransfersWorkspace(workspace: TransfersWorkspace) {
+  if (state.transferWorkspace === workspace) return;
+  state.transferWorkspace = workspace;
+  if (workspace !== 'encrypted') stopEncryptedRetryLatestPolling();
+  render();
+  loadTransfersWorkspace();
+}
+function loadTransfersWorkspace() {
+  if (state.page !== 'transfers') return;
+  if (state.transferWorkspace === 'saved') {
+    if (isWindowsAgentStatus(state.status)) void loadWindowsRecoveryList();
+    else void loadPendingOfflineWrites(true);
+  } else if (state.transferWorkspace === 'encrypted') {
+    if (vaultAppFeaturesAvailable()) void loadEncryptedEditRecoveries(true);
+    if (vaultPendingFeaturesAvailable()) void refreshEncryptedRetryLatestStatuses();
+  }
+}
 function transfersPage() {
   const providerEnabled = featureAvailable('folder_sync_supported');
   const connection = connectionMode(state.agentReachable, state.status);
-  const filters: TransferTab[] = ['active', 'attention', 'history'];
-  const filter: TransferTab = state.transferFilter === 'attention' || state.transferFilter === 'history' ? state.transferFilter : 'active';
-  const summary = transferTabSummary(filter);
+  const workspace = state.transferWorkspace;
+  const filter: TransferTab | 'all' = state.transferFilter === 'attention' || state.transferFilter === 'active' ? state.transferFilter : 'all';
+  const summary = filter === 'all'
+    ? { description: 'Recent provider operations, including completed and cancelled records.', emptyTitle: 'No recent provider activity', emptyHelp: 'New folder-sync and cloud-file operations will appear here.' }
+    : transferTabSummary(filter);
   const counts = transferCounts(state.transfers);
   const windows = isWindowsAgentStatus(state.status);
   const accountIssue = windows && state.agentReachable && state.status?.connected
@@ -1387,18 +1423,35 @@ function transfersPage() {
   const historyScope = windows
     ? 'These filters show recent Sync Folders records. Copies through File Explorer are not included in these counts. An empty history does not mean all files have synced.'
     : 'These filters cover provider operations, including folder sync and cloud-file changes.';
-  const matching = state.transfers.filter(item => transferPresentation(item.state, item.direction, item.operation).tab === filter);
-  return `<div class="page-title-row"><div><div class="eyebrow">ACTIVITY</div><h1>Transfers</h1><p class="lede">Review recent provider activity, offline files, and saved edits for this account.</p></div></div>
-    ${accountIssue ? `<div class="notice-card offline" role="alert"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>This account needs attention</b><p>${esc(accountIssue)}</p><p>Transfer history can be empty while this problem is still active.</p></div></div>` : ''}
-    <div class="filter-tabs" role="group" aria-label="Provider activity filters">${filters.map(key => `<button class="filter-tab ${filter === key ? 'active' : ''}" data-filter="${key}" aria-pressed="${filter === key}">${transferTabSummary(key).label}${providerEnabled && state.agentReachable && state.status?.connected ? `<span class="tab-badge">${counts[key]}</span>` : ''}</button>`).join('')}</div>
-    <p class="helper-note">${esc(summary.description)} ${esc(historyScope)} Counts reflect the agent’s 500 most recent records, not all past activity. Offline files and saved edits stay visible below.</p>
-    ${windowsDriveActivityPanel()}
-    ${isWindowsAgentStatus(state.status) ? windowsRecoverySettingsCard() : ''}
-    ${!isWindowsAgentStatus(state.status) && state.agentReachable ? pendingOfflineWritesSection() : ''}
-    ${vaultPendingFeaturesAvailable() && state.agentReachable ? encryptedOperationsTransferSection() : ''}
-    ${vaultPendingFeaturesAvailable() && state.agentReachable ? encryptedRetryLatestSection() : ''}
-    ${vaultAppFeaturesAvailable() && state.agentReachable ? encryptedEditsTransferSection() : ''}
-    ${!providerEnabled ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Provider activity reporting is unavailable for this agent. Supported cloud-drive offline controls remain available above.</p></div></div>` : state.agentReachable && state.status?.connected ? matching.length ? `<div class="transfer-list">${matching.map(transferCard).join('')}</div>` : `<div class="empty-card transfer-empty"><span class="empty-icon">${svg(state.transferFilter === 'attention' ? 'check' : 'transfers')}</span><h3>${esc(summary.emptyTitle)}</h3><p>${esc(summary.emptyHelp)}</p></div>` : connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Start the Raiun agent to see transfer activity.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : 'Working offline — reconnecting to server'}</b><p>Transfer history will refresh when Raiun reconnects.</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>` : `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Sign in to see transfer activity</b><p>Connect your OpenCloud account to load transfer status.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>`}`;
+  const matching = state.transfers.filter(item => filter === 'all' || transferPresentation(item.state, item.direction, item.operation).tab === filter);
+  const activityCount = providerEnabled && state.agentReachable && state.status?.connected ? state.transfers.length : null;
+  const savedCount = !windows && pendingWritesUi.accountEpoch === state.accountEpoch && state.agentReachable
+    ? pendingWritesUi.pendingCount + pendingWritesUi.conflictCount : null;
+  const tabs: { key: TransfersWorkspace; label: string; count: number | null }[] = [
+    { key: 'activity', label: 'Activity', count: activityCount },
+    { key: 'saved', label: 'Saved files', count: savedCount },
+    { key: 'encrypted', label: 'Encrypted', count: null }
+  ];
+  const filters: { key: TransferTab | 'all'; label: string; count: number }[] = [
+    { key: 'all', label: 'All', count: state.transfers.length },
+    { key: 'active', label: 'Active', count: counts.active },
+    { key: 'attention', label: 'Needs attention', count: counts.attention }
+  ];
+  const unavailable = `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Saved-file status is unavailable</b><p>Start the Raiun agent to review this account’s local records.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>`;
+  return `<div class="transfers-workspace">
+    <div class="page-title-row"><div><div class="eyebrow">ACTIVITY</div><h1>Transfers</h1><p class="lede">Review activity and saved local files for this account.</p></div></div>
+    <div data-render-region="transfer-account-issue">${accountIssue ? `<div class="notice-card offline" role="alert"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>This account needs attention</b><p>${esc(accountIssue)}</p><p>Transfer history can be empty while this problem is still active.</p></div></div>` : ''}</div>
+    <div data-render-region="transfer-workspaces"><div class="workspace-tabs transfer-workspace-tabs" role="group" aria-label="Transfer workspaces">${tabs.map(tab => `<button class="filter-tab ${workspace === tab.key ? 'active' : ''}" data-transfer-workspace="${tab.key}" aria-pressed="${workspace === tab.key}" aria-controls="transfer-workspace-panel">${tab.label}${tab.count == null ? '' : `<span class="tab-badge" title="${tab.key === 'activity' ? 'Recent provider records' : 'Saved uploads and edits waiting or needing review'}">${tab.count}</span>`}</button>`).join('')}</div></div>
+    <div id="transfer-workspace-panel" role="region" aria-label="${tabs.find(tab => tab.key === workspace)?.label}">
+      <div data-render-region="transfer-panel-heading">${workspace === 'activity' ? `<div class="filter-tabs transfer-activity-filters" role="group" aria-label="Activity filters">${filters.map(tab => `<button class="filter-tab ${filter === tab.key ? 'active' : ''}" data-filter="${tab.key}" aria-pressed="${filter === tab.key}">${tab.label}${activityCount == null ? '' : `<span class="tab-badge">${tab.count}</span>`}</button>`).join('')}</div><p class="helper-note">${esc(summary.description)} ${esc(historyScope)} Counts reflect the agent’s 500 most recent records, not all past activity. Recorded issues may already be resolved; Saved files and Encrypted show local records separately.</p>` : workspace === 'saved' ? '<p class="helper-note">Local uploads, edits and recovery copies for this account. A saved local file does not confirm cloud completion.</p>' : '<p class="helper-note">Saved encrypted operations, upload retries and readable working copies. Operation names are shown only for currently unlocked locations.</p>'}</div>
+      <div data-render-region="transfer-drive-activity">${workspace === 'activity' ? windowsDriveActivityPanel() : ''}</div>
+      <div data-render-region="transfer-provider-activity">${workspace === 'activity' ? `${!providerEnabled ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Provider activity reporting is unavailable for this agent. Use Saved files to review supported cloud-drive recovery controls.</p></div></div>` : state.agentReachable && state.status?.connected ? matching.length ? `<div class="transfer-list">${matching.map(transferCard).join('')}</div>` : `<div class="empty-card transfer-empty"><span class="empty-icon">${svg(filter === 'attention' ? 'check' : 'transfers')}</span><h3>${esc(summary.emptyTitle)}</h3><p>${esc(summary.emptyHelp)}</p></div>` : connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Start the Raiun agent to see transfer activity.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : 'Working offline — reconnecting to server'}</b><p>Transfer history will refresh when Raiun reconnects.</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>` : `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Sign in to see transfer activity</b><p>Connect your OpenCloud account to load transfer status.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>`}` : ''}</div>
+      <div data-render-region="transfer-saved-files">${workspace === 'saved' ? !state.agentReachable ? unavailable : windows ? windowsRecoverySettingsCard() : pendingOfflineWritesSection() : ''}</div>
+      <div data-render-region="transfer-encrypted-operations">${workspace === 'encrypted' && vaultPendingFeaturesAvailable() && state.agentReachable ? encryptedOperationsTransferSection() : ''}</div>
+      <div data-render-region="transfer-encrypted-retries">${workspace === 'encrypted' && vaultPendingFeaturesAvailable() && state.agentReachable ? encryptedRetryLatestSection() : ''}</div>
+      <div data-render-region="transfer-encrypted-edits">${workspace === 'encrypted' ? !state.agentReachable ? unavailable : vaultAppFeaturesAvailable() ? encryptedEditsTransferSection() : !vaultPendingFeaturesAvailable() ? '<div class="empty-card transfer-empty"><span class="empty-icon">'+svg('lock')+'</span><h3>Encrypted transfer records unavailable</h3><p>This agent does not provide encrypted saved-file records.</p></div>' : '' : ''}</div>
+    </div>
+  </div>`;
 }
 function validateVaultEditLatest(value: unknown, spaceId: string, rootResourceId: string): VaultEditLatestResult {
   if (!value || typeof value !== 'object') throw new Error('The agent returned an invalid encrypted retry status.');
@@ -1548,62 +1601,80 @@ function interruptedCreateRetryMatches(scope: VaultOperationsScope, item: VaultO
   const job = interruptedCreateRetryUi.job;
   return !!job && job.key === scope.key && job.writeId === item.write_id && job.revision === item.revision && job.retryState === item.retry_state && job.accountEpoch === state.accountEpoch && job.profileId === state.selectedAccount;
 }
-async function refreshVaultOperations(activeRoots: { spaceId: string; rootResourceId: string }[], force = false, truncated = false) {
+async function refreshVaultOperations(activeRoots: { spaceId: string; rootResourceId: string }[], force = false, truncated = false, passive = false) {
   if (nativeVaultAccess() && !nativeVaultOfflineWriteAvailable()) return;
   if ([...copyVerifyUi.jobs.values()].some(copyVerifyActive)) return;
-  if (state.page !== 'transfers' || !state.agentReachable || state.accountSwitching || vaultOperationsUi.loading) return;
+  if (!encryptedTransfersVisible() || vaultOperationsUi.loading) return;
   const now = Date.now();
   if (!force && now - vaultOperationsUi.lastLoadedAt < 15000) return;
   const epoch = state.accountEpoch;
   const profileId = state.selectedAccount;
   const generation = ++vaultOperationsUi.generation;
   vaultOperationsUi.loading = true;
-  vaultOperationsUi.accountEpoch = epoch;
-  vaultOperationsUi.rootsTruncated = truncated || activeRoots.length > 100;
-  const currentKeys = new Set(activeRoots.map(scope => `${scope.spaceId}\u0000${scope.rootResourceId}`));
-  for (const key of vaultOperationsUi.scopes.keys()) if (!currentKeys.has(key)) vaultOperationsUi.scopes.delete(key);
-  const scopes = activeRoots.slice(0, 100).map(scope => {
-    const key = `${scope.spaceId}\u0000${scope.rootResourceId}`;
-    const existing = vaultOperationsUi.scopes.get(key);
-    const model: VaultOperationsScope = existing || { key, ...scope, authGeneration: -1, items: [], nextAfter: null, truncated: false, loading: false, error: '', accountEpoch: epoch };
-    // Decoded names are only retained for an exact currently-unlocked scope.
-    model.items = [];
-    model.nextAfter = null;
-    model.truncated = false;
-    model.loading = true;
-    model.error = '';
-    model.accountEpoch = epoch;
-    vaultOperationsUi.scopes.set(key, model);
-    return model;
-  });
-  render();
-  for (const scope of scopes) {
-    try {
-      const page = validateVaultOperations(await request<VaultOperationsPage>('vault_operations', {
-        space_id: scope.spaceId, root_resource_id: scope.rootResourceId, limit: 50
-      }), scope.spaceId, scope.rootResourceId);
-      if (!isCurrentAccount(epoch, profileId) || vaultOperationsUi.generation !== generation || state.page !== 'transfers') return;
-      if (scope.authGeneration >= 0 && scope.authGeneration !== page.auth_generation) clearCopyVerifyScope(scope.spaceId, scope.rootResourceId);
-      scope.authGeneration = page.auth_generation;
-      scope.items = page.items;
-      scope.nextAfter = page.next_after;
-      scope.truncated = page.truncated;
-      discardMissingCopyVerifyJobs(scope);
-    } catch (error) {
-      if (!isCurrentAccount(epoch, profileId) || vaultOperationsUi.generation !== generation || state.page !== 'transfers' || isStaleAccountRequest(error)) return;
-      // The agent may have locked this route while the query was in flight. Drop any decoded names.
-      scope.items = [];
-      scope.nextAfter = null;
-      scope.truncated = false;
-      scope.error = messageOf(error) || 'Saved encrypted operations could not be checked.';
-    } finally {
-      if (vaultOperationsUi.generation === generation) scope.loading = false;
+  try {
+    vaultOperationsUi.accountEpoch = epoch;
+    vaultOperationsUi.rootsTruncated = truncated || activeRoots.length > 100;
+    const currentKeys = new Set(activeRoots.map(scope => `${scope.spaceId}\u0000${scope.rootResourceId}`));
+    let removedUnlockedScope = false;
+    for (const key of vaultOperationsUi.scopes.keys()) if (!currentKeys.has(key)) {
+      vaultOperationsUi.scopes.delete(key);
+      removedUnlockedScope = true;
+    }
+    // Hide decoded names immediately when discovery no longer admits their scope.
+    if (passive && removedUnlockedScope) render();
+    const scopes = activeRoots.slice(0, 100).map(scope => {
+      const key = `${scope.spaceId}\u0000${scope.rootResourceId}`;
+      const existing = vaultOperationsUi.scopes.get(key);
+      const model: VaultOperationsScope = existing || { key, ...scope, authGeneration: -1, items: [], nextAfter: null, truncated: false, loading: false, error: '', accountEpoch: epoch };
+      // Decoded names are only retained for an exact currently-unlocked scope.
+      model.items = [];
+      model.nextAfter = null;
+      model.truncated = false;
+      model.loading = true;
+      model.error = '';
+      model.accountEpoch = epoch;
+      vaultOperationsUi.scopes.set(key, model);
+      return model;
+    });
+    if (!passive) render();
+    for (const scope of scopes) {
+      try {
+        const page = validateVaultOperations(await request<VaultOperationsPage>('vault_operations', {
+          space_id: scope.spaceId, root_resource_id: scope.rootResourceId, limit: 50
+        }), scope.spaceId, scope.rootResourceId);
+        if (!isCurrentAccount(epoch, profileId) || vaultOperationsUi.generation !== generation || !encryptedTransfersVisible()) return;
+        if (scope.authGeneration >= 0 && scope.authGeneration !== page.auth_generation) clearCopyVerifyScope(scope.spaceId, scope.rootResourceId);
+        scope.authGeneration = page.auth_generation;
+        scope.items = page.items;
+        scope.nextAfter = page.next_after;
+        scope.truncated = page.truncated;
+        discardMissingCopyVerifyJobs(scope);
+      } catch (error) {
+        if (!isCurrentAccount(epoch, profileId) || vaultOperationsUi.generation !== generation || !encryptedTransfersVisible() || isStaleAccountRequest(error)) return;
+        // The agent may have locked this route while the query was in flight. Drop any decoded names.
+        scope.items = [];
+        scope.nextAfter = null;
+        scope.truncated = false;
+        scope.error = messageOf(error) || 'Saved encrypted operations could not be checked.';
+        if (passive) render();
+      } finally {
+        if (vaultOperationsUi.generation === generation) scope.loading = false;
+      }
+    }
+    if (!isCurrentAccount(epoch, profileId) || vaultOperationsUi.generation !== generation || !encryptedTransfersVisible()) return;
+    vaultOperationsUi.lastLoadedAt = Date.now();
+  } finally {
+    if (vaultOperationsUi.generation === generation) {
+      vaultOperationsUi.loading = false;
+      for (const scope of vaultOperationsUi.scopes.values()) {
+        if (scope.accountEpoch === epoch) scope.loading = false;
+      }
+      if (isCurrentAccount(epoch, profileId)) {
+        if (!encryptedTransfersVisible()) clearVaultOperations();
+        else if (!passive) render();
+      }
     }
   }
-  if (!isCurrentAccount(epoch, profileId) || vaultOperationsUi.generation !== generation) return;
-  vaultOperationsUi.loading = false;
-  vaultOperationsUi.lastLoadedAt = Date.now();
-  render();
 }
 async function loadMoreVaultOperations(element: HTMLElement) {
   if (nativeVaultAccess() && !nativeVaultOfflineWriteAvailable()) return;
@@ -1941,12 +2012,17 @@ function encryptedOperationsTransferSection() {
   }).join('');
   return `<section class="pending-writes-card encrypted-operations"><div class="pending-writes-heading"><div><h2>Encrypted file operations</h2><p>These local operations are shown only for currently unlocked locations. Upload status is not confirmed until Raiun reports it; new folders stay local until their server identity is verified.</p></div><button class="button subtle" data-action="refresh-encrypted-operations" ${!state.agentReachable || vaultOperationsUi.loading || encryptedRetryLatestUi.running ? 'disabled' : ''}>${vaultOperationsUi.loading || encryptedRetryLatestUi.running ? 'Checking…' : 'Refresh'}</button></div>${discoveryError}${rows}${vaultOperationsUi.rootsTruncated ? '<small class="vault-pin-note">The active-location list reached its limit; some unlocked locations may not be shown.</small>' : ''}</section>`;
 }
+function encryptedTransfersVisible() {
+  return state.page === 'transfers' && state.transferWorkspace === 'encrypted'
+    && state.agentReachable && !state.accountSwitching && vaultPendingFeaturesAvailable();
+}
 function scheduleEncryptedRetryLatestPoll(delay = 4000) {
   if (encryptedRetryLatestUi.timer) window.clearTimeout(encryptedRetryLatestUi.timer);
-  if (state.page !== 'transfers' || !state.agentReachable) return;
+  encryptedRetryLatestUi.timer = 0;
+  if (!encryptedTransfersVisible()) return;
   encryptedRetryLatestUi.timer = window.setTimeout(() => {
     encryptedRetryLatestUi.timer = 0;
-    void refreshEncryptedRetryLatestStatuses();
+    void refreshEncryptedRetryLatestStatuses(false, true);
   }, delay);
 }
 function stopEncryptedRetryLatestPolling() {
@@ -1954,6 +2030,7 @@ function stopEncryptedRetryLatestPolling() {
   encryptedRetryLatestUi.timer = 0;
   encryptedRetryLatestUi.generation++;
   encryptedRetryLatestUi.running = false;
+  encryptedRetryLatestUi.discoveryLoading = false;
   encryptedRetryLatestUi.loading.clear();
   clearVaultOperations();
 }
@@ -1968,77 +2045,82 @@ function resetEncryptedRetryLatestUi() {
   encryptedRetryLatestUi.discoveryError = '';
   encryptedRetryLatestUi.accountEpoch = state.accountEpoch;
 }
-async function refreshEncryptedRetryLatestStatuses(forceOperations = false) {
+async function refreshEncryptedRetryLatestStatuses(forceOperations = false, passive = false) {
+  if (state.page !== 'transfers' || state.transferWorkspace !== 'encrypted' || !state.agentReachable || state.accountSwitching) return;
   if (!vaultPendingFeaturesAvailable()) {
     encryptedRetryLatestUi.discoveryError = 'Encrypted retry status is unavailable for this Windows agent.';
     render();
     return;
   }
-  if (encryptedRetryLatestUi.running || state.page !== 'transfers' || !state.agentReachable || state.accountSwitching) return;
+  if (encryptedRetryLatestUi.running) return;
   const epoch = state.accountEpoch;
   const profileId = state.selectedAccount;
   const generation = ++encryptedRetryLatestUi.generation;
   encryptedRetryLatestUi.running = true;
   encryptedRetryLatestUi.discoveryLoading = true;
-  encryptedRetryLatestUi.discoveryError = '';
-  render();
-  let activeRoots: { spaceId: string; rootResourceId: string }[] = [];
-  let activeTruncated = false;
-  let activeRootDiscoverySucceeded = false;
   try {
-    const active = nativeVaultAccess() ? {roots:currentNativePendingRoots(),truncated:false} : validateUnlockedVaultRoots(await request('vault_unlocked_roots'));
-    activeRoots = active.roots;
-    activeTruncated = active.truncated;
-    activeRootDiscoverySucceeded = true;
-  } catch (error) {
-    if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || isStaleAccountRequest(error)) return;
-    encryptedRetryLatestUi.discoveryError = messageOf(error) || 'Active encrypted locations could not be checked.';
-  }
-  if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || state.page !== 'transfers') return;
-  if (activeRootDiscoverySucceeded) await refreshVaultOperations(activeRoots, forceOperations, activeTruncated);
-  else clearVaultOperations();
-  if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || state.page !== 'transfers') return;
-  const combinedScopes = new Map<string, { spaceId: string; rootResourceId: string }>();
-  for (const scope of [...activeRoots, ...encryptedVaultPairScopes()]) {
-    combinedScopes.set(`${scope.spaceId}\u0000${scope.rootResourceId}`, { spaceId: scope.spaceId, rootResourceId: scope.rootResourceId });
-  }
-  const allScopes = [...combinedScopes.entries()];
-  const scopes = allScopes.slice(0, 100).map(([key, scope]) => ({ key, ...scope }));
-  encryptedRetryLatestUi.scopes = scopes;
-  const configuredScopeCount = new Set(state.pairs.filter(pair => pair.vault?.root_resource_id && pair.space_id).map(pair => `${pair.space_id}\u0000${pair.vault!.root_resource_id}`)).size;
-  encryptedRetryLatestUi.scopesTruncated = activeTruncated || configuredScopeCount > 100 || allScopes.length > scopes.length;
-  encryptedRetryLatestUi.discoveryLoading = false;
-  const visibleKeys = new Set(scopes.map(scope => scope.key));
-  for (const key of encryptedRetryLatestUi.statuses.keys()) if (!visibleKeys.has(key)) encryptedRetryLatestUi.statuses.delete(key);
-  for (const key of encryptedRetryLatestUi.errors.keys()) if (!visibleKeys.has(key)) encryptedRetryLatestUi.errors.delete(key);
-  if (!scopes.length) {
-    encryptedRetryLatestUi.running = false;
-    render();
-    scheduleEncryptedRetryLatestPoll();
-    return;
-  }
-  const updates = Promise.all(scopes.map(async scope => {
-    encryptedRetryLatestUi.loading.add(scope.key);
+    encryptedRetryLatestUi.discoveryError = '';
+    if (!passive) render();
+    let activeRoots: { spaceId: string; rootResourceId: string }[] = [];
+    let activeTruncated = false;
+    let activeRootDiscoverySucceeded = false;
     try {
-      const result = validateVaultEditLatest(await request<VaultEditLatestResult>('vault_reconcile_edits_latest', {
-        space_id: scope.spaceId, root_resource_id: scope.rootResourceId
-      }), scope.spaceId, scope.rootResourceId);
-      if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || state.page !== 'transfers') return;
-      encryptedRetryLatestUi.statuses.set(scope.key, result);
-      encryptedRetryLatestUi.errors.delete(scope.key);
+      const active = nativeVaultAccess() ? {roots:currentNativePendingRoots(),truncated:false} : validateUnlockedVaultRoots(await request('vault_unlocked_roots'));
+      activeRoots = active.roots;
+      activeTruncated = active.truncated;
+      activeRootDiscoverySucceeded = true;
     } catch (error) {
-      if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || state.page !== 'transfers' || isStaleAccountRequest(error)) return;
-      encryptedRetryLatestUi.errors.set(scope.key, messageOf(error));
-    } finally {
-      if (encryptedRetryLatestUi.generation === generation) encryptedRetryLatestUi.loading.delete(scope.key);
+      if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || !encryptedTransfersVisible() || isStaleAccountRequest(error)) return;
+      encryptedRetryLatestUi.discoveryError = messageOf(error) || 'Active encrypted locations could not be checked.';
     }
-  }));
-  render();
-  await updates;
-  if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation) return;
-  encryptedRetryLatestUi.running = false;
-  render();
-  scheduleEncryptedRetryLatestPoll();
+    if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || !encryptedTransfersVisible()) return;
+    if (activeRootDiscoverySucceeded) await refreshVaultOperations(activeRoots, forceOperations, activeTruncated, passive);
+    else { clearVaultOperations(); render(); }
+    if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || !encryptedTransfersVisible()) return;
+    const combinedScopes = new Map<string, { spaceId: string; rootResourceId: string }>();
+    for (const scope of [...activeRoots, ...encryptedVaultPairScopes()]) {
+      combinedScopes.set(`${scope.spaceId}\u0000${scope.rootResourceId}`, { spaceId: scope.spaceId, rootResourceId: scope.rootResourceId });
+    }
+    const allScopes = [...combinedScopes.entries()];
+    const scopes = allScopes.slice(0, 100).map(([key, scope]) => ({ key, ...scope }));
+    encryptedRetryLatestUi.scopes = scopes;
+    const configuredScopeCount = new Set(state.pairs.filter(pair => pair.vault?.root_resource_id && pair.space_id).map(pair => `${pair.space_id}\u0000${pair.vault!.root_resource_id}`)).size;
+    encryptedRetryLatestUi.scopesTruncated = activeTruncated || configuredScopeCount > 100 || allScopes.length > scopes.length;
+    encryptedRetryLatestUi.discoveryLoading = false;
+    const visibleKeys = new Set(scopes.map(scope => scope.key));
+    for (const key of encryptedRetryLatestUi.statuses.keys()) if (!visibleKeys.has(key)) encryptedRetryLatestUi.statuses.delete(key);
+    for (const key of encryptedRetryLatestUi.errors.keys()) if (!visibleKeys.has(key)) encryptedRetryLatestUi.errors.delete(key);
+    if (!scopes.length) return;
+    const updates = Promise.all(scopes.map(async scope => {
+      encryptedRetryLatestUi.loading.add(scope.key);
+      try {
+        const result = validateVaultEditLatest(await request<VaultEditLatestResult>('vault_reconcile_edits_latest', {
+          space_id: scope.spaceId, root_resource_id: scope.rootResourceId
+        }), scope.spaceId, scope.rootResourceId);
+        if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || !encryptedTransfersVisible()) return;
+        encryptedRetryLatestUi.statuses.set(scope.key, result);
+        encryptedRetryLatestUi.errors.delete(scope.key);
+      } catch (error) {
+        if (!isCurrentAccount(epoch, profileId) || encryptedRetryLatestUi.generation !== generation || !encryptedTransfersVisible() || isStaleAccountRequest(error)) return;
+        encryptedRetryLatestUi.errors.set(scope.key, messageOf(error));
+      } finally {
+        if (encryptedRetryLatestUi.generation === generation) encryptedRetryLatestUi.loading.delete(scope.key);
+      }
+    }));
+    if (!passive) render();
+    await updates;
+  } finally {
+    // A stale completion must never clear a newer poll's busy flags or timer.
+    if (encryptedRetryLatestUi.generation === generation) {
+      encryptedRetryLatestUi.running = false;
+      encryptedRetryLatestUi.discoveryLoading = false;
+      encryptedRetryLatestUi.loading.clear();
+      if (isCurrentAccount(epoch, profileId) && encryptedTransfersVisible()) {
+        render();
+        scheduleEncryptedRetryLatestPoll();
+      }
+    }
+  }
 }
 async function cancelEncryptedRetryLatest(element: HTMLElement) {
   if (nativeVaultAccess() && !nativeVaultOfflineWriteAvailable()) return;
@@ -2138,7 +2220,7 @@ async function loadPendingOfflineWrites(reset: boolean) {
     render();
     return;
   }
-  if (pendingWritesUi.loading) { if (reset) pendingWritesUi.refreshQueued = true; return; }
+  if (pendingWritesUi.loading || pendingWritesUi.checkingUploads.size > 0 || pendingWritesUi.exportingWrites.size > 0) { if (reset) pendingWritesUi.refreshQueued = true; return; }
   if (!state.agentReachable || !state.selectedAccount) {
     pendingWritesUi.error = state.agentReachable ? 'Select an account to check saved edits.' : 'Raiun is not connected. Start it to check saved edits.';
     pendingWritesUi.loaded = false;
@@ -2155,7 +2237,7 @@ async function loadPendingOfflineWrites(reset: boolean) {
   const previousItems = reset ? [] : pendingWritesUi.items;
   pendingWritesUi.loading = true;
   pendingWritesUi.error = '';
-  if (reset) {
+  if (reset && (!pendingWritesUi.loaded || pendingWritesUi.accountEpoch !== epoch)) {
     pendingWritesUi.items = [];
     pendingWritesUi.nextAfter = null;
     pendingWritesUi.pendingCount = 0;
@@ -2198,7 +2280,8 @@ async function retryPendingOfflineWrites(spaceId: string) {
   if (isWindowsAgentStatus(state.status) || !providerAvailable(state.status?.provider_supported)) return;
   const epoch = state.accountEpoch;
   const profileId = state.selectedAccount;
-  if (!state.status?.connected || !spaceId || pendingWritesUi.retryingSpaces.has(spaceId)) return;
+  const authGeneration = state.status?.auth_generation;
+  if (!state.status?.connected || !spaceId || !Number.isSafeInteger(authGeneration) || pendingWritesUi.retryingSpaces.has(spaceId)) return;
   if (!canRetryLegacyPendingWrites(pendingWritesUi.items, spaceId)) return;
   pendingWritesUi.retryingSpaces.add(spaceId);
   pendingWritesUi.error = '';
@@ -2207,7 +2290,7 @@ async function retryPendingOfflineWrites(spaceId: string) {
     const started = await request<{ job_id: string; state: 'queued' | 'running' }>('cache_reconcile_writes', { space_id: spaceId });
     if (!isCurrentAccount(epoch, profileId)) return;
     if (typeof started.job_id !== 'string' || !started.job_id || started.job_id.length > 256 || !['queued', 'running'].includes(started.state)) throw new Error('The agent did not confirm the upload retry.');
-    const job = { job_id: started.job_id, space_id: spaceId, accountEpoch: epoch };
+    const job = { job_id: started.job_id, space_id: spaceId, accountEpoch: epoch, authGeneration: authGeneration! };
     pendingWritesUi.reconcileJobs.set(spaceId, job);
     state.message = `Retrying uploads for ${spaceName(spaceId)}. Local copies stay on this PC; changed cloud versions remain for review.`;
     render();
@@ -2244,6 +2327,7 @@ async function checkSavedUpload(spaceId: string, writeId: string, rootResourceId
       candidate.space_id === spaceId && candidate.root_resource_id === rootResourceId && candidate.write_id === writeId &&
       (candidate.create_state === 'uncertain' || candidate.create_state === 'conflict'));
   pendingWritesUi.uploadCheckMessages.delete(key);
+  pendingWritesUi.uploadCheckOutcomes.delete(key);
   pendingWritesUi.checkingUploads.add(key);
   render();
   try {
@@ -2277,17 +2361,19 @@ async function checkSavedUpload(spaceId: string, writeId: string, rootResourceId
       if (!isCurrentAccount(epoch, profileId) || state.status?.auth_generation !== authGeneration) return;
       state.message = messages.verified;
     } else {
+      pendingWritesUi.uploadCheckOutcomes.set(key, result.outcome);
       pendingWritesUi.uploadCheckMessages.set(key, messages[result.outcome]);
       render();
     }
   } catch (error) {
     if (isCurrent() && !isStaleAccountRequest(error)) {
+      pendingWritesUi.uploadCheckOutcomes.set(key, 'unavailable');
       pendingWritesUi.uploadCheckMessages.set(key, `The cloud check did not finish. No file was uploaded or deleted. The saved file stays here. ${messageOf(error)}`);
       render();
     }
   } finally {
     pendingWritesUi.checkingUploads.delete(key);
-    if (isCurrentAccount(epoch, profileId)) render();
+    if (isCurrentAccount(epoch, profileId)) { render(); flushPendingWriteRefresh(); }
   }
 }
 async function savePendingConflictCopy(spaceId: string, writeId: string, rootResourceId: string) {
@@ -2326,10 +2412,38 @@ async function savePendingConflictCopy(spaceId: string, writeId: string, rootRes
     state.nativeDialogBusy = false;
     if (isCurrentAccount(epoch, profileId)) {
       render();
+      flushPendingWriteRefresh();
     }
   }
 }
-function schedulePendingReconcilePoll(job: { job_id: string; space_id: string; accountEpoch: number }, delay = 1200) {
+function flushPendingWriteRefresh() {
+  if (pendingWritesUi.refreshQueued && !pendingWritesUi.loading && !pendingWritesUi.checkingUploads.size && !pendingWritesUi.exportingWrites.size) {
+    pendingWritesUi.refreshQueued = false;
+    void loadPendingOfflineWrites(true);
+  }
+}
+async function stopPendingReconcile(spaceId: string) {
+  const job = pendingWritesUi.reconcileJobs.get(spaceId);
+  const profileId = state.selectedAccount;
+  if (!job || job.cancelRequested || pendingWritesUi.stoppingSpaces.has(spaceId) || !isCurrentAccount(job.accountEpoch, profileId) || state.status?.auth_generation !== job.authGeneration || state.accountSwitching) return;
+  const isCurrent = () => isCurrentAccount(job.accountEpoch, profileId) && state.status?.auth_generation === job.authGeneration && pendingWritesUi.reconcileJobs.get(spaceId)?.job_id === job.job_id;
+  pendingWritesUi.stoppingSpaces.add(spaceId);
+  render();
+  try {
+    const result = await request<{job_id: string; space_id: string; state: string; cancel_requested: boolean}>('cache_reconcile_cancel', {job_id: job.job_id});
+    if (!isCurrent()) return;
+    if (!result || result.job_id !== job.job_id || result.space_id !== spaceId || result.cancel_requested !== true || !['queued', 'running', 'cancelled', 'complete', 'failed'].includes(result.state)) throw new Error('Raiun did not confirm the stop request. Saved files remain in place.');
+    job.cancelRequested = true;
+    state.message = 'Stopping this upload retry. A file already in progress may finish. Saved local files and cloud files are kept.';
+    schedulePendingReconcilePoll(job, 700);
+  } catch (error) {
+    if (isCurrent() && !isStaleAccountRequest(error)) pendingWritesUi.error = messageOf(error);
+  } finally {
+    pendingWritesUi.stoppingSpaces.delete(spaceId);
+    if (isCurrentAccount(job.accountEpoch, profileId)) render();
+  }
+}
+function schedulePendingReconcilePoll(job: { job_id: string; space_id: string; accountEpoch: number; authGeneration: number }, delay = 1200) {
   const oldTimer = pendingWritesUi.retryTimers.get(job.space_id);
   if (oldTimer) window.clearTimeout(oldTimer);
   const timer = window.setTimeout(() => {
@@ -2338,12 +2452,28 @@ function schedulePendingReconcilePoll(job: { job_id: string; space_id: string; a
   }, delay);
   pendingWritesUi.retryTimers.set(job.space_id, timer);
 }
-async function pollPendingReconcile(expected: { job_id: string; space_id: string; accountEpoch: number }) {
-  const isJobCurrent = () => isCurrentAccount(expected.accountEpoch) && pendingWritesUi.reconcileJobs.get(expected.space_id)?.job_id === expected.job_id;
-  if (!isJobCurrent()) return;
+async function pollPendingReconcile(expected: { job_id: string; space_id: string; accountEpoch: number; authGeneration: number }) {
+  const ownsJob = () => isCurrentAccount(expected.accountEpoch) && pendingWritesUi.reconcileJobs.get(expected.space_id)?.job_id === expected.job_id;
+  if (!ownsJob()) return;
+  const currentGeneration = state.status?.auth_generation;
+  if (!Number.isSafeInteger(currentGeneration)) {
+    // A temporary status outage must not orphan an admitted retry's observer.
+    schedulePendingReconcilePoll(expected, 3000);
+    return;
+  }
+  if (currentGeneration !== expected.authGeneration) {
+    pendingWritesUi.reconcileJobs.delete(expected.space_id);
+    pendingWritesUi.retryingSpaces.delete(expected.space_id);
+    pendingWritesUi.stoppingSpaces.delete(expected.space_id);
+    pendingWritesUi.error = 'The sign-in session changed. Refresh saved files to review the retained copies; the previous retry status is no longer available.';
+    render();
+    return;
+  }
+  const isJobCurrent = () => ownsJob() && state.status?.auth_generation === expected.authGeneration;
   try {
     const result = await request<{ job_id: string; space_id: string; state: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled'; uploaded: number; conflicts: number; remaining: number; error?: string | null; cancel_requested: boolean }>('cache_reconcile_status', { job_id: expected.job_id });
-    if (!isJobCurrent() || result.job_id !== expected.job_id || result.space_id !== expected.space_id) return;
+    if (!isJobCurrent()) { if (ownsJob()) schedulePendingReconcilePoll(expected, 3000); return; }
+    if (result.job_id !== expected.job_id || result.space_id !== expected.space_id) throw new Error('The retry status did not match this upload job.');
     if (!['queued', 'running', 'complete', 'failed', 'cancelled'].includes(result.state)) throw new Error('The agent returned an unknown upload-retry status.');
     if (result.state === 'queued' || result.state === 'running') {
       schedulePendingReconcilePoll(expected);
@@ -2366,7 +2496,8 @@ async function pollPendingReconcile(expected: { job_id: string; space_id: string
       state.message = 'The upload retry stopped. Local copies were kept.';
     }
   } catch (error) {
-    if (!isJobCurrent() || isStaleAccountRequest(error)) return;
+    if (!ownsJob()) return;
+    if (!isJobCurrent() || isStaleAccountRequest(error)) { schedulePendingReconcilePoll(expected, 3000); return; }
     pendingWritesUi.error = messageOf(error);
     schedulePendingReconcilePoll(expected, 3000);
     render();
@@ -2655,11 +2786,11 @@ function settingsPage() {
     <div class="settings-section-label">Sync &amp; storage</div><section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Cloud drive</h2><p>${noAccounts ? 'A drive location will be available after you add or restore and sign in to an account.' : providerEnabled ? 'This account’s OpenCloud location in the computer’s file manager. Save files inside Personal or a writable Space; the top-level folder is read-only.' : 'Windows cloud drive support is not enabled. Choosing a folder saves its setup, but does not mount or sync files.'}</p></div></div><div class="settings-row"><div><b>Mount status</b><small>${noAccounts ? 'No active account' : !providerEnabled ? state.status?.cloud_root ? `Configured but disconnected at ${esc(state.status.cloud_root)}` : 'Windows cloud drive is not mounted' : (connected || connection === 'offline_reconnecting') && state.status?.cloud_root ? `${state.status.mounted ? 'Mounted at' : 'Configured at'} ${esc(state.status.cloud_root)}` : 'No cloud drive location reported for this account'}</small></div><div class="button-group"><button class="button subtle" data-action="mount" ${noAccounts || mountControls.mountDisabled ? 'disabled' : ''}>Mount</button><button class="button subtle" data-action="unmount" ${noAccounts || mountControls.unmountDisabled ? 'disabled' : ''}>Unmount</button></div></div><div class="settings-row"><div><b>Choose location</b><small>Pick this account’s directory for the OpenCloud drive.</small></div><button class="button subtle" data-action="configure-root" ${!noAccounts && state.agentReachable && connected ? '' : 'disabled'}>Choose folder</button></div></section>
     <div class="settings-section-label">Network</div>${networkProxySettingsCard(connected, connection)}
     ${bandwidthSettingsCard()}
-    <div class="settings-section-label">Security</div><section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('lock')}</span><div><h2>Encrypted files</h2><p>${featureAvailable('vaults_supported') ? nativeVaultAccess() ? 'Unlock an encrypted Space or folder through the Windows drive. Supported existing-file saves are shown after unlock.' : 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder; use the Encrypted files workspace.' : 'Encrypted file browsing is unavailable for this agent.'}</p></div></div><div class="settings-row"><div><b>Browse encrypted files</b><small>${nativeVaultAccess() ? 'Choose a Space, then unlock a location in the Windows drive. Save availability depends on the file and current connection. Encrypted offline copies are unavailable here.' : 'Choose a Space, then unlock an encrypted location. Offline edits, when available, apply only to supported operations in this unlocked location.'}</small></div><button class="button primary" data-page="encrypted" ${featureAvailable('vaults_supported') && state.agentReachable ? '' : 'disabled'}>Open Encrypted files</button></div></section>
-    ${windowsAgent ? windowsRecoverySettingsCard() : `<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Saved upload copies</h2><p>Raiun keeps local copies for unfinished uploads and cancelled copies.</p></div></div><div class="settings-row"><div><b>Saved copies</b><small>Review the local and OpenCloud paths. Viewing does not restore, upload, or delete files.</small></div><div class="button-group"><button class="button subtle" data-action="open-recovery" ${canOpenRecoveryFolder ? '' : 'disabled'}>Open folder</button><button class="button primary" data-action="load-recoveries" ${canInspectRecoveries && !state.recoveryLoading ? '' : 'disabled'}>${state.recoveryLoading ? 'Checking…' : recoveryPage ? 'Refresh list' : 'View saved copies'}</button></div></div>${!state.agentReachable ? `<p class="recovery-hint">Raiun is not connected.</p>` : !state.status?.recovery_folder ? `<p class="recovery-hint">No upload-copy folder is linked to this account yet. You can still check for saved copies; sign in to associate future copies with this account.</p>` : ''}${state.recoveryError ? `<div class="recovery-warning" role="alert">${esc(state.recoveryError)}</div>` : ''}${state.recoveryLoading ? `<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking saved copies…</div>` : ''}${recoveryNotice}${recoveryRows}${recoveryPage?.next_after && !state.recoveryLoading ? `<div class="recovery-more"><button class="button subtle" data-action="more-recoveries">Load more</button></div>` : ''}</section>${nativeVaultAccess() ? '' : encryptedEditRecoveryCard()}`}
-    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('play')}</span><div><h2>Startup</h2><p>Start Raiun when you sign in to this computer.</p></div></div><div class="settings-row"><div><b>Launch at login</b><small>${!providerEnabled ? 'Startup setting is unavailable for this Windows agent' : state.autostart == null ? 'Current setting is not reported by the agent' : state.autostart ? 'Raiun will start at login' : 'Raiun will not start at login'}</small></div><button class="button ${state.autostart ? 'subtle' : 'primary'}" data-action="toggle-autostart" ${providerEnabled && connected && typeof state.autostart === 'boolean' ? '' : 'disabled'}>${state.autostart ? 'Disable' : 'Enable'}</button></div></section>
-    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('pause')}</span><div><h2>Sync activity</h2><p>Pause background work across your folder pairs.</p></div></div><div class="settings-row"><div><b>${!featureAvailable('pause_supported') ? 'Windows folder sync is unavailable' : connection === 'offline_reconnecting' ? 'Working offline' : !connected ? 'Sign in to enable sync' : state.status?.paused ? 'Sync is paused' : 'Sync is enabled'}</b><small>${!featureAvailable('pause_supported') ? 'This agent does not support pausing folder sync.' : connection === 'offline_reconnecting' ? 'Raiun will retry the server connection; no new sign-in is needed.' : 'The current file may finish first. Opening cloud files can still use the network.'}</small></div><button class="button subtle" data-action="toggle-pause" ${featureAvailable('pause_supported') && folderLocalSettingsAvailable() ? '' : 'disabled'}>${state.status?.paused ? 'Resume sync' : 'Pause sync'}</button></div></section>
-    <div class="settings-section-label">Diagnostics &amp; updates</div>${desktopUpdatesSettingsCard()}<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('alert')}</span><div><h2>Diagnostics</h2><p>Export a redacted summary for the selected account with app version, platform, configuration counts, and connection status. It omits account identifiers, folder paths, credentials, and logs.</p></div></div><div class="settings-row"><div><b>Local support report</b><small>Choose a new file location. Existing files are never replaced.</small></div><button class="button subtle" data-action="export-diagnostics" ${!isTauri() || state.nativeDialogBusy ? 'disabled' : ''}>${state.nativeDialogBusy ? 'Preparing…' : 'Export report'}</button></div></section>${removedAccountSection}</div>`;
+    <div class="settings-section-label">Security</div><section class="settings-card settings-card-single"><div class="settings-row settings-single-row"><div class="settings-heading"><span class="settings-icon">${svg('lock')}</span><div><h2>Encrypted files</h2><p>${featureAvailable('vaults_supported') ? nativeVaultAccess() ? 'Unlock an encrypted Space or folder through the Windows drive. Supported existing-file saves are shown after unlock.' : 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder; use the Encrypted files workspace.' : 'Encrypted file browsing is unavailable for this agent.'}</p><b>Browse encrypted files</b><small>${nativeVaultAccess() ? 'Choose a Space, then unlock a location in the Windows drive. Save availability depends on the file and current connection. Encrypted offline copies are unavailable here.' : 'Choose a Space, then unlock an encrypted location. Offline edits, when available, apply only to supported operations in this unlocked location.'}</small></div></div><button class="button primary" data-page="encrypted" ${featureAvailable('vaults_supported') && state.agentReachable ? '' : 'disabled'}>Open Encrypted files</button></div></section>
+    ${windowsAgent ? windowsRecoverySettingsCard() : `<section class="settings-card settings-card-single"><div class="settings-row settings-single-row"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Saved upload copies</h2><p>Raiun keeps local copies for unfinished uploads and cancelled copies.</p><b>Saved copies</b><small>Review the local and OpenCloud paths. Viewing does not restore, upload, or delete files.</small></div></div><div class="button-group"><button class="button subtle" data-action="open-recovery" ${canOpenRecoveryFolder ? '' : 'disabled'}>Open folder</button><button class="button primary" data-action="load-recoveries" ${canInspectRecoveries && !state.recoveryLoading ? '' : 'disabled'}>${state.recoveryLoading ? 'Checking…' : recoveryPage ? 'Refresh list' : 'View saved copies'}</button></div></div>${!state.agentReachable ? `<p class="recovery-hint">Raiun is not connected.</p>` : !state.status?.recovery_folder ? `<p class="recovery-hint">No upload-copy folder is linked to this account yet. You can still check for saved copies; sign in to associate future copies with this account.</p>` : ''}${state.recoveryError ? `<div class="recovery-warning" role="alert">${esc(state.recoveryError)}</div>` : ''}${state.recoveryLoading ? `<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking saved copies…</div>` : ''}${recoveryNotice}${recoveryRows}${recoveryPage?.next_after && !state.recoveryLoading ? `<div class="recovery-more"><button class="button subtle" data-action="more-recoveries">Load more</button></div>` : ''}</section>${nativeVaultAccess() ? '' : encryptedEditRecoveryCard()}`}
+    <section class="settings-card settings-card-single"><div class="settings-row settings-single-row"><div class="settings-heading"><span class="settings-icon">${svg('play')}</span><div><h2>Startup</h2><p>Start Raiun when you sign in to this computer.</p><b>Launch at login</b><small>${!providerEnabled ? 'Startup setting is unavailable for this Windows agent' : state.autostart == null ? 'Current setting is not reported by the agent' : state.autostart ? 'Raiun will start at login' : 'Raiun will not start at login'}</small></div></div><button class="button ${state.autostart ? 'subtle' : 'primary'}" data-action="toggle-autostart" ${providerEnabled && connected && typeof state.autostart === 'boolean' ? '' : 'disabled'}>${state.autostart ? 'Disable' : 'Enable'}</button></div></section>
+    <section class="settings-card settings-card-single"><div class="settings-row settings-single-row"><div class="settings-heading"><span class="settings-icon">${svg('pause')}</span><div><h2>Sync activity</h2><p>Pause background work across your folder pairs.</p><b>${!featureAvailable('pause_supported') ? 'Windows folder sync is unavailable' : connection === 'offline_reconnecting' ? 'Working offline' : !connected ? 'Sign in to enable sync' : state.status?.paused ? 'Sync is paused' : 'Sync is enabled'}</b><small>${!featureAvailable('pause_supported') ? 'This agent does not support pausing folder sync.' : connection === 'offline_reconnecting' ? 'Raiun will retry the server connection; no new sign-in is needed.' : 'The current file may finish first. Opening cloud files can still use the network.'}</small></div></div><button class="button subtle" data-action="toggle-pause" ${featureAvailable('pause_supported') && folderLocalSettingsAvailable() ? '' : 'disabled'}>${state.status?.paused ? 'Resume sync' : 'Pause sync'}</button></div></section>
+    <div class="settings-section-label">Diagnostics &amp; updates</div>${desktopUpdatesSettingsCard()}<section class="settings-card settings-card-single"><div class="settings-row settings-single-row"><div class="settings-heading"><span class="settings-icon">${svg('alert')}</span><div><h2>Diagnostics</h2><p>Export a redacted summary for the selected account with app version, platform, configuration counts, and connection status. It omits account identifiers, folder paths, credentials, and logs.</p><b>Local support report</b><small>Choose a new file location. Existing files are never replaced.</small></div></div><button class="button subtle" data-action="export-diagnostics" ${!isTauri() || state.nativeDialogBusy ? 'disabled' : ''}>${state.nativeDialogBusy ? 'Preparing…' : 'Export report'}</button></div></section>${removedAccountSection}</div>`;
 }
 function desktopUpdateNotification() {
   const update = desktopUpdateUi.status;
@@ -2673,6 +2804,7 @@ function desktopUpdateNotification() {
 }
 
 function leaveWorkspacePage(nextPage: Page) {
+  if (state.page === 'transfers' && nextPage !== 'transfers') stopEncryptedRetryLatestPolling();
   if (state.page === 'guest' && nextPage !== 'guest') {
     sharingWorkspace.leave();
     if (state.pickerPurpose === 'guest') { state.pickerGeneration++; state.pickerOpen = false; state.pickerPurpose = 'pair'; }
@@ -2698,11 +2830,8 @@ function navigateToPage(page: Page) {
   if (page === 'guest') { void loadSpaces(true); void sharingWorkspace.enter(); }
   if (page === 'folders') void mediaJobs.refresh();
   if (page === 'settings') { void loadNetworkProxySettings(); void loadBandwidthSettings(); }
-  if (page === 'transfers') {
-    if (isWindowsAgentStatus(state.status)) void loadWindowsRecoveryList();
-    else void loadPendingOfflineWrites(true);
-    if (vaultAppFeaturesAvailable()) void loadEncryptedEditRecoveries(true); if (vaultPendingFeaturesAvailable()) void refreshEncryptedRetryLatestStatuses();
-  } else stopEncryptedRetryLatestPolling();
+  if (page === 'transfers') loadTransfersWorkspace();
+  else stopEncryptedRetryLatestPolling();
   render();
 }
 
@@ -2762,7 +2891,7 @@ function windowsRecoverySettingsCard() {
     : recovery.page
       ? '<div class="recovery-empty" role="status" aria-live="polite">No saved edits need review in this scan.</div>'
       : '';
-  return `<section class="settings-card windows-recovery-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Saved file edits</h2><p>Local copies of edits to files on this Windows computer. Viewing this list does not change the files.</p></div></div><div class="settings-row"><div><b>Saved edits</b><small>${context ? 'Cloud completion is not confirmed by this list.' : 'Availability depends on the current account and Windows folder.'}</small></div><button class="button primary" data-action="load-windows-recovery" ${!context || busy ? 'disabled' : ''}>${recovery.loading ? 'Checking…' : recovery.page ? 'Refresh list' : 'Check saved edits'}</button></div>${reason ? `<p class="recovery-hint" role="status">${esc(reason)}</p>` : ''}${recovery.retryResult ? `<p class="recovery-hint" role="status">${esc(windowsRecoveryRetryMessage(recovery.retryResult))}</p>` : ''}${recovery.error ? `<div class="recovery-warning" role="alert">${esc(recovery.error)}</div>` : ''}${recovery.loading ? '<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking local saved edits…</div>' : ''}${rows}${recovery.page?.next_after ? `<div class="recovery-warning" role="status">${recovery.page.items.length} saved edits are shown. More edits are saved locally; this list is incomplete.</div>` : ''}</section>`;
+  return `<section class="settings-card settings-card-single windows-recovery-card"><div class="settings-row settings-single-row"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Saved file edits</h2><p>Local copies of edits to files on this Windows computer. Viewing this list does not change the files.</p><b>Saved edits</b><small>${context ? 'Cloud completion is not confirmed by this list.' : 'Availability depends on the current account and Windows folder.'}</small></div></div><button class="button primary" data-action="load-windows-recovery" ${!context || busy ? 'disabled' : ''}>${recovery.loading ? 'Checking…' : recovery.page ? 'Refresh list' : 'Check saved edits'}</button></div>${reason ? `<p class="recovery-hint" role="status">${esc(reason)}</p>` : ''}${recovery.retryResult ? `<p class="recovery-hint" role="status">${esc(windowsRecoveryRetryMessage(recovery.retryResult))}</p>` : ''}${recovery.error ? `<div class="recovery-warning" role="alert">${esc(recovery.error)}</div>` : ''}${recovery.loading ? '<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking local saved edits…</div>' : ''}${rows}${recovery.page?.next_after ? `<div class="recovery-warning" role="status">${recovery.page.items.length} saved edits are shown. More edits are saved locally; this list is incomplete.</div>` : ''}</section>`;
 }
 
 function encryptedEditRecoveryCard() {
@@ -2777,7 +2906,7 @@ function encryptedEditRecoveryCard() {
     }).join('')}</div>`
     : page ? `<div class="recovery-empty" role="status" aria-live="polite">${page.scanned_entries === 0 ? 'No saved encrypted-file edits. Nothing to review.' : 'No entries on this page.'}</div>` : '';
   const summary = counts ? `<div class="encrypted-edit-summary">${counts.building ? `${counts.building} local copy reservation(s) still being prepared · ` : ''}${counts.pending ? `${counts.pending} needing review · ` : ''}${counts.uncertain ? `${counts.uncertain} uncertain · ` : ''}${counts.committed ? `${counts.committed} upload record(s) · ` : ''}${counts.clean ? `${counts.clean} with no pending edit · ` : ''}${counts.corrupt ? `${counts.corrupt} metadata warning(s)` : ''}</div>` : '';
-  return `<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('lock')}</span><div><h2>Saved encrypted-file edits</h2><p>Local working copies of edits to encrypted OpenCloud files. These copies are readable plaintext on this computer.</p></div></div><div class="settings-row"><div><b>Local recovery records</b><small>This list only shows local record status. It does not force an upload, restore, or delete these copies.</small></div><div class="button-group"><button class="button subtle" data-action="open-encrypted-edit-folder" ${state.status?.encrypted_edit_recovery_available ? '' : 'disabled'}>Open folder</button><button class="button primary" data-action="load-encrypted-edit-recoveries" ${state.agentReachable && !state.encryptedEditRecoveryLoading ? '' : 'disabled'}>${state.encryptedEditRecoveryLoading ? 'Checking…' : page ? 'Refresh list' : 'View saved edits'}</button></div></div>${state.encryptedEditRecoveryError ? `<div class="recovery-warning" role="alert">${esc(state.encryptedEditRecoveryError)}</div>` : ''}${state.encryptedEditRecoveryLoading ? `<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking local recovery records…</div>` : ''}${page?.truncated ? `<div class="recovery-warning" role="status">The scan reached its safety limit; this list may be incomplete.</div>` : ''}${summary}${rows}${page?.next_after && !state.encryptedEditRecoveryLoading ? `<div class="recovery-more"><button class="button subtle" data-action="more-encrypted-edit-recoveries">Load more</button></div>` : ''}</section>`;
+  return `<section class="settings-card settings-card-single"><div class="settings-row settings-single-row"><div class="settings-heading"><span class="settings-icon">${svg('lock')}</span><div><h2>Saved encrypted-file edits</h2><p>Local working copies of edits to encrypted OpenCloud files. These copies are readable plaintext on this computer.</p><b>Local recovery records</b><small>This list only shows local record status. It does not force an upload, restore, or delete these copies.</small></div></div><div class="button-group"><button class="button subtle" data-action="open-encrypted-edit-folder" ${state.status?.encrypted_edit_recovery_available ? '' : 'disabled'}>Open folder</button><button class="button primary" data-action="load-encrypted-edit-recoveries" ${state.agentReachable && !state.encryptedEditRecoveryLoading ? '' : 'disabled'}>${state.encryptedEditRecoveryLoading ? 'Checking…' : page ? 'Refresh list' : 'View saved edits'}</button></div></div>${state.encryptedEditRecoveryError ? `<div class="recovery-warning" role="alert">${esc(state.encryptedEditRecoveryError)}</div>` : ''}${state.encryptedEditRecoveryLoading ? `<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking local recovery records…</div>` : ''}${page?.truncated ? `<div class="recovery-warning" role="status">The scan reached its safety limit; this list may be incomplete.</div>` : ''}${summary}${rows}${page?.next_after && !state.encryptedEditRecoveryLoading ? `<div class="recovery-more"><button class="button subtle" data-action="more-encrypted-edit-recoveries">Load more</button></div>` : ''}</section>`;
 }
 function recoveryCard(item: RecoveryCopy) {
   const space = item.space_id ? (state.spaces.find(candidate => candidate.id === item.space_id)?.name || item.space_id) : 'OpenCloud location unavailable';
@@ -3211,80 +3340,84 @@ function vaultDialog() {
   return `<div class="modal-backdrop" data-backdrop="vault"><section class="modal vault-modal" role="dialog" aria-modal="true" aria-labelledby="vault-title" tabindex="-1"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="vault-title">${copyChoosingDestination ? copyProducerUi.operation === 'move' ? 'Choose move destination' : 'Choose copy destination' : title}</h2></div><button class="icon-button" data-vault-action="close" aria-label="Close" ${closeDisabled || copyActive ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">${copyChoosingDestination ? copyProducerUi.operation === 'move' ? 'Choose an unlocked writable encrypted folder. Raiun verifies a new encrypted copy before removing the unchanged original.' : 'Choose an unlocked writable encrypted folder. Raiun creates a new file there and keeps the original in place.' : browseExplanation}</p><div class="vault-root">${svg('lock')}<code>${esc(flow.offlineUnlockOnly ? opaqueOfflineLabel : rootDisplay)}</code></div>${flow.error ? `<div class="vault-error" ${passwordErrorActive ? 'id="vault-password-error" ' : ''}role="alert">${svg('alert')}<span>${esc(flow.error)}</span></div>` : ''}${flow.closeBlockedNotice ? `<div class="vault-state" role="status" aria-live="polite" aria-atomic="true">${esc(flow.closeBlockedNotice)}</div>` : ''}${flow.intent !== 'create'? `<div class="vault-state ${flow.unlocked && !flow.statusUnknown ? 'unlocked' : ''}" role="status" aria-live="polite" aria-atomic="true">${liveLockState}</div>` : ''}${createForm}${rememberedNote}${flow.unlocked && !flow.statusUnknown ? nativeVaultAccess() ? `${nativeVaultDrivePanel(flow, busy)}${vaultOfflinePinPanel(flow)}${encryptedCacheAllowancePanel()}${vaultEditRetryPanel(flow)}${nativeVaultBrowseAvailable(flow) ? `<div class="vault-browse-label">Read-only encrypted folder <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}` : ''}${destinationAction}${copyPanel}` : `<div class="vault-browse-label">${copyChoosingDestination ? 'Destination folder' : 'Folders inside this encrypted location'} <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}${destinationAction}${copyPanel}${!copyChoosingDestination ? `${vaultOfflinePinPanel(flow)}${vaultEditRetryPanel(flow)}` : ''}` : copyPanel}${protectedRecoveryPanel}<div class="helper-note">Your vault password is not saved unless you choose “Remember on this device.” After an opted-in successful unlock, Raiun stores the password in the operating system’s protected credential store for this account and vault. Locking the vault does not remove it; use “Forget saved key” separately. If a vault password is lost, its encrypted cloud contents cannot be recovered by Raiun.</div>${flow.intent !== 'create' ? `<div class="helper-note">${esc(mountedAvailability)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-vault-action="close" ${closeDisabled || copyActive ? 'disabled' : ''}>Close</button>${unlockButton}${savedUnlockButton}${lockButton}${flow.offlineUnlockOnly ? '' : forgetButton}${statusButton}${useButton}${vaultCreateAvailable() && flow.intent === 'create' ? `<button class="button primary" data-vault-action="create" ${busy ? 'disabled' : ''}>${busy ? 'Creating…' : 'Create vault'}</button>` : ''}</div></section></div>`;
 }
 
-function bind() {
+function bind(root: HTMLElement = app) {
   const offlineControlScope = { epoch: state.accountEpoch, profileId: state.selectedAccount, spaceId: state.spaceId, generation: state.pickerGeneration, authGeneration: state.status?.auth_generation ?? null };
-  mediaJobs.bind(app);
-  app.querySelectorAll<HTMLElement>('[data-page]').forEach(el => el.addEventListener('click', () => navigateToPage(el.dataset.page as Page)));
-  app.querySelector('#refresh')?.addEventListener('click', () => void refresh(true, true));
-  app.querySelectorAll<HTMLButtonElement>('[data-account-id]').forEach(el => el.addEventListener('click', () => { if (el.dataset.accountId) void switchAccount(el.dataset.accountId); }));
-  app.querySelectorAll<HTMLElement>('[data-action]').forEach(el => el.addEventListener('click', () => void handleAction(el.dataset.action || '', el)));
-  app.querySelector<HTMLSelectElement>('#network-proxy-mode')?.addEventListener('change', event => {
+  mediaJobs.bind(root);
+  root.querySelectorAll<HTMLElement>('[data-page]').forEach(el => el.addEventListener('click', () => navigateToPage(el.dataset.page as Page)));
+  root.querySelector('#refresh')?.addEventListener('click', () => void refresh(true, true));
+  root.querySelectorAll<HTMLButtonElement>('[data-account-id]').forEach(el => el.addEventListener('click', () => { if (el.dataset.accountId) void switchAccount(el.dataset.accountId); }));
+  root.querySelectorAll<HTMLElement>('[data-action]').forEach(el => el.addEventListener('click', () => void handleAction(el.dataset.action || '', el)));
+  root.querySelector<HTMLSelectElement>('#network-proxy-mode')?.addEventListener('change', event => {
     proxyUi.draftMode = (event.target as HTMLSelectElement).value as ProxyMode;
     render();
   });
-  app.querySelector<HTMLSelectElement>('#appearance-theme')?.addEventListener('change', event => {
+  root.querySelector<HTMLSelectElement>('#appearance-theme')?.addEventListener('change', event => {
     const theme = (event.target as HTMLSelectElement).value as AppearanceTheme;
     const next = writeAppearance({ getItem: key => window.localStorage.getItem(key), setItem: (key, value) => window.localStorage.setItem(key, value) }, state.selectedAccount, { theme });
     document.documentElement.dataset.theme = next.theme;
     render();
   });
   const accentProfileId = state.selectedAccount;
-  app.querySelectorAll<HTMLInputElement>('input[name="account-accent"]').forEach(input => input.addEventListener('change', () => {
+  root.querySelectorAll<HTMLInputElement>('input[name="account-accent"]').forEach(input => input.addEventListener('change', () => {
     if (!input.checked || !accentProfileId || state.selectedAccount !== accentProfileId || !state.accounts.some(account => account.id === accentProfileId)) return;
     const accent = input.value as AccentName;
     const appearance = writeAppearance({ getItem: key => window.localStorage.getItem(key), setItem: (key, value) => window.localStorage.setItem(key, value) }, accentProfileId, { accent });
     document.documentElement.style.setProperty('--account-accent', ACCENT_COLORS[appearance.accent]);
     render();
   }));
-  app.querySelector<HTMLInputElement>('#account-display-name')?.addEventListener('input', event => {
+  root.querySelector<HTMLInputElement>('#account-display-name')?.addEventListener('input', event => {
     if (!accountRenameContextCurrent() || accountRenameUi.saving) return;
     accountRenameUi.draft = (event.target as HTMLInputElement).value;
     accountRenameUi.error = '';
     const save = app.querySelector<HTMLButtonElement>('[data-action="save-account-name"]');
     if (save) save.disabled = !accountRenameCanSave();
   });
-  app.querySelector<HTMLInputElement>('#network-proxy-url')?.addEventListener('input', event => {
+  root.querySelector<HTMLInputElement>('#network-proxy-url')?.addEventListener('input', event => {
     proxyUi.draftUrl = (event.target as HTMLInputElement).value;
   });
-  app.querySelector<HTMLInputElement>('#upload-limit-kib')?.addEventListener('input', event => {
+  root.querySelector<HTMLInputElement>('#upload-limit-kib')?.addEventListener('input', event => {
     bandwidthUi.upload = (event.target as HTMLInputElement).value;
   });
-  app.querySelector<HTMLInputElement>('#download-limit-kib')?.addEventListener('input', event => {
+  root.querySelector<HTMLInputElement>('#download-limit-kib')?.addEventListener('input', event => {
     bandwidthUi.download = (event.target as HTMLInputElement).value;
   });
-  app.querySelector<HTMLInputElement>('#desktop-update-auto')?.addEventListener('change', event => {
+  root.querySelector<HTMLInputElement>('#desktop-update-auto')?.addEventListener('change', event => {
     void saveDesktopUpdatePreferences((event.target as HTMLInputElement).checked, desktopUpdateUi.status?.channel || 'beta');
   });
-  app.querySelector<HTMLSelectElement>('#desktop-update-channel')?.addEventListener('change', event => {
+  root.querySelector<HTMLSelectElement>('#desktop-update-channel')?.addEventListener('change', event => {
     void saveDesktopUpdatePreferences(desktopUpdateUi.status?.automatic_checks !== false, (event.target as HTMLSelectElement).value as 'stable' | 'beta');
   });
-  app.querySelectorAll<HTMLElement>('[data-vault-edit-latest-cancel]').forEach(el => el.addEventListener('click', () => void cancelEncryptedRetryLatest(el)));
-  app.querySelectorAll<HTMLElement>('[data-filter]').forEach(el => el.addEventListener('click', () => { state.transferFilter = el.dataset.filter || 'active'; render(); }));
-  app.querySelectorAll<HTMLElement>('[data-remove-pair]').forEach(el => el.addEventListener('click', () => void removePair(el.dataset.removePair || '')));
-  app.querySelectorAll<HTMLElement>('[data-toggle-exclusions]').forEach(el => el.addEventListener('click', () => togglePairExclusions(el.dataset.toggleExclusions || '')));
-  app.querySelectorAll<HTMLSelectElement>('[data-exclusion-kind-select]').forEach(el => el.addEventListener('change', () => { const id = el.dataset.exclusionKindSelect || ''; if (id) pairExclusionsUi.kinds.set(id, el.value as FolderExclusionKind); render(); }));
-  app.querySelectorAll<HTMLSelectElement>('[data-pair-mode]').forEach(el => el.addEventListener('change', () => { const edit = pairExclusionsUi.edits.get(el.dataset.pairMode || ''); if (edit && (el.value === 'two_way' || el.value === 'upload_only' || el.value === 'download_only')) edit.mode = el.value; }));
-  app.querySelectorAll<HTMLSelectElement>('[data-pair-filter]').forEach(el => el.addEventListener('change', () => { const edit = pairExclusionsUi.edits.get(el.dataset.pairFilter || ''); if (edit && (el.value === 'all' || el.value === 'photos' || el.value === 'videos')) edit.content_filter = el.value; }));
-  app.querySelectorAll<HTMLInputElement>('[data-exclusion-input]').forEach(el => el.addEventListener('input', () => { const id = el.dataset.exclusionInput || ''; pairExclusionsUi.drafts.set(id, el.value); const button = app.querySelector<HTMLButtonElement>(`[data-add-exclusion="${CSS.escape(id)}"]`); if (button) button.disabled = !el.value.trim() || state.mutationBusy > 0 || pairExclusionsUi.busy.has(id); }));
-  app.querySelectorAll<HTMLButtonElement>('[data-add-exclusion]').forEach(el => el.addEventListener('click', () => addPairExclusion(el.dataset.addExclusion || '')));
-  app.querySelectorAll<HTMLButtonElement>('[data-save-pair-settings]').forEach(el => el.addEventListener('click', () => void updatePairSettings(el.dataset.savePairSettings || '')));
-  app.querySelectorAll<HTMLButtonElement>('[data-cancel-pair-settings]').forEach(el => el.addEventListener('click', () => cancelPairSettings(el.dataset.cancelPairSettings || '')));
-  app.querySelectorAll<HTMLButtonElement>('[data-remove-exclusion]').forEach(el => el.addEventListener('click', () => { const index = Number(el.dataset.exclusionIndex); if (!el.dataset.removeExclusion || !Number.isInteger(index)) return; if (el.dataset.exclusionKind === 'typed') void removePairTypedExclusion(el.dataset.removeExclusion, index); else void removePairExclusion(el.dataset.removeExclusion, index); }));
-  app.querySelectorAll<HTMLElement>('[data-review-pair]').forEach(el => el.addEventListener('click', () => void toggleConflicts(el.dataset.reviewPair || '')));
-  app.querySelectorAll<HTMLElement>('[data-refresh-conflicts]').forEach(el => el.addEventListener('click', () => void loadConflictPage(el.dataset.refreshConflicts || '', true)));
-  app.querySelectorAll<HTMLElement>('[data-more-conflicts]').forEach(el => el.addEventListener('click', () => void loadConflictPage(el.dataset.moreConflicts || '', false)));
-  app.querySelectorAll<HTMLButtonElement>('[data-resolve-conflict]').forEach(el => el.addEventListener('click', () => void resolveConflict(el)));
-  app.querySelectorAll<HTMLElement>('[data-retry]').forEach(el => el.addEventListener('click', () => void transferAction('retry', el.dataset.retry || '')));
-  app.querySelectorAll<HTMLElement>('[data-cancel]').forEach(el => el.addEventListener('click', () => void transferAction('cancel', el.dataset.cancel || '')));
-  app.querySelectorAll<HTMLElement>('[data-remote-path]').forEach(el => el.addEventListener('click', () => { const path = el.dataset.remotePath || '/'; const entry = state.pickerEntries.find(item => item.path === path); if (entry) state.pickerWritable[path] = entry.writable === true && entry.encrypted !== true; void browseRemote(path); }));
-  app.querySelectorAll<HTMLElement>('[data-offline-view]').forEach(el => el.addEventListener('click', () => {
+  root.querySelectorAll<HTMLElement>('[data-vault-edit-latest-cancel]').forEach(el => el.addEventListener('click', () => void cancelEncryptedRetryLatest(el)));
+  root.querySelectorAll<HTMLElement>('[data-transfer-workspace]').forEach(el => el.addEventListener('click', () => {
+    const workspace = el.dataset.transferWorkspace;
+    if (workspace === 'activity' || workspace === 'saved' || workspace === 'encrypted') selectTransfersWorkspace(workspace);
+  }));
+  root.querySelectorAll<HTMLElement>('[data-filter]').forEach(el => el.addEventListener('click', () => { state.transferFilter = el.dataset.filter || 'active'; render(); }));
+  root.querySelectorAll<HTMLElement>('[data-remove-pair]').forEach(el => el.addEventListener('click', () => void removePair(el.dataset.removePair || '')));
+  root.querySelectorAll<HTMLElement>('[data-toggle-exclusions]').forEach(el => el.addEventListener('click', () => togglePairExclusions(el.dataset.toggleExclusions || '')));
+  root.querySelectorAll<HTMLSelectElement>('[data-exclusion-kind-select]').forEach(el => el.addEventListener('change', () => { const id = el.dataset.exclusionKindSelect || ''; if (id) pairExclusionsUi.kinds.set(id, el.value as FolderExclusionKind); render(); }));
+  root.querySelectorAll<HTMLSelectElement>('[data-pair-mode]').forEach(el => el.addEventListener('change', () => { const edit = pairExclusionsUi.edits.get(el.dataset.pairMode || ''); if (edit && (el.value === 'two_way' || el.value === 'upload_only' || el.value === 'download_only')) edit.mode = el.value; }));
+  root.querySelectorAll<HTMLSelectElement>('[data-pair-filter]').forEach(el => el.addEventListener('change', () => { const edit = pairExclusionsUi.edits.get(el.dataset.pairFilter || ''); if (edit && (el.value === 'all' || el.value === 'photos' || el.value === 'videos')) edit.content_filter = el.value; }));
+  root.querySelectorAll<HTMLInputElement>('[data-exclusion-input]').forEach(el => el.addEventListener('input', () => { const id = el.dataset.exclusionInput || ''; pairExclusionsUi.drafts.set(id, el.value); const button = app.querySelector<HTMLButtonElement>(`[data-add-exclusion="${CSS.escape(id)}"]`); if (button) button.disabled = !el.value.trim() || state.mutationBusy > 0 || pairExclusionsUi.busy.has(id); }));
+  root.querySelectorAll<HTMLButtonElement>('[data-add-exclusion]').forEach(el => el.addEventListener('click', () => addPairExclusion(el.dataset.addExclusion || '')));
+  root.querySelectorAll<HTMLButtonElement>('[data-save-pair-settings]').forEach(el => el.addEventListener('click', () => void updatePairSettings(el.dataset.savePairSettings || '')));
+  root.querySelectorAll<HTMLButtonElement>('[data-cancel-pair-settings]').forEach(el => el.addEventListener('click', () => cancelPairSettings(el.dataset.cancelPairSettings || '')));
+  root.querySelectorAll<HTMLButtonElement>('[data-remove-exclusion]').forEach(el => el.addEventListener('click', () => { const index = Number(el.dataset.exclusionIndex); if (!el.dataset.removeExclusion || !Number.isInteger(index)) return; if (el.dataset.exclusionKind === 'typed') void removePairTypedExclusion(el.dataset.removeExclusion, index); else void removePairExclusion(el.dataset.removeExclusion, index); }));
+  root.querySelectorAll<HTMLElement>('[data-review-pair]').forEach(el => el.addEventListener('click', () => void toggleConflicts(el.dataset.reviewPair || '')));
+  root.querySelectorAll<HTMLElement>('[data-refresh-conflicts]').forEach(el => el.addEventListener('click', () => void loadConflictPage(el.dataset.refreshConflicts || '', true)));
+  root.querySelectorAll<HTMLElement>('[data-more-conflicts]').forEach(el => el.addEventListener('click', () => void loadConflictPage(el.dataset.moreConflicts || '', false)));
+  root.querySelectorAll<HTMLButtonElement>('[data-resolve-conflict]').forEach(el => el.addEventListener('click', () => void resolveConflict(el)));
+  root.querySelectorAll<HTMLElement>('[data-retry]').forEach(el => el.addEventListener('click', () => void transferAction('retry', el.dataset.retry || '')));
+  root.querySelectorAll<HTMLElement>('[data-cancel]').forEach(el => el.addEventListener('click', () => void transferAction('cancel', el.dataset.cancel || '')));
+  root.querySelectorAll<HTMLElement>('[data-remote-path]').forEach(el => el.addEventListener('click', () => { const path = el.dataset.remotePath || '/'; const entry = state.pickerEntries.find(item => item.path === path); if (entry) state.pickerWritable[path] = entry.writable === true && entry.encrypted !== true; void browseRemote(path); }));
+  root.querySelectorAll<HTMLElement>('[data-offline-view]').forEach(el => el.addEventListener('click', () => {
     const view = el.dataset.offlineView;
     if (view !== 'browse' && view !== 'storage') return;
     offlineWorkspaceUi.view = view;
     if (el.dataset.offlineKind === 'folders' || el.dataset.offlineKind === 'files') offlineWorkspaceUi.windowsKind = el.dataset.offlineKind;
     render();
   }));
-  app.querySelectorAll<HTMLElement>('[data-offline-active]').forEach(el => el.addEventListener('click', () => {
+  root.querySelectorAll<HTMLElement>('[data-offline-active]').forEach(el => el.addEventListener('click', () => {
     const pin = offlineUi.pin;
     if (!pin || pin.accountEpoch !== state.accountEpoch || !state.spaces.some(space => space.id === pin.space_id && !space.encrypted)) return;
     offlineWorkspaceUi.view = 'browse';
@@ -3292,60 +3425,60 @@ function bind() {
     void loadOfflinePins(pin.space_id);
     void browseRemote(pin.path);
   }));
-  app.querySelectorAll<HTMLElement>('[data-offline-kind]').forEach(el => el.addEventListener('click', () => {
+  root.querySelectorAll<HTMLElement>('[data-offline-kind]').forEach(el => el.addEventListener('click', () => {
     const kind = el.dataset.offlineKind;
     if (kind !== 'folders' && kind !== 'files') return;
     offlineWorkspaceUi.windowsKind = kind;
     render();
   }));
-  if (state.page === 'guest') sharingWorkspace.bind(app);
+  if (state.page === 'guest') sharingWorkspace.bind(root);
   const boundCacheScope = cacheLimitUi.scope;
-  app.querySelector<HTMLInputElement>('#offline-limit-amount')?.addEventListener('input', event => {
+  root.querySelector<HTMLInputElement>('#offline-limit-amount')?.addEventListener('input', event => {
     if (cacheLimitUi.scope !== boundCacheScope || cacheLimitUi.busy) return;
     cacheLimitUi.amount = (event.currentTarget as HTMLInputElement).value;
     cacheLimitUi.error = ''; cacheLimitUi.notice = ''; render();
   });
-  app.querySelector<HTMLSelectElement>('#offline-limit-unit')?.addEventListener('change', event => {
+  root.querySelector<HTMLSelectElement>('#offline-limit-unit')?.addEventListener('change', event => {
     if (cacheLimitUi.scope !== boundCacheScope || cacheLimitUi.busy) return;
     cacheLimitUi.unit = (event.currentTarget as HTMLSelectElement).value === 'MiB' ? 'MiB' : 'GiB';
     cacheLimitUi.error = ''; cacheLimitUi.notice = ''; render();
   });
-  app.querySelector<HTMLFormElement>('#offline-limit-form')?.addEventListener('submit', event => { event.preventDefault(); void saveCacheLimit(boundCacheScope); });
-  app.querySelector<HTMLElement>('[data-action="cancel-cache-limit"]')?.addEventListener('click', () => {
+  root.querySelector<HTMLFormElement>('#offline-limit-form')?.addEventListener('submit', event => { event.preventDefault(); void saveCacheLimit(boundCacheScope); });
+  root.querySelector<HTMLElement>('[data-action="cancel-cache-limit"]')?.addEventListener('click', () => {
     if (cacheLimitUi.scope !== boundCacheScope || cacheLimitUi.busy) return;
     Object.assign(cacheLimitUi, cacheLimitDraft(cacheLimitUi.original), { error: '', notice: '' }); render();
   });
-  app.querySelectorAll<HTMLButtonElement>('[data-offline-options]').forEach(el => el.addEventListener('click', () => {
+  root.querySelectorAll<HTMLButtonElement>('[data-offline-options]').forEach(el => el.addEventListener('click', () => {
     const key = el.dataset.offlineOptions;
     if (!key || state.page !== 'offline') return;
     if (offlineWorkspaceUi.expanded.has(key)) offlineWorkspaceUi.expanded.delete(key);
     else offlineWorkspaceUi.expanded.add(key);
     render();
   }));
-  app.querySelectorAll<HTMLDetailsElement>('[data-offline-disclosure]').forEach(el => el.addEventListener('toggle', () => {
+  root.querySelectorAll<HTMLDetailsElement>('[data-offline-disclosure]').forEach(el => el.addEventListener('toggle', () => {
     const key = el.dataset.offlineDisclosure;
     if (!key) return;
     if (el.open) offlineWorkspaceUi.expanded.add(key);
     else offlineWorkspaceUi.expanded.delete(key);
   }));
-  app.querySelectorAll<HTMLElement>('[data-load-offline-policy]').forEach(el => el.addEventListener('click', () => void loadOfflinePolicy(el.dataset.loadOfflinePolicy || '')));
-  app.querySelectorAll<HTMLElement>('[data-load-folder-policy]').forEach(el => el.addEventListener('click', () => {
+  root.querySelectorAll<HTMLElement>('[data-load-offline-policy]').forEach(el => el.addEventListener('click', () => void loadOfflinePolicy(el.dataset.loadOfflinePolicy || '')));
+  root.querySelectorAll<HTMLElement>('[data-load-folder-policy]').forEach(el => el.addEventListener('click', () => {
     const path = el.dataset.loadFolderPolicy || '';
     const listingPath = el.dataset.folderListingPath || '';
     void loadOfflineFolderPolicy(path, listingPath, el.dataset.folderCurrent === 'true');
   }));
-  app.querySelectorAll<HTMLElement>('[data-set-folder-policy]').forEach(el => el.addEventListener('click', () => {
+  root.querySelectorAll<HTMLElement>('[data-set-folder-policy]').forEach(el => el.addEventListener('click', () => {
     const policy = el.dataset.setFolderPolicy;
     if (policy !== 'recent' && policy !== 'cloud_only') return;
     void setOfflineFolderPolicy(el.dataset.folderPath || '', el.dataset.folderListingPath || '', policy, el.dataset.folderCurrent === 'true');
   }));
-  app.querySelectorAll<HTMLElement>('[data-windows-offline-row]').forEach(el => el.addEventListener('click', () => selectWindowsOfflineFile(el.dataset.windowsOfflineRow || '')));
-  app.querySelectorAll<HTMLElement>('[data-windows-offline-folder-row]').forEach(el => el.addEventListener('click', () => windowsOfflineFoldersPanel.select(el.dataset.windowsOfflineFolderRow || '')));
-  app.querySelectorAll<HTMLElement>('[data-keep-offline-file]').forEach(el => el.addEventListener('click', () => void keepOfflineFileFromView(el.dataset.keepOfflineFile || '', offlineControlScope)));
-  app.querySelectorAll<HTMLSelectElement>('[data-offline-policy-path]').forEach(el => el.addEventListener('change', () => void setOfflinePolicy(el.dataset.offlinePolicyPath || '', el.value as OfflinePolicy)));
-  app.querySelectorAll<HTMLElement>('[data-pin-offline]').forEach(el => el.addEventListener('click', () => void startOfflinePin(el.dataset.pinOffline || '')));
-  app.querySelectorAll<HTMLElement>('[data-unpin-offline]').forEach(el => el.addEventListener('click', () => void stopOfflinePin(el.dataset.unpinOffline || '')));
-  app.querySelector<HTMLSelectElement>('#offline-space')?.addEventListener('change', event => {
+  root.querySelectorAll<HTMLElement>('[data-windows-offline-row]').forEach(el => el.addEventListener('click', () => selectWindowsOfflineFile(el.dataset.windowsOfflineRow || '')));
+  root.querySelectorAll<HTMLElement>('[data-windows-offline-folder-row]').forEach(el => el.addEventListener('click', () => windowsOfflineFoldersPanel.select(el.dataset.windowsOfflineFolderRow || '')));
+  root.querySelectorAll<HTMLElement>('[data-keep-offline-file]').forEach(el => el.addEventListener('click', () => void keepOfflineFileFromView(el.dataset.keepOfflineFile || '', offlineControlScope)));
+  root.querySelectorAll<HTMLSelectElement>('[data-offline-policy-path]').forEach(el => el.addEventListener('change', () => void setOfflinePolicy(el.dataset.offlinePolicyPath || '', el.value as OfflinePolicy)));
+  root.querySelectorAll<HTMLElement>('[data-pin-offline]').forEach(el => el.addEventListener('click', () => void startOfflinePin(el.dataset.pinOffline || '')));
+  root.querySelectorAll<HTMLElement>('[data-unpin-offline]').forEach(el => el.addEventListener('click', () => void stopOfflinePin(el.dataset.unpinOffline || '')));
+  root.querySelector<HTMLSelectElement>('#offline-space')?.addEventListener('change', event => {
     const spaceId = (event.target as HTMLSelectElement).value;
     if (!state.spaces.some(space => space.id === spaceId && !space.encrypted)) return;
     state.spaceId = spaceId;
@@ -3356,21 +3489,21 @@ function bind() {
     void loadOfflinePins(spaceId);
     void browseRemote('/');
   });
-  app.querySelector<HTMLElement>('[data-action="cancel-offline-pin"]')?.addEventListener('click', () => void cancelOfflinePin());
-  app.querySelectorAll<HTMLElement>('[data-vault-root]').forEach(el => el.addEventListener('click', () => {
+  root.querySelector<HTMLElement>('[data-action="cancel-offline-pin"]')?.addEventListener('click', () => void cancelOfflinePin());
+  root.querySelectorAll<HTMLElement>('[data-vault-root]').forEach(el => el.addEventListener('click', () => {
     const rootPath = el.dataset.vaultRoot || '/';
     const entry = state.pickerEntries.find(candidate => candidate.path === rootPath);
     const rootWritable = entry?.writable ?? state.pickerWritable[state.pickerPath] ?? false;
     if (copyProducerUi.source) state.pickerOpen = false;
     void openVaultFlow(state.pickerPurpose === 'encrypted_access' ? 'browse' : 'add', state.spaceId, rootPath, undefined, rootWritable);
   }));
-  app.querySelectorAll<HTMLElement>('[data-vault-pair]').forEach(el => {
+  root.querySelectorAll<HTMLElement>('[data-vault-pair]').forEach(el => {
     el.addEventListener('click', () => {
       const pair = state.pairs.find(item => item.id === el.dataset.vaultPair);
       if (pair?.vault) void openVaultFlow('manage', pair.space_id, pair.vault.root_path, pair.id);
     });
   });
-  app.querySelectorAll<HTMLElement>('[data-vault-path]').forEach(el => el.addEventListener('click', () => {
+  root.querySelectorAll<HTMLElement>('[data-vault-path]').forEach(el => el.addEventListener('click', () => {
     const flow = state.vaultDialog;
     if (flow) {
       const path = el.dataset.vaultPath || '/';
@@ -3387,11 +3520,11 @@ function bind() {
       void loadVaultPath(flow, path);
     }
   }));
-  app.querySelectorAll<HTMLButtonElement>('[data-copy-source-index]').forEach(el => el.addEventListener('click', () => {
+  root.querySelectorAll<HTMLButtonElement>('[data-copy-source-index]').forEach(el => el.addEventListener('click', () => {
     const index = Number(el.dataset.copySourceIndex);
     if (Number.isSafeInteger(index) && index >= 0) void beginVaultCopy(index, el.dataset.copyOperation === 'move' ? 'move' : 'copy');
   }));
-  app.querySelectorAll<HTMLElement>('[data-vault-action]').forEach(el => el.addEventListener('click', () => {
+  root.querySelectorAll<HTMLElement>('[data-vault-action]').forEach(el => el.addEventListener('click', () => {
     const action = el.dataset.vaultAction;
     if (action === 'close') closeVaultDialog();
     else if (action === 'unlock') void unlockVault(false);
@@ -3404,19 +3537,19 @@ function bind() {
     else if (action === 'create') void createEncryptedVault();
     else if (action === 'copy-use-destination') void startVaultCopyToCurrentFolder();
   }));
-  app.querySelector<HTMLButtonElement>('[data-vault-capture-refresh]')?.addEventListener('click', () => void loadProtectedVaultCaptures(true));
-  app.querySelector<HTMLButtonElement>('[data-vault-capture-more]')?.addEventListener('click', () => void loadProtectedVaultCaptures(false));
-  app.querySelectorAll<HTMLButtonElement>('[data-vault-capture-save]').forEach(el => el.addEventListener('click', () => void saveProtectedVaultCaptureCopy(el.dataset.vaultCaptureSave || '')));
-  app.querySelectorAll<HTMLButtonElement>('[data-vault-pin-start]').forEach(el => el.addEventListener('click', () => void startVaultOfflinePin(el.dataset.vaultPinStart || undefined)));
-  app.querySelector<HTMLButtonElement>('[data-vault-pin-cancel]')?.addEventListener('click', () => void cancelVaultOfflinePin());
-  app.querySelectorAll<HTMLButtonElement>('[data-vault-pin-remove]').forEach(el => el.addEventListener('click', () => void removeVaultOfflinePin(el.dataset.vaultPinRemove || '')));
-  app.querySelector<HTMLButtonElement>('[data-vault-edit-retry]')?.addEventListener('click', () => void startVaultEditRetry());
-  app.querySelector<HTMLButtonElement>('[data-vault-edit-retry-cancel]')?.addEventListener('click', () => void cancelVaultEditRetry());
-  app.querySelector<HTMLButtonElement>('[data-vault-cache-refresh]')?.addEventListener('click',()=>void updateEncryptedCacheAllowance());
-  app.querySelector<HTMLButtonElement>('[data-vault-cache-save]')?.addEventListener('click',()=>void updateEncryptedCacheAllowance(true));
-  app.querySelector<HTMLButtonElement>('[data-vault-pin-refresh-list]')?.addEventListener('click', () => { const flow = state.vaultDialog; if (flow) void loadVaultPins(flow, true); });
-  app.querySelector<HTMLButtonElement>('[data-vault-pin-more]')?.addEventListener('click', () => { const flow = state.vaultDialog; if (flow) void loadVaultPins(flow, false); });
-  app.querySelector<HTMLElement>('.vault-modal')?.addEventListener('keydown', event => {
+  root.querySelector<HTMLButtonElement>('[data-vault-capture-refresh]')?.addEventListener('click', () => void loadProtectedVaultCaptures(true));
+  root.querySelector<HTMLButtonElement>('[data-vault-capture-more]')?.addEventListener('click', () => void loadProtectedVaultCaptures(false));
+  root.querySelectorAll<HTMLButtonElement>('[data-vault-capture-save]').forEach(el => el.addEventListener('click', () => void saveProtectedVaultCaptureCopy(el.dataset.vaultCaptureSave || '')));
+  root.querySelectorAll<HTMLButtonElement>('[data-vault-pin-start]').forEach(el => el.addEventListener('click', () => void startVaultOfflinePin(el.dataset.vaultPinStart || undefined)));
+  root.querySelector<HTMLButtonElement>('[data-vault-pin-cancel]')?.addEventListener('click', () => void cancelVaultOfflinePin());
+  root.querySelectorAll<HTMLButtonElement>('[data-vault-pin-remove]').forEach(el => el.addEventListener('click', () => void removeVaultOfflinePin(el.dataset.vaultPinRemove || '')));
+  root.querySelector<HTMLButtonElement>('[data-vault-edit-retry]')?.addEventListener('click', () => void startVaultEditRetry());
+  root.querySelector<HTMLButtonElement>('[data-vault-edit-retry-cancel]')?.addEventListener('click', () => void cancelVaultEditRetry());
+  root.querySelector<HTMLButtonElement>('[data-vault-cache-refresh]')?.addEventListener('click',()=>void updateEncryptedCacheAllowance());
+  root.querySelector<HTMLButtonElement>('[data-vault-cache-save]')?.addEventListener('click',()=>void updateEncryptedCacheAllowance(true));
+  root.querySelector<HTMLButtonElement>('[data-vault-pin-refresh-list]')?.addEventListener('click', () => { const flow = state.vaultDialog; if (flow) void loadVaultPins(flow, true); });
+  root.querySelector<HTMLButtonElement>('[data-vault-pin-more]')?.addEventListener('click', () => { const flow = state.vaultDialog; if (flow) void loadVaultPins(flow, false); });
+  root.querySelector<HTMLElement>('.vault-modal')?.addEventListener('keydown', event => {
     const dialog = event.currentTarget as HTMLElement;
     if (event.key === 'Escape' && !event.isComposing) {
       event.preventDefault();
@@ -3432,17 +3565,17 @@ function bind() {
     if (destination < 0) dialog.focus({ preventScroll: true });
     else focusable[destination]?.focus({ preventScroll: true });
   });
-  app.querySelector<HTMLElement>('[data-backdrop="vault"]')?.addEventListener('click', event => {
+  root.querySelector<HTMLElement>('[data-backdrop="vault"]')?.addEventListener('click', event => {
     if (event.target === event.currentTarget && !state.vaultDialog?.loading && !state.vaultDialog?.pinBusy && !state.vaultDialog?.pinJob && !state.vaultDialog?.editRetryBusy && !['queued', 'running'].includes(state.vaultDialog?.editRetryJob?.state || '')) closeVaultDialog();
   });
-  app.querySelector<HTMLElement>('[data-backdrop="encrypted-access"]')?.addEventListener('click', event => { if (event.target === event.currentTarget) closeEncryptedAccess(); });
-  app.querySelector<HTMLElement>('[data-backdrop="add"]')?.addEventListener('click', event => { if (event.target === event.currentTarget) closeAdd(); });
-  app.querySelector<HTMLElement>('[data-backdrop="picker"]')?.addEventListener('click', event => { if (event.target === event.currentTarget && !state.pickerCreatingFolder) { state.pickerGeneration++; state.pickerOpen = false; state.pickerPurpose = 'pair'; render(); } });
-  app.querySelector<HTMLElement>('[data-backdrop="account"]')?.addEventListener('click', event => { if (event.target === event.currentTarget && !state.addAccountBusy) closeAccountSetup(); });
-  app.querySelector<HTMLInputElement>('#account-label')?.addEventListener('input', event => { state.addAccountLabel = (event.target as HTMLInputElement).value; updateAddAccountSubmit(); });
-  app.querySelector<HTMLInputElement>('#account-server')?.addEventListener('input', event => { state.addAccountServer = (event.target as HTMLInputElement).value; updateAddAccountSubmit(); });
-  app.querySelector<HTMLInputElement>('#account-client-id')?.addEventListener('input', event => { state.addAccountClientId = (event.target as HTMLInputElement).value; });
-  app.querySelector<HTMLInputElement>('[data-server]')?.addEventListener('input', event => {
+  root.querySelector<HTMLElement>('[data-backdrop="encrypted-access"]')?.addEventListener('click', event => { if (event.target === event.currentTarget) closeEncryptedAccess(); });
+  root.querySelector<HTMLElement>('[data-backdrop="add"]')?.addEventListener('click', event => { if (event.target === event.currentTarget) closeAdd(); });
+  root.querySelector<HTMLElement>('[data-backdrop="picker"]')?.addEventListener('click', event => { if (event.target === event.currentTarget && !state.pickerCreatingFolder) { state.pickerGeneration++; state.pickerOpen = false; state.pickerPurpose = 'pair'; render(); } });
+  root.querySelector<HTMLElement>('[data-backdrop="account"]')?.addEventListener('click', event => { if (event.target === event.currentTarget && !state.addAccountBusy) closeAccountSetup(); });
+  root.querySelector<HTMLInputElement>('#account-label')?.addEventListener('input', event => { state.addAccountLabel = (event.target as HTMLInputElement).value; updateAddAccountSubmit(); });
+  root.querySelector<HTMLInputElement>('#account-server')?.addEventListener('input', event => { state.addAccountServer = (event.target as HTMLInputElement).value; updateAddAccountSubmit(); });
+  root.querySelector<HTMLInputElement>('#account-client-id')?.addEventListener('input', event => { state.addAccountClientId = (event.target as HTMLInputElement).value; });
+  root.querySelector<HTMLInputElement>('[data-server]')?.addEventListener('input', event => {
     const next = (event.target as HTMLInputElement).value;
     const nextKey = serverKey(next);
     state.server = next;
@@ -3458,23 +3591,23 @@ function bind() {
     const clientInput = app.querySelector<HTMLInputElement>('[data-client-id]');
     if (clientInput) clientInput.value = state.clientId;
   });
-  app.querySelector<HTMLInputElement>('[data-client-id]')?.addEventListener('input', event => {
+  root.querySelector<HTMLInputElement>('[data-client-id]')?.addEventListener('input', event => {
     state.clientId = (event.target as HTMLInputElement).value;
     state.clientIdEditedServer = serverKey(state.server);
     state.clientIdServer = state.clientIdEditedServer;
   });
-  app.querySelector<HTMLInputElement>('#picker-folder-name')?.addEventListener('input', event => { state.pickerFolderName = (event.target as HTMLInputElement).value; });
-  app.querySelector<HTMLInputElement>('#vault-create-name')?.addEventListener('input', event => { state.pickerFolderName = (event.target as HTMLInputElement).value; });
-  app.querySelector<HTMLInputElement>('#vault-remember')?.addEventListener('change', event => {
+  root.querySelector<HTMLInputElement>('#picker-folder-name')?.addEventListener('input', event => { state.pickerFolderName = (event.target as HTMLInputElement).value; });
+  root.querySelector<HTMLInputElement>('#vault-create-name')?.addEventListener('input', event => { state.pickerFolderName = (event.target as HTMLInputElement).value; });
+  root.querySelector<HTMLInputElement>('#vault-remember')?.addEventListener('change', event => {
     if (state.vaultDialog) state.vaultDialog.rememberOnDevice = (event.target as HTMLInputElement).checked;
   });
-  app.querySelector<HTMLInputElement>('#vault-password')?.addEventListener('keydown', event => {
+  root.querySelector<HTMLInputElement>('#vault-password')?.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.isComposing) {
       event.preventDefault();
       void unlockVault(false);
     }
   });
-  app.querySelector<HTMLSelectElement>('#spaceSelect')?.addEventListener('change', event => {
+  root.querySelector<HTMLSelectElement>('#spaceSelect')?.addEventListener('change', event => {
     if (folderDialogBusy()) return;
     state.spaceId = (event.target as HTMLSelectElement).value;
     state.remotePath = '';
@@ -3484,7 +3617,7 @@ function bind() {
     if (selected && !selected.writable) state.mode = 'download_only';
     render();
   });
-  app.querySelector<HTMLSelectElement>('#encrypted-access-space')?.addEventListener('change', event => {
+  root.querySelector<HTMLSelectElement>('#encrypted-access-space')?.addEventListener('change', event => {
     state.vaultAccessSpaceId = (event.target as HTMLSelectElement).value;
     const selected = state.spaces.find(space => space.id === state.vaultAccessSpaceId);
     const button = app.querySelector<HTMLButtonElement>('[data-action="browse-encrypted-space"]');
@@ -3493,27 +3626,27 @@ function bind() {
       button.textContent = selected?.encrypted ? 'Unlock Space' : 'Browse Space';
     }
   });
-  app.querySelector<HTMLSelectElement>('#cached-encrypted-root')?.addEventListener('change', event => {
+  root.querySelector<HTMLSelectElement>('#cached-encrypted-root')?.addEventListener('change', event => {
     cachedVaultRootsUi.selected = (event.target as HTMLSelectElement).value;
     const button = app.querySelector<HTMLButtonElement>('[data-action="browse-cached-vault-root"]');
     if (button) button.disabled = cachedVaultRootsUi.loading || !cachedVaultRootsUi.roots.some(root => cachedVaultRootKey(root) === cachedVaultRootsUi.selected);
   });
-  app.querySelector<HTMLSelectElement>('#folder-direction')?.addEventListener('change', event => {
+  root.querySelector<HTMLSelectElement>('#folder-direction')?.addEventListener('change', event => {
     if (folderDialogBusy()) return;
     state.folderDirection = (event.target as HTMLSelectElement).value as FolderDirection;
     state.mode = state.folderDirection === 'both_ways' ? 'two_way' : state.folderDirection === 'to_cloud' ? 'upload_only' : 'download_only';
     render();
   });
-  app.querySelector<HTMLSelectElement>('#existing-copy-handling')?.addEventListener('change', event => { if (folderDialogBusy()) return; state.existingCopyHandling = (event.target as HTMLSelectElement).value as 'update_safe' | 'review'; state.folderAdvancedOpen = true; render(); });
-  app.querySelector<HTMLDetailsElement>('.folder-advanced')?.addEventListener('toggle', event => { if (!folderDialogBusy()) state.folderAdvancedOpen = (event.currentTarget as HTMLDetailsElement).open; });
-  app.querySelector<HTMLSelectElement>('#folder-media-filter')?.addEventListener('change', event => { if (!folderDialogBusy()) state.mediaFilter = (event.target as HTMLSelectElement).value as MediaFilterValue; });
-  app.querySelector<HTMLSelectElement>('#folder-exclusion-kind')?.addEventListener('change', event => { if (!folderDialogBusy()) state.folderExclusionKind = (event.target as HTMLSelectElement).value as FolderExclusionKind; render(); });
-  app.querySelector<HTMLInputElement>('#folder-exclusion-draft')?.addEventListener('input', event => { state.folderExclusionDraft = (event.target as HTMLInputElement).value; const button = app.querySelector<HTMLButtonElement>('[data-add-folder-exclusion]'); if (button) button.disabled = folderDialogBusy() || !state.folderExclusionDraft.trim(); });
-  app.querySelector<HTMLButtonElement>('[data-add-folder-exclusion]')?.addEventListener('click', () => addFolderExclusion());
-  app.querySelectorAll<HTMLButtonElement>('[data-remove-folder-exclusion]').forEach(button => button.addEventListener('click', () => { const index = Number(button.dataset.removeFolderExclusion); if (Number.isInteger(index)) removeFolderExclusion(index); }));
-  app.querySelector<HTMLSelectElement>('#folder-media-organization')?.addEventListener('change', event => { if (!folderDialogBusy()) state.mediaOrganization = (event.target as HTMLSelectElement).value as MediaOrganizationValue; });
-  app.querySelector<HTMLSelectElement>('#folder-media-interval')?.addEventListener('change', event => { if (!folderDialogBusy()) state.mediaInterval = (event.target as HTMLSelectElement).value; });
-  app.querySelector<HTMLButtonElement>('[data-action="select-remote"]')?.addEventListener('click', () => {
+  root.querySelector<HTMLSelectElement>('#existing-copy-handling')?.addEventListener('change', event => { if (folderDialogBusy()) return; state.existingCopyHandling = (event.target as HTMLSelectElement).value as 'update_safe' | 'review'; state.folderAdvancedOpen = true; render(); });
+  root.querySelector<HTMLDetailsElement>('.folder-advanced')?.addEventListener('toggle', event => { if (!folderDialogBusy()) state.folderAdvancedOpen = (event.currentTarget as HTMLDetailsElement).open; });
+  root.querySelector<HTMLSelectElement>('#folder-media-filter')?.addEventListener('change', event => { if (!folderDialogBusy()) state.mediaFilter = (event.target as HTMLSelectElement).value as MediaFilterValue; });
+  root.querySelector<HTMLSelectElement>('#folder-exclusion-kind')?.addEventListener('change', event => { if (!folderDialogBusy()) state.folderExclusionKind = (event.target as HTMLSelectElement).value as FolderExclusionKind; render(); });
+  root.querySelector<HTMLInputElement>('#folder-exclusion-draft')?.addEventListener('input', event => { state.folderExclusionDraft = (event.target as HTMLInputElement).value; const button = app.querySelector<HTMLButtonElement>('[data-add-folder-exclusion]'); if (button) button.disabled = folderDialogBusy() || !state.folderExclusionDraft.trim(); });
+  root.querySelector<HTMLButtonElement>('[data-add-folder-exclusion]')?.addEventListener('click', () => addFolderExclusion());
+  root.querySelectorAll<HTMLButtonElement>('[data-remove-folder-exclusion]').forEach(button => button.addEventListener('click', () => { const index = Number(button.dataset.removeFolderExclusion); if (Number.isInteger(index)) removeFolderExclusion(index); }));
+  root.querySelector<HTMLSelectElement>('#folder-media-organization')?.addEventListener('change', event => { if (!folderDialogBusy()) state.mediaOrganization = (event.target as HTMLSelectElement).value as MediaOrganizationValue; });
+  root.querySelector<HTMLSelectElement>('#folder-media-interval')?.addEventListener('change', event => { if (!folderDialogBusy()) state.mediaInterval = (event.target as HTMLSelectElement).value; });
+  root.querySelector<HTMLButtonElement>('[data-action="select-remote"]')?.addEventListener('click', () => {
     if (folderDialogBusy()) return;
     state.remotePath = state.pickerPath;
     state.vaultBinding = null;
@@ -3522,9 +3655,9 @@ function bind() {
     state.pickerOpen = false;
     render();
   });
-  app.querySelector<HTMLButtonElement>('[data-action="save-folder"]')?.addEventListener('click', () => void saveFolder());
-  app.querySelector<HTMLButtonElement>('[data-dismiss-error]')?.addEventListener('click', () => { state.statusErrorDismissed = state.status?.error || ''; state.error = ''; render(); });
-  app.querySelector<HTMLButtonElement>('[data-dismiss-message]')?.addEventListener('click', () => { state.message = ''; render(); });
+  root.querySelector<HTMLButtonElement>('[data-action="save-folder"]')?.addEventListener('click', () => void saveFolder());
+  root.querySelector<HTMLButtonElement>('[data-dismiss-error]')?.addEventListener('click', () => { state.statusErrorDismissed = state.status?.error || ''; state.error = ''; render(); });
+  root.querySelector<HTMLButtonElement>('[data-dismiss-message]')?.addEventListener('click', () => { state.message = ''; render(); });
 }
 
 async function confirmAccountAction(message: string): Promise<boolean> {
@@ -3648,9 +3781,9 @@ async function handleAction(action: string, element?: HTMLElement) {
     case 'load-bandwidth-limits': await loadBandwidthSettings(true); break;
     case 'save-bandwidth-limits': if (bandwidthLimitsAvailable()) await saveBandwidthLimits(); break;
     case 'show-attention':
-      state.page = 'transfers'; state.transferFilter = 'attention';
+      state.page = 'transfers'; state.transferWorkspace = 'activity'; state.transferFilter = 'attention';
       render();
-      if (state.page === 'transfers') { void loadPendingOfflineWrites(true); void loadEncryptedEditRecoveries(true); }
+      stopEncryptedRetryLatestPolling();
       break;
     case 'refresh-spaces': await loadSpaces(true); break;
     case 'open-add-account': if (!featureAvailable('account_switch_supported')) return; state.addAccountOpen = true; state.addAccountStep = 'details'; state.addAccountLabel = ''; state.addAccountRoot = ''; state.addAccountServer = ''; state.addAccountClientId = ''; state.addAccountAuthMessage = ''; state.addAccountAuthStarted = false; state.addAccountError = ''; state.addAccountCreatedId = ''; state.accountsError = ''; render(); break;
@@ -3703,6 +3836,7 @@ async function handleAction(action: string, element?: HTMLElement) {
     case 'copy-producer-close': cancelCopyProducerWizard(); break;
     case 'cancel-vault-copy': cancelCopyProducerWizard(); break;
     case 'more-pending-writes': await loadPendingOfflineWrites(false); break;
+    case 'stop-pending-retry': if (element?.dataset.spaceId) await stopPendingReconcile(element.dataset.spaceId); break;
     case 'retry-pending-writes': if (element?.dataset.spaceId) await retryPendingOfflineWrites(element.dataset.spaceId); break;
     case 'save-pending-write-copy': if (element?.dataset.spaceId && element.dataset.writeId && element.dataset.rootResourceId) await savePendingConflictCopy(element.dataset.spaceId, element.dataset.writeId, element.dataset.rootResourceId); break;
     case 'check-saved-upload': if (element?.dataset.spaceId && element.dataset.writeId && element.dataset.rootResourceId) await checkSavedUpload(element.dataset.spaceId, element.dataset.writeId, element.dataset.rootResourceId); break;
@@ -4545,6 +4679,10 @@ function clearPendingOfflineWrites() {
   pendingWritesUi.accountScope = null;
   pendingWritesUi.expandedScopes.clear();
   pendingWritesUi.retryingSpaces.clear();
+  pendingWritesUi.stoppingSpaces.clear();
+  pendingWritesUi.checkingUploads.clear();
+  pendingWritesUi.uploadCheckMessages.clear();
+  pendingWritesUi.uploadCheckOutcomes.clear();
   pendingWritesUi.exportingWrites.clear();
 }
 async function openVaultFlow(intent: VaultDialogState['intent'], spaceId: string, rootPath: string, pairId?: string, rootWritable?: boolean, rootResourceId?: string, offlineUnlockOnly = false, offlinePinId?: string, offlinePinGeneration?: number) {
@@ -6276,7 +6414,8 @@ function activateAccount(profileId: string) {
   state.clientId = '';
   state.clientIdEditedServer = null;
   state.clientIdServer = '';
-  state.transferFilter = 'active';
+  state.transferWorkspace = 'activity';
+  state.transferFilter = 'all';
   state.error = '';
   state.message = '';
   state.busy = false;
@@ -6722,7 +6861,7 @@ async function initialize() {
         state.page = destination;
         render();
         if (destination === 'folders') void mediaJobs.refresh();
-        if (destination === 'transfers') { if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true); if (vaultAppFeaturesAvailable()) void loadEncryptedEditRecoveries(true); if (vaultPendingFeaturesAvailable()) void refreshEncryptedRetryLatestStatuses(); }
+        if (destination === 'transfers') loadTransfersWorkspace();
       }
     } catch (error) {
       state.error = `Could not check for pending tray navigation: ${messageOf(error)}`;
@@ -6815,7 +6954,7 @@ async function refresh(showError = true, forceSpacesRefresh = false) {
     if (state.page === 'settings') void loadNetworkProxySettings();
     if (state.page === 'settings') void loadBandwidthSettings();
     if (state.page === 'folders') void mediaJobs.refresh();
-    if (state.page === 'transfers' && state.status?.connected) scheduleEncryptedRetryLatestPoll(250);
+    if (state.page === 'transfers' && state.transferWorkspace === 'encrypted' && state.status?.connected) scheduleEncryptedRetryLatestPoll(250);
     if (refreshQueued) { refreshQueued = false; void refresh(false); }
   }
 }

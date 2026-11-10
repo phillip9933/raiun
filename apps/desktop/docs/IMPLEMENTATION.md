@@ -1,5 +1,25 @@
 # Desktop implementation status
 
+
+## Transfers and settings clarity — 10 November 2026
+
+The shared shell separates Transfers into Activity, Saved files and Encrypted.
+Activity filters apply only to activity records; saved plaintext recovery and
+encrypted operations/working copies appear in their own views. Background status
+polls preserve unchanged controls and disclosure state, and encrypted polling
+runs only while its view is open. Account/session changes invalidate retained UI.
+
+Single-item settings cards put their title, description and action on one row;
+multi-setting groups and recovery result lists remain grouped.
+
+Saved-upload comparisons display their actual missing/different/unavailable
+result and defer list resets until comparison/export completes. Uncertain creates
+are explicitly stopped, with no automatic retry. The Stop retry control cancels
+only an active legacy retry batch through its existing job API; it never discards
+a retained file or record, deletes a cloud copy, or resolves an uncertain create.
+Linux deployment is reviewed first; Windows uses the shared shell with existing
+capability gates and awaits its separate package/native review.
+
 ## Linux ordinary transfer confirmation — 10 November 2026
 
 Linux GUI and headless mounts share the four-worker durable ordinary-create
