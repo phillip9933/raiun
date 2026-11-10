@@ -28,6 +28,7 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
         && version != 9
         && version != 8
         && version != 7
+        && version != 10
         && version != CACHE_VERSION as i64
     {
         return Err(CacheError::Corrupt);
@@ -376,6 +377,26 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
         "INTEGER NOT NULL DEFAULT 0 CHECK(body_state IN (0,1,2))",
     )?;
     db.execute("CREATE INDEX IF NOT EXISTS ordinary_create_body_cleanup ON ordinary_create_handoffs(scope_key,body_state,write_id)",[]).map_err(db_error)?;
+    // Explicit confirmed local discard is permanent. Old binaries must refuse
+    // this schema rather than restage a handoff whose recovery bytes were removed.
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ordinary_create_discards (
+            write_id INTEGER PRIMARY KEY,
+            scope_key TEXT NOT NULL REFERENCES scopes(scope_key),
+            handoff_id TEXT NOT NULL,
+            parent_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            content_key TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            body_len INTEGER NOT NULL CHECK(body_len>=0),
+            body_sha256 TEXT NOT NULL,
+            create_state INTEGER NOT NULL CHECK(create_state IN(3,4)),
+            completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN(0,1)),
+            UNIQUE(scope_key,handoff_id)
+        );",
+    )
+    .map_err(db_error)?;
     if version < 10 {
         db.execute("UPDATE ordinary_create_handoffs SET local_handoff_ack=0,body_state=0,body_len=(SELECT c.byte_len FROM contents c WHERE c.content_key=ordinary_create_handoffs.content_key AND c.scope_key=ordinary_create_handoffs.scope_key),body_sha256=(SELECT c.sha256 FROM contents c WHERE c.content_key=ordinary_create_handoffs.content_key AND c.scope_key=ordinary_create_handoffs.scope_key)",[]).map_err(db_error)?;
         super::ordinary_create::validate_migration(db)?;

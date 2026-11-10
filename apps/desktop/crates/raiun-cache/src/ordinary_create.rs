@@ -2,6 +2,9 @@
 use super::*;
 #[path = "ordinary_create_clean.rs"]
 mod clean;
+#[cfg(target_os = "linux")]
+#[path = "ordinary_create_discard.rs"]
+mod discard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
@@ -347,6 +350,7 @@ fn current(
 ) -> Result<OrdinaryCreateReceipt, CacheError> {
     plain(scope)?;
     validate_registered_scope(db, scope)?;
+    refuse_discarded_handoff(db, scope, &receipt.handoff_id)?;
     let found = load(db, scope, receipt.write.id)?.ok_or(CacheError::NotFound)?;
     #[cfg(test)]
     if !db.is_autocommit() {
@@ -359,6 +363,21 @@ fn current(
         return Err(CacheError::Conflict);
     }
     Ok(found)
+}
+fn refuse_discarded_handoff(
+    db: &Connection,
+    scope: &CacheScope,
+    handoff_id: &str,
+) -> Result<(), CacheError> {
+    let discarded: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ordinary_create_discards WHERE scope_key=?1 AND handoff_id=?2)",
+        params![scope.key, handoff_id], |row| row.get(0),
+    ).map_err(db_error)?;
+    if discarded {
+        Err(CacheError::Conflict)
+    } else {
+        Ok(())
+    }
 }
 fn count(db: &Connection, sql: &str, scope: &CacheScope) -> Result<u64, CacheError> {
     let n: i64 = db
@@ -654,6 +673,7 @@ impl Cache {
         let existing = {
             let db = self.lock_db()?;
             register_scope(&db, scope)?;
+            refuse_discarded_handoff(&db, scope, &request.handoff_id)?;
             let id:Option<i64> = db.query_row("SELECT write_id FROM ordinary_create_handoffs WHERE scope_key=?1 AND handoff_id=?2",params![scope.key,request.handoff_id],|r|r.get(0)).optional().map_err(db_error)?;
             let existing = id
                 .map(|id| load(&db, scope, id)?.ok_or(CacheError::Corrupt))
@@ -733,6 +753,7 @@ impl Cache {
         }
         let tx =
             Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
+        refuse_discarded_handoff(&tx, scope, &request.handoff_id)?;
         limits(&tx, scope, &request)?;
         tx.execute("INSERT INTO contents(content_key,scope_key,resource_id,etag,protection,byte_len,sha256,relative_path,last_accessed,retention) VALUES(?1,?2,?3,?4,0,?5,?6,?7,?8,1)",params![key,scope.key,content.resource_id,content.etag,i64_from_u64(len)?,digest,relative,now_unix()]).map_err(db_error)?;
         tx.execute("INSERT INTO writes(scope_key,parent_id,name,path,resource_id,base_kind,base_etag,content_key,state,created_at) VALUES(?1,?2,?3,?4,NULL,0,'',?5,0,?6)",params![scope.key,request.parent_resource_id,request.name,request.logical_path,key,now_unix()]).map_err(db_error)?;

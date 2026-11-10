@@ -34,6 +34,7 @@ pub(crate) fn agent_action_waits_for_completion(action: &str) -> bool {
             | "vault_lock"
             | "vault_create"
             | "cache_saved_write_export"
+            | "cache_saved_upload_discard"
             | "cache_conflict_export"
     )
 }

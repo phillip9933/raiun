@@ -2841,6 +2841,7 @@ impl Runtime {
                     "auth_generation": generation,
                     "folder_settings_supported": self.mode == RuntimeMode::Desktop,
                     "saved_upload_check_supported": true,
+                    "saved_upload_discard_supported": cfg!(target_os = "linux"),
                     "queued_plaintext_upload_confirmation": if cfg!(target_os = "linux") { "server_response_and_metadata" } else { "full_readback" },
                     "provider_diagnostics": provider_diagnostics,
                     "create_admission_diagnostics": create_admission_diagnostics,
@@ -4119,6 +4120,77 @@ impl Runtime {
                     "bytes": item.bytes,
                     "destination": destination,
                 }))
+            }
+            "cache_saved_upload_discard" => {
+                #[cfg(not(target_os = "linux"))]
+                { Err("Discarding saved upload copies is unavailable on this platform".into()) }
+                #[cfg(target_os = "linux")]
+                {
+                    if request.get("confirmed").and_then(Value::as_bool) != Some(true) {
+                        return Err("Confirm discarding this local recovery copy first".into());
+                    }
+                    let generation = self.operation_generation()?;
+                    if request.get("expected_generation").and_then(Value::as_u64) != Some(generation) {
+                        return Err("Account changed; refresh saved files".into());
+                    }
+                    let expected_scope = text("expected_account_scope")?;
+                    let space_id = text("space_id")?.to_owned();
+                    validate_space_id(&space_id)?;
+                    let write_id = text("write_id")?.parse::<i64>().ok().filter(|id| *id > 0)
+                        .ok_or("Saved upload identifier is invalid")?;
+                    let root_resource_id = text("root_resource_id")?.to_owned();
+                    if root_resource_id.trim().is_empty() || root_resource_id.len() > 16 * 1024
+                        || root_resource_id.chars().any(char::is_control)
+                    { return Err("Saved root identity is invalid".into()); }
+                    // Match account teardown's sync -> settings -> auth -> mount
+                    // order. Do not disconnect or stop any worker on this path.
+                    let _transition = AuthTransition::begin(&self.auth_transition)?;
+                    let _sync = self.sync_gate.lock().map_err(|_| "Sync state poisoned")?;
+                    let settings = self.settings.lock().map_err(|_| "Settings poisoned")?;
+                    let auth = self.auth_state.lock().map_err(|_| "Authentication state poisoned")?;
+                    let mounted = self.mount.lock().map_err(|_| "Mount state poisoned")?;
+                    let current = || self.auth_generation.load(Ordering::Acquire) == generation
+                        && !self.shutdown.load(Ordering::Acquire)
+                        && !self.retiring.load(Ordering::Acquire)
+                        && !self.authenticating.load(Ordering::Acquire);
+                    if !current()
+                        || Self::saved_write_account_scope(&settings).as_deref() != Some(expected_scope)
+                    { return Err("Account changed; refresh saved files".into()); }
+                    // Even a disconnected retained handle may still own a FUSE
+                    // session/uploader. Settings None alone is never proof of
+                    // drainage: Cache also takes the sole-uploader OS lock and
+                    // checks kernel mountinfo before touching the selected body.
+                    if settings.mount_enabled || mounted.is_some() {
+                        return Err("Disconnect the drive in Settings before discarding a local recovery copy".into());
+                    }
+                    let account_id = settings.account_id.as_deref()
+                        .ok_or("No saved account cache is available")?;
+                    if auth.account_id.as_deref().is_some_and(|id| id != account_id) {
+                        return Err("The active account differs; refresh saved files".into());
+                    }
+                    let saved_scope = raiun_cache::CacheScope::new(
+                        settings.server.as_deref().ok_or("No saved account server is available")?,
+                        account_id, &space_id, &root_resource_id,
+                        raiun_cache::ScopeProtection::PlaintextAllowed,
+                    ).map_err(|_| "Saved upload scope is invalid")?;
+                    let cache_dir = offline_cache_state_dir(&account_engine_dir(&self.dir, account_id))
+                        .map_err(|_| "Offline cache directory is unavailable or unsafe")?;
+                    let cache = raiun_cache::Cache::open_for_saved_upload_discard(&cache_dir, offline_cache::DEFAULT_CACHE_QUOTA_BYTES)
+                        .map_err(|_| "Offline cache is unavailable")?;
+                    let bytes = cache.discard_stopped_ordinary_create(
+                        &saved_scope, write_id, &settings.config.cloud_root, &current,
+                    ).map_err(|_| "Could not safely discard this stopped upload. The drive must be fully disconnected, and active, legacy, independently retained or provider-spool copies are unsupported. Refresh Saved files before trying again.")?;
+                    Ok(json!({
+                        "discarded": true,
+                        "write_id": write_id.to_string(),
+                        "space_id": space_id,
+                        "root_resource_id": root_resource_id,
+                        "bytes": bytes,
+                        "local_copy_removed": true,
+                        "review_entry_removed": true,
+                        "cloud_mutated": false,
+                    }))
+                }
             }
             "cache_saved_upload_check" => {
                 let generation = self.operation_generation()?;

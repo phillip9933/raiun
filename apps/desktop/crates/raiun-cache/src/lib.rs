@@ -99,7 +99,7 @@ pub use windows_download_stage::{
     VerifiedPlaintextDownload,
 };
 
-const CACHE_VERSION: u32 = 10;
+const CACHE_VERSION: u32 = 11;
 const MAX_SCOPE_FIELD: usize = 1024;
 const MAX_PATH_BYTES: usize = 32 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 4096;

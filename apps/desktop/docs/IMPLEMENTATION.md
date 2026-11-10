@@ -20,6 +20,28 @@ a retained file or record, deletes a cloud copy, or resolves an uncertain create
 Linux deployment is reviewed first; Windows uses the shared shell with existing
 capability gates and awaits its separate package/native review.
 
+### Review dismissal and confirmed local discard
+
+Terminal Activity issues can be dismissed on this device and restored from All.
+This is an account-scoped, bounded UI preference; transfer history and files are
+unchanged. Authentication waits, unknown states and live work are not dismissed.
+
+On Linux, an explicitly confirmed Discard local copy request supports stopped,
+ledger-backed ordinary creates only while the cloud drive is fully disconnected.
+The Agent binds the account, generation, Space, root and write; the cache requires
+exclusive uploader ownership, no kernel mount, no selected provider-spool pair,
+and exact body identity/hash verification under its deletion lease. Active,
+legacy, independently pinned, ambiguous-root and retained-provider copies refuse
+this operation. The selected recovery copy and review projection are removed;
+cloud files, original source files and separately exported backups are untouched.
+
+Cache schema 11 retains a permanent discard tombstone before unlink. Interrupted
+discards keep their review entry and require another confirmed request; startup
+never resumes deletion automatically. Matching Agent/CLI builds are required:
+schema-10 binaries refuse a schema-11 cache. The dedicated discard opener avoids
+unrelated orphan cleanup. Linux source/build review does not imply that a user's
+recovery copy has been discarded or that Windows native discard is supported.
+
 ## Linux ordinary transfer confirmation — 10 November 2026
 
 Linux GUI and headless mounts share the four-worker durable ordinary-create

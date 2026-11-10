@@ -1194,11 +1194,10 @@ body{min-width:0}
 
 /* Single-item Settings cards keep their description and action together. */
 .settings-card-single .settings-single-row{padding:0;flex-wrap:wrap;align-items:center}
-.settings-single-row>.settings-heading{flex:1 1 300px;min-width:0;align-items:flex-start;padding:0;border:0}
+.settings-single-row>.settings-heading{flex:1 1 300px;min-width:0;align-items:center;padding:0;border:0}
 .settings-single-row .settings-icon{flex-shrink:0}
-.settings-single-row .settings-heading>div{min-width:0}
-.settings-single-row .settings-heading b{margin-top:8px}
-.settings-single-row small{white-space:normal;overflow:visible;text-overflow:clip}
+.settings-single-row .settings-heading>div{display:flex;align-items:baseline;flex-wrap:wrap;gap:5px 12px;min-width:0}
+.settings-single-row small{margin:0;max-width:none;white-space:normal;overflow:visible;text-overflow:clip}
 
 /* Transfers has one workspace at a time; activity filters belong to Activity. */
 .transfers-workspace .transfer-workspace-tabs{flex-wrap:wrap;gap:8px;margin-bottom:18px}
@@ -1206,3 +1205,13 @@ body{min-width:0}
 .transfers-workspace .transfer-activity-filters{gap:16px;margin-bottom:12px}
 .transfers-workspace .transfer-activity-filters .filter-tab{font-size:12px;padding-bottom:9px}
 .transfers-workspace [data-render-region]:empty{display:none}
+
+/* Activity filters are a compact control group, distinct from workspace tabs. */
+:root[data-theme] .transfers-workspace .transfer-activity-filters{display:flex;flex-wrap:wrap;align-items:center;gap:4px;width:fit-content;max-width:100%;padding:4px;margin:0 0 14px;border:1px solid var(--raiun-border);border-radius:10px;background:var(--raiun-inset)}
+:root[data-theme] .transfers-workspace .transfer-activity-filters .filter-tab{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:32px;padding:6px 12px;border:1px solid transparent;border-radius:6px;background:transparent;line-height:1.25;color:var(--raiun-muted);white-space:nowrap}
+:root[data-theme] .transfers-workspace .transfer-activity-filters .filter-tab.active{border-color:var(--raiun-border);background:var(--raiun-surface);color:var(--raiun-primary)}
+:root[data-theme] .transfers-workspace .transfer-activity-filters .filter-tab.active:after{display:none}
+:root[data-theme] .transfers-workspace .transfer-activity-filters .filter-tab:hover{color:var(--raiun-text)}
+:root[data-theme] .transfers-workspace .transfer-activity-filters .filter-tab:focus-visible{outline:2px solid var(--raiun-primary);outline-offset:2px}
+:root[data-theme] .transfers-workspace .transfer-activity-filters .tab-badge,:root[data-theme] .transfers-workspace .transfer-workspace-tabs .tab-badge{margin:0;min-width:20px;padding:2px 6px;border-radius:6px;background:var(--raiun-inset);color:var(--raiun-muted);font-variant-numeric:tabular-nums;line-height:1.2}
+:root[data-theme] .transfers-workspace .transfer-activity-filters [data-filter="attention"] .tab-badge{color:var(--raiun-warning)}

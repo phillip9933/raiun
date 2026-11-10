@@ -348,7 +348,7 @@ fn portable_names(cache: &Cache) -> Result<Vec<String>, CacheError> {
     Ok(names)
 }
 #[cfg(not(windows))]
-fn prepare_portable(
+pub(super) fn prepare_portable(
     cache: &Cache,
     name: &str,
     receipt: &OrdinaryCreateReceipt,
@@ -375,7 +375,11 @@ fn prepare_portable(
     Ok(Some(file))
 }
 #[cfg(not(windows))]
-fn unlink_portable(cache: &Cache, name: &str, candidate: Option<File>) -> Result<bool, CacheError> {
+pub(super) fn unlink_portable(
+    cache: &Cache,
+    name: &str,
+    candidate: Option<File>,
+) -> Result<bool, CacheError> {
     let path = cache.inner.content_dir.join(name);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(m) => Some(m),
