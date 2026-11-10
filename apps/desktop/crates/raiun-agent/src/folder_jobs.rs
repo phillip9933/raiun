@@ -1098,15 +1098,13 @@ fn verify_ancestors(
     Ok(())
 }
 fn safe_component(name: &str) -> Result<(), String> {
+    // Match ordinary Linux provider components. Windows compatibility warnings
+    // do not make punctuation or trailing spaces/dots unsafe DAV path segments.
     if name.is_empty()
         || name.len() > 255
         || matches!(name, "." | "..")
         || name.contains(['/', '\\'])
         || name.chars().any(char::is_control)
-        || name
-            .chars()
-            .any(|c| matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
-        || name.ends_with([' ', '.'])
     {
         return Err("Folder contains a name that cannot be uploaded safely".into());
     }
