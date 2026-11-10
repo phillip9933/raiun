@@ -997,7 +997,7 @@ impl Runtime {
             }),
             // Explicit bounded policy: retain the existing ordinary-create
             // contract (fresh absence/parent/root plus conditional PUT), now
-            // with two owned workers and no ambiguous-send replay. This does
+            // with the shared owned worker pool and no ambiguous-send replay. This does
             // not assert server-side atomic no-clobber; see IMPLEMENTATION.md.
             // Engine independently checks origin, root and plaintext ancestry.
             dispatch_allowed: Arc::new(move |scope| {
@@ -1013,9 +1013,11 @@ impl Runtime {
         hooks: raiun_engine::CreateUploadHooks,
         disabled: bool,
     ) -> Option<raiun_fuse::CreateHandoffOptions> {
-        if self.mode != RuntimeMode::Desktop || disabled {
+        if disabled {
             return None;
         }
+        // Mount-only CLI drives use the same account-bound durable handoff as
+        // Desktop. Folder sync and credential policy remain mode-specific.
         // The cache is optional for the established online mount. If it is
         // unavailable, preserve that synchronous path rather than breaking
         // sign-in/mounting to enable this optimization. Existing Engine write
@@ -7253,7 +7255,7 @@ mod tests {
     }
 
     #[test]
-    fn create_handoff_options_preserve_headless_and_cache_unavailable_mounts() {
+    fn create_handoff_options_share_modes_and_preserve_cache_unavailable_mounts() {
         let dir = tempfile::tempdir().unwrap();
         let mut runtime = runtime_for_mount_test(dir.path().to_path_buf(), false, None);
         let engine_dir = dir.path().join("engine");
@@ -7284,9 +7286,15 @@ mod tests {
                 .is_none()
         );
         runtime.mode = RuntimeMode::MountOnly;
-        assert!(runtime.create_handoff_options(
-            &engine, runtime.create_upload_hooks(0, "account-a"), false,
-        ).is_none());
+        let options = runtime
+            .create_handoff_options(
+                &engine,
+                runtime.create_upload_hooks(0, "account-a"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(options.max_pending_bytes, 1024 * 1024);
+        assert!((options.hooks.is_current)());
     }
 
     #[test]

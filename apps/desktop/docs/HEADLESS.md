@@ -12,6 +12,14 @@ Existing on-demand reads/writes are reused. Mount-only mode refuses folder sync,
 media jobs, vault unlock, Desktop autostart settings and other desktop settings
 operations. Explicit `drive startup` registration is separate.
 
+On Linux, ordinary new-file copies use the same durable local acceptance and
+shared four-worker upload pool as Desktop when the private cache is available.
+The existing cache quota bounds pending bytes; fresh account, Space-root, parent
+and encryption checks still apply before delivery. Uncertain uploads retain
+their recovery copies and are not automatically resent. Normal stop and unmount
+cancel and join the owned upload workers, retaining pending recovery. Without
+usable cache storage, the established synchronous upload path remains available.
+
 ## Build and install
 
 From `apps/desktop`, use Rust and its existing native build dependencies (C
