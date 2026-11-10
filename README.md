@@ -8,7 +8,7 @@ I build projects to solve problems I run into in my own life. I share them becau
 
 | Platform | Source and setup | Release status |
 | --- | --- | --- |
-| Android | [apps/android](apps/android/README.md) | [1.5.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.5.0) |
+| Android | [apps/android](apps/android/README.md) | [1.6.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.6.0) |
 | Linux Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5) |
 | Windows Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5) |
 
