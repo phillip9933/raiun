@@ -144,8 +144,18 @@ fn disconnected(root: &Path) -> Result<(), CacheError> {
     Ok(())
 }
 
-fn owner_lease(directory: &Path) -> Result<(File, File), CacheError> {
-    validate_private_dir(directory)?;
+fn validate_owner_directory(directory: &File, expected_uid: u32) -> Result<(), CacheError> {
+    let metadata = directory.metadata().map_err(io_error)?;
+    // The engine's parent directory may be readable (normally 0755). Only
+    // its lock and recovery storage contain private data. Never accept a
+    // directory another user can modify, or a different storage owner.
+    if !metadata.is_dir() || metadata.uid() != expected_uid || metadata.mode() & 0o022 != 0 {
+        return Err(CacheError::UnsafeDirectory);
+    }
+    Ok(())
+}
+
+fn owner_lease(directory: &Path, expected_uid: u32) -> Result<(File, File), CacheError> {
     let directory = File::from(
         rustix::fs::open(
             directory,
@@ -157,6 +167,7 @@ fn owner_lease(directory: &Path) -> Result<(File, File), CacheError> {
         )
         .map_err(|error| io_error(error.into()))?,
     );
+    validate_owner_directory(&directory, expected_uid)?;
     // Never create an ownership record for an unknown/legacy uploader.
     let lock = File::from(
         rustix::fs::openat(
@@ -251,8 +262,12 @@ impl Cache {
         if fs::canonicalize(directory).map_err(io_error)? != directory {
             return Err(CacheError::UnsafeDirectory);
         }
-        let (owner_directory, owner) = owner_lease(directory)?;
+        let storage_uid = fs::symlink_metadata(&self.inner.root)
+            .map_err(io_error)?
+            .uid();
+        let (owner_directory, owner) = owner_lease(directory, storage_uid)?;
         let ownership_current = || -> Result<(), CacheError> {
+            validate_owner_directory(&owner_directory, storage_uid)?;
             same_open_path(&owner_directory, directory, true)?;
             same_open_path(
                 &owner,

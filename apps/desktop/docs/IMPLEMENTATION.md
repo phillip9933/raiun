@@ -30,7 +30,11 @@ On Linux, an explicitly confirmed Discard local copy request supports stopped,
 ledger-backed ordinary creates only while the cloud drive is fully disconnected.
 The Agent binds the account, generation, Space, root and write; the cache requires
 exclusive uploader ownership, no kernel mount, no selected provider-spool pair,
-and exact body identity/hash verification under its deletion lease. Active,
+and exact body identity/hash verification under its deletion lease. The engine
+parent may have normal readable-directory permissions (0755), but must have the
+same owner as private cache storage and reject group/world writes. The uploader
+lock and recovery storage remain private; directory identity and ownership are
+rechecked before deletion. Active,
 legacy, independently pinned, ambiguous-root and retained-provider copies refuse
 this operation. The selected recovery copy and review projection are removed;
 cloud files, original source files and separately exported backups are untouched.

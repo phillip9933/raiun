@@ -4161,7 +4161,7 @@ impl Runtime {
                     // drainage: Cache also takes the sole-uploader OS lock and
                     // checks kernel mountinfo before touching the selected body.
                     if settings.mount_enabled || mounted.is_some() {
-                        return Err("Disconnect the drive in Settings before discarding a local recovery copy".into());
+                        return Err("Unmount the drive in Settings before discarding a local recovery copy".into());
                     }
                     let account_id = settings.account_id.as_deref()
                         .ok_or("No saved account cache is available")?;
