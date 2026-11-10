@@ -1,11 +1,11 @@
-//! Owner-thread-only connected-root observation. This module issues no cloud
-//! mutation, inventory adoption, placeholder conversion or clean ACK.
+//! Owner-thread connected-root bridge to a worker-owned hint transport. This
+//! module issues no cloud mutation, inventory adoption, conversion or clean ACK.
 use super::*;
 use raiun_control_windows::directory_notifications::{
-    DirectoryObserver, NotificationBatch, ObserverPoll, RescanReason,
+    DirectoryObserverPump, NotificationBatch, ObserverPoll, RescanReason,
 };
 use std::os::windows::io::BorrowedHandle;
-use std::sync::Weak;
+use std::sync::{OnceLock, Weak};
 use std::time::Duration;
 
 const MAX_WAIT: Duration = Duration::from_millis(250);
@@ -28,6 +28,7 @@ fn next_instance(counter: &AtomicU64) -> Result<u64, Error> {
 pub(super) struct NamespaceObserverBinding {
     backend: Weak<crate::OpenCloudPlaceholderBackend>,
     composite: crate::OpaqueIdentity,
+    terminal: Arc<OnceLock<RescanReason>>,
 }
 impl NamespaceObserverBinding {
     pub(super) fn new(
@@ -37,15 +38,19 @@ impl NamespaceObserverBinding {
         Self {
             backend: Arc::downgrade(backend),
             composite,
+            terminal: Arc::new(OnceLock::new()),
         }
     }
 }
 pub(super) struct NamespaceObserver {
-    observer: DirectoryObserver,
+    observer: DirectoryObserverPump,
     instance: u64,
 }
 impl OwnedConfiguredRoot {
-    fn prepare_directory_observer(&self) -> Result<DirectoryObserver, Error> {
+    fn prepare_directory_observer(
+        &self,
+        binding: &NamespaceObserverBinding,
+    ) -> Result<DirectoryObserverPump, Error> {
         self.verify_identity(true)?;
         self.verify_registered()?;
         let expected = raiun_control_windows::PinnedFileIdentity {
@@ -53,43 +58,42 @@ impl OwnedConfiguredRoot {
             file_index: self.identity.file_index,
         };
         // SAFETY: root_handle is the final live owned RootInspectionLease
-        // handle. Its borrow lasts through the same-object factory, which uses
-        // a kernel path locator and verifies the distinct owned OVERLAPPED
-        // handle's physical identity/type/tag without closing the borrowed one.
+        // handle. Only an owned duplicate crosses to the worker; its same-object
+        // factory uses a kernel locator and verifies the separate OVERLAPPED
+        // handle's physical identity/type/tag before arming, without closing
+        // the borrowed original or sharing a native observer across threads.
         // The complete no-follow root/ancestor lease stays in the connection.
         let borrowed = unsafe { BorrowedHandle::borrow_raw(self.root_handle()?) };
-        #[cfg(all(test, debug_assertions, feature = "synthetic-agent-integration"))]
-        let observer = if std::env::var("RAIUN_RUN_CONNECTED_OBSERVER_FIXTURE").as_deref()
-            == Ok("fresh-owned-state")
-            && std::env::var("RAIUN_CONNECTED_OBSERVER_FIXTURE_CHILD").as_deref() == Ok("1")
-        {
-            DirectoryObserver::from_borrowed_directory_diagnostic(borrowed, expected).map_err(
-                |failure| {
-                    eprintln!(
-                        "synthetic observer construction stage={} kind={:?} native_code={:?}",
-                        failure.stage(),
-                        failure.kind(),
-                        failure.native_code()
-                    );
-                    io_error(
-                        "prepare connected directory observer",
-                        failure.into_io_error(),
-                    )
-                },
-            )?
-        } else {
-            DirectoryObserver::from_borrowed_directory(borrowed, expected)
-                .map_err(|error| io_error("prepare connected directory observer", error))?
-        };
-        #[cfg(not(all(test, debug_assertions, feature = "synthetic-agent-integration")))]
-        let observer = DirectoryObserver::from_borrowed_directory(borrowed, expected)
-            .map_err(|error| io_error("prepare connected directory observer", error))?;
+        let current_backend = binding.backend.clone();
+        let composite = binding.composite;
+        let terminal_backend = binding.backend.clone();
+        let terminal = Arc::clone(&binding.terminal);
+        let observer = DirectoryObserverPump::from_borrowed_directory(
+            borrowed,
+            expected,
+            Arc::new(move || {
+                current_backend
+                    .upgrade()
+                    .is_some_and(|backend| backend.owns_composite_root_identity(composite))
+            }),
+            Arc::new(move |reason| {
+                // The fixed reason belongs to this original connection and
+                // survives observer drain. Latch before one-way revocation so
+                // the owner can report actual loss before a generic save error.
+                let _ = terminal.set(reason);
+                if let Some(backend) = terminal_backend.upgrade() {
+                    backend.begin_revocation();
+                }
+            }),
+        )
+        .map_err(|error| io_error("prepare connected directory observer", error))?;
         self.verify_identity(true)?;
         self.verify_registered()?;
         if observer.root_identity() != expected {
             return Err(Error::ConfiguredRootChanged);
         }
-        // Unarmed here: any factory/postcheck error drops no pending I/O.
+        // The worker cannot construct/arm its observer until arm is called
+        // after the connection publishes the complete supervisor owner.
         Ok(observer)
     }
 }
@@ -159,7 +163,7 @@ impl ConfiguredRootConnection {
             .root
             .as_ref()
             .ok_or(Error::ConfiguredRootChanged)?
-            .prepare_directory_observer()?;
+            .prepare_directory_observer(&self.namespace_binding)?;
         let instance = next_instance(&NEXT_INSTANCE)?;
         self.namespace_observation_context()?;
         // Publish ownership BEFORE arming so every subsequent error retains
@@ -205,7 +209,9 @@ impl ConfiguredRootConnection {
             let _ = self.stop_namespace_observer(Duration::ZERO);
             return Err(error);
         }
-        // Recheck the backend/token/root after the wait BEFORE any rearm.
+        // Recheck the full backend/token/root binding before exposing a batch.
+        // The transport independently checks its original backend and physical
+        // handle before rearming; it never grants dispatch authority.
         let poll = match poll {
             ObserverPoll::Idle => self
                 .namespace_observer
@@ -253,6 +259,9 @@ impl ConfiguredRootConnection {
         self.namespace_observer
             .as_ref()
             .is_some_and(|owner| owner.observer.has_pending_io())
+    }
+    pub(crate) fn namespace_observer_terminal_reason(&self) -> Option<RescanReason> {
+        self.namespace_binding.terminal.get().copied()
     }
     pub(crate) fn stop_namespace_observer(&mut self, wait: Duration) -> Result<(), Error> {
         self.namespace_observation_closed = true;

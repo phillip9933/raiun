@@ -1,11 +1,19 @@
 //! Explicit same-owner ordinary Personal file create; never recovered replay.
 use super::*;
-use crate::close_capture_admission::OwnedCreateAdmission;
+use crate::close_capture_admission::{IndependentCreateAdmission, IndependentCreateAdmissionError};
+use crate::creation_preparation::{
+    Failure, Stage as PreparationStage, Trace, wait_for_recovery_health,
+};
+use crate::file_create_completion_diagnostics::{
+    Stage as CompletionStage, Trace as CompletionTrace,
+};
 use crate::file_create_phase::{Phase, ReplyDisposition, ReplyKey, TaskFlight};
+use crate::fresh_create_target::{FreshCreateTargetKind, NativeCreateFacts};
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceFileContent, NamespaceIntent,
     NamespaceObjectKind, NamespaceOperation, NamespaceParent, StorageClassification,
 };
+use crate::native::native_fresh_create_inspection::FreshNativeInspection;
 use crate::opencloud::file_create::{Admission, RefreshedCreateReadback, VerifiedCreateReadback};
 use crate::streamed_snapshot::SnapshotBinding;
 use crate::streamed_store::namespace_file_store::{CapturedCreatePath, FileCreateStore};
@@ -31,6 +39,7 @@ unsafe extern "system" {
         overlapped: *mut c_void,
     ) -> HResult;
 }
+const CF_CONVERT_FLAG_MARK_IN_SYNC: u32 = 1;
 /// Live same-owner native custody, never serializable or reconstructible.
 pub(crate) struct NativeFileCreateCompletion<'a> {
     _reference: &'a SourceReference<'a>,
@@ -447,19 +456,32 @@ impl ReplacementBody {
                 null_mut(),
             )
         };
-        if hr < 0 {
+        if hr != 0 {
             return Err(native_error("convert admitted replacement", hr));
         }
-        if converted_usn <= 0 {
+        if converted_usn < 0 {
             return Err(Error::EditRecoveryUnavailable);
         }
         verify_completion_identity(self.source.0, identity)?;
+        validate_converted(&reference, self.snapshot, &self.path, identity, false)?;
         hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
-        let mut usn = completion_usn(reference.raw, self.snapshot.identity.file_index)?;
-        if usn <= 0 || usn != converted_usn || stopped() {
+        let observed_usn = completion_usn(reference.raw, self.snapshot.identity.file_index)?;
+        if observed_usn <= 0
+            || (converted_usn > 0 && observed_usn != converted_usn)
+            || stopped()
+            || job.is_stopped()
+        {
             return Err(Error::ConfiguredRootChanged);
         }
+        let mut usn = journal_converted_usn(&reference, self.snapshot.identity.file_index)?;
+        hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
         validate_converted(&reference, self.snapshot, &self.path, identity, false)?;
+        if stopped()
+            || job.is_stopped()
+            || completion_usn(reference.raw, self.snapshot.identity.file_index)? != usn
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
         if !claim() {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -481,16 +503,17 @@ impl ReplacementBody {
 pub(super) struct CreateOwner {
     closed: bool,
     nonce: u64,
-    attempt: Option<OwnerAttempt>,
+    attempts: Vec<OwnerAttempt>,
 }
 struct OwnerAttempt {
     key: Arc<ReplyKey>,
+    completion_trace: Arc<CompletionTrace>,
     phase: Phase,
     flight_done: Arc<std::sync::atomic::AtomicBool>,
     backend: Arc<crate::OpenCloudPlaceholderBackend>,
     recovery: Arc<dyn PreparedEditRecovery>,
     tracker: Arc<CloseCaptureAdmission>,
-    ticket: OwnedCreateAdmission,
+    ticket: IndependentCreateAdmission,
     name: String,
     parent_components: Vec<String>,
     job: crate::StreamedRecoveryJob,
@@ -521,16 +544,20 @@ struct LocalCapture {
 /// Move-only task. Execute on a joined SDK worker; it carries no native custody.
 pub struct FileCreateTask {
     key: Arc<ReplyKey>,
+    completion_trace: Arc<CompletionTrace>,
     store: Option<Arc<SnapshotStore>>,
     backend: Arc<crate::OpenCloudPlaceholderBackend>,
     kind: Option<TaskKind>,
     _flight: TaskFlight, // LAST: all owned network/body data drops before done.
 }
 struct Preparation {
+    root_path: PathBuf,
     parent_components: Vec<String>,
+    name: String,
     recovery: Arc<dyn PreparedEditRecovery>,
     job: crate::StreamedRecoveryJob,
     current: crate::opencloud::file_create::Current,
+    health_wait: Option<crate::CancellationToken>,
 }
 enum TaskKind {
     Prepare(Box<Preparation>),
@@ -540,71 +567,220 @@ enum TaskKind {
 struct Prepared {
     admission: Admission,
     rename: Arc<FileRenameStore>,
+    native_facts: NativeCreateFacts,
 }
 enum ReplyKind {
-    Prepared(Result<Box<Prepared>, BackendError>),
+    Prepared(Result<Box<Prepared>, Failure>),
+    PrepareDeferred(Box<Preparation>, Failure),
     Sent(Box<(Admission, Result<VerifiedCreateReadback, BackendError>)>),
     Refreshed(Box<(Admission, Result<RefreshedCreateReadback, BackendError>)>),
 }
 /// Nonserializable original-attempt reply. Public fields/constructors are absent.
 pub struct FileCreateReply {
     key: Arc<ReplyKey>,
+    completion_trace: Arc<CompletionTrace>,
     store: Option<Arc<SnapshotStore>>,
     kind: ReplyKind,
 }
+impl FileCreateReply {
+    /// Fixed failure boundary only; never exposes paths, credentials or server text.
+    pub fn failure_context(&self) -> &'static str {
+        match &self.kind {
+            ReplyKind::Prepared(Err(failure)) => failure.message("File"),
+            ReplyKind::PrepareDeferred(_, failure) => failure.message("File"),
+            ReplyKind::Prepared(Ok(_)) => {
+                "File creation paused: local source admission or protected capture failed. Recovery files have been kept."
+            }
+            ReplyKind::Sent(pair) => match &pair.1 {
+                Err(_) => {
+                    "File creation paused: original upload send or readback returned no verified result. Recovery files have been kept."
+                }
+                Ok(_) => {
+                    "File creation paused: verified readback returned, but the original attempt or result recording was held or refused. Recovery files have been kept."
+                }
+            },
+            ReplyKind::Refreshed(pair) => match &pair.1 {
+                Err(_) => {
+                    "File creation paused: verified cloud metadata refresh failed. Recovery files have been kept."
+                }
+                Ok(_) => {
+                    "File creation paused: verified file publication or native completion failed. Recovery files have been kept."
+                }
+            },
+        }
+    }
+    /// Read after consuming this reply on its original owner. The retained
+    /// invocation trace contains only fixed stages and grants no authority.
+    pub fn failure_context_after_advance(
+        &self,
+    ) -> impl Fn() -> &'static str + Send + 'static + use<> {
+        let trace = Arc::clone(&self.completion_trace);
+        let fallback = self.failure_context();
+        move || trace.failure_context().unwrap_or(fallback)
+    }
+    /// The original invocation's native HRESULT only, read after advance.
+    pub fn failure_hresult_after_advance(
+        &self,
+    ) -> impl Fn() -> Option<u32> + Send + 'static + use<> {
+        let trace = Arc::clone(&self.completion_trace);
+        move || trace.failure_hresult()
+    }
+}
 pub enum FileCreateStep {
     Task(FileCreateTask),
+    /// Original uncaptured Prepare only; retain and schedule after sibling work.
+    DeferredBeforeCapture(FileCreateTask),
     Finished(crate::FreshFileCreateOutcome),
 }
 impl ReplyKind {
     fn phase(&self) -> Phase {
         match self {
-            Self::Prepared(_) => Phase::Prepare,
+            Self::Prepared(_) | Self::PrepareDeferred(_, _) => Phase::Prepare,
             Self::Sent(_) => Phase::Send,
             Self::Refreshed(_) => Phase::Refresh,
         }
     }
 }
 impl FileCreateTask {
+    /// Fixed diagnostic classification only; no phase advancement or authority.
+    pub fn activity_phase(&self) -> &'static str {
+        match self.kind.as_ref() {
+            Some(TaskKind::Prepare(_)) => "prepare",
+            Some(TaskKind::Send(_)) => "send",
+            Some(TaskKind::Refresh(_)) => "refresh",
+            None => "unknown",
+        }
+    }
+
+    /// Scheduling classification only. Prepare must retain the complete wave
+    /// barrier before any native capture. No result or mutation authority is
+    /// exposed, and an absent/unclassified task retains that barrier.
+    pub fn requires_pre_capture_barrier(&self) -> bool {
+        !matches!(
+            self.kind.as_ref(),
+            Some(TaskKind::Send(_) | TaskKind::Refresh(_))
+        )
+    }
+
     /// No worker is spawned here. Every SDK source worker is joined before return.
     pub fn execute(mut self) -> FileCreateReply {
         let kind = match self.kind.take().expect("private single-use create task") {
-            TaskKind::Prepare(prep) => {
+            TaskKind::Prepare(mut prep) => {
+                let trace = Arc::new(Trace::new());
+                // Move, never renew, the original allowance across both health
+                // queries and any owner-scheduled pre-custody deferrals.
+                let mut health_wait = prep.health_wait.take();
                 let result = (|| {
+                    trace.enter(PreparationStage::Job);
                     prep.job.check()?;
-                    if !(prep.current)(self.key.authorization)
-                        || prep.recovery.has_unresolved()?
-                        || prep
-                            .recovery
-                            .has_unresolved_content_authenticated_legacy()?
-                    {
+                    trace.enter(PreparationStage::Current);
+                    if !(prep.current)(self.key.authorization) {
                         return Err(BackendError::Unavailable);
                     }
                     let parent_components: Vec<_> =
                         prep.parent_components.iter().map(String::as_str).collect();
-                    let admission = self.backend.admit_file_create(
+                    let admission = self.backend.admit_file_create_traced(
                         &parent_components,
                         self.key.root,
                         self.key.authorization,
                         &prep.job,
                         prep.current.clone(),
+                        &trace,
                     )?;
+                    trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
-                    if prep.recovery.has_unresolved()?
-                        || prep
-                            .recovery
-                            .has_unresolved_content_authenticated_legacy()?
-                    {
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    let inspection = FreshNativeInspection::inspect(
+                        &prep.root_path,
+                        self.key.root,
+                        &admission.parent,
+                        &prep.parent_components,
+                        &prep.name,
+                        FreshCreateTargetKind::File,
+                    )
+                    .map_err(|_| BackendError::Unavailable)?;
+                    let mut space = admission
+                        .fresh_create_space_for_child(&self.backend, &prep.name)?
+                        .with_preparation_trace(Arc::clone(&trace));
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    inspection
+                        .bind_space(&mut space)
+                        .map_err(|_| BackendError::Unavailable)?;
+                    trace.enter(PreparationStage::RecoveryStore);
+                    let existing = prep.recovery.existing_file_rename_store(
+                        &admission.parent.scope,
+                        self.key.authorization,
+                    )?;
+                    let rename = if let Some(rename) = existing {
+                        // Binding existing storage is read-only and grants no
+                        // health or capture authority. The full joint query
+                        // below still admits this exact original candidate.
+                        rename
+                    } else {
+                        // Verified absence or unsupported implementations keep
+                        // the original health/create/recheck initialization.
+                        if wait_for_recovery_health(&prep.job, &trace, &mut health_wait, || {
+                            trace.enter(PreparationStage::Job);
+                            prep.job.check()?;
+                            trace.enter(PreparationStage::Current);
+                            if !(prep.current)(self.key.authorization) {
+                                return Err(BackendError::Unavailable);
+                            }
+                            admission.check(&self.backend)?;
+                            trace.enter(PreparationStage::RecoveryBefore);
+                            prep.recovery
+                                .has_unresolved_for_fresh_create_in_space(&space)
+                        })? {
+                            return Err(BackendError::Unavailable);
+                        }
+                        trace.enter(PreparationStage::Current);
+                        admission.check(&self.backend)?;
+                        trace.enter(PreparationStage::RecoveryStore);
+                        prep.recovery
+                            .file_rename_store(&admission.parent.scope, self.key.authorization)?
+                            .ok_or(BackendError::Unavailable)?
+                    };
+                    trace.enter(PreparationStage::Current);
+                    admission.check(&self.backend)?;
+                    if wait_for_recovery_health(&prep.job, &trace, &mut health_wait, || {
+                        trace.enter(PreparationStage::Job);
+                        prep.job.check()?;
+                        trace.enter(PreparationStage::Current);
+                        if !(prep.current)(self.key.authorization) {
+                            return Err(BackendError::Unavailable);
+                        }
+                        admission.check(&self.backend)?;
+                        trace.enter(PreparationStage::RecoveryAfter);
+                        prep.recovery
+                            .has_unresolved_for_fresh_create_in_space(&space)
+                    })? {
                         return Err(BackendError::Unavailable);
                     }
-                    let rename = prep
-                        .recovery
-                        .file_rename_store(&admission.parent.scope, self.key.authorization)?
-                        .ok_or(BackendError::Unavailable)?;
+                    trace.enter(PreparationStage::NativeCreateInspection);
+                    inspection.verify().map_err(|_| BackendError::Unavailable)?;
+                    trace.enter(PreparationStage::Current);
                     admission.check(&self.backend)?;
-                    Ok(Box::new(Prepared { admission, rename }))
-                })();
-                ReplyKind::Prepared(result)
+                    Ok(Box::new(Prepared {
+                        admission,
+                        rename,
+                        native_facts: inspection.facts().clone(),
+                    }))
+                })()
+                .map_err(|error| {
+                    trace.backend(error);
+                    trace.failure()
+                });
+                prep.health_wait = health_wait;
+                match result {
+                    Err(failure)
+                        if failure.is_recovery_quota_busy()
+                            && !prep.job.is_stopped()
+                            && (prep.current)(self.key.authorization) =>
+                    {
+                        ReplyKind::PrepareDeferred(prep, failure)
+                    }
+                    result => ReplyKind::Prepared(result),
+                }
             }
             TaskKind::Send(pair) => {
                 let (mut admission, joined) = *pair;
@@ -619,6 +795,7 @@ impl FileCreateTask {
         };
         FileCreateReply {
             key: self.key.clone(),
+            completion_trace: Arc::clone(&self.completion_trace),
             store: self.store.clone(),
             kind,
         }
@@ -631,6 +808,7 @@ impl OwnerAttempt {
         self.flight_done = done;
         FileCreateTask {
             key: self.key.clone(),
+            completion_trace: Arc::clone(&self.completion_trace),
             store: self
                 .local
                 .as_ref()
@@ -702,16 +880,42 @@ impl ConfiguredRootConnection {
         if slot.closed {
             return Err(Error::ProviderUnavailable);
         }
-        if slot.attempt.is_some() {
+        if slot.attempts.len() >= 4
+            || slot.attempts.iter().any(|attempt| {
+                let parts = attempt
+                    .parent_components
+                    .iter()
+                    .chain(std::iter::once(&attempt.name));
+                let incoming = parent_components
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(name));
+                parts.zip(incoming).all(|(a, b)| a.eq_ignore_ascii_case(b))
+            })
+        {
             return Ok(FileCreateStep::Finished(
                 crate::FreshFileCreateOutcome::BusyBeforeCapture,
             ));
         }
-        let (tracker, recovery) = self.file_rename_guard_context(backend)?;
-        let Some(ticket) = tracker.try_begin_create() else {
-            return Ok(FileCreateStep::Finished(
-                crate::FreshFileCreateOutcome::BusyBeforeCapture,
-            ));
+        let (tracker, recovery) = self.file_create_guard_context(backend)?;
+        let ticket = match tracker.try_begin_independent_create(
+            parent_components
+                .iter()
+                .map(|part| (*part).to_owned())
+                .chain(std::iter::once(name.to_owned()))
+                .collect(),
+        ) {
+            Ok(ticket) => ticket,
+            Err(IndependentCreateAdmissionError::Busy) => {
+                return Ok(FileCreateStep::Finished(
+                    crate::FreshFileCreateOutcome::BusyBeforeCapture,
+                ));
+            }
+            Err(IndependentCreateAdmissionError::Refused) => {
+                return Err(Error::CreateAdmission {
+                    stage: crate::CreateAdmissionStage::CloseAdmission,
+                });
+            }
         };
         let observation = ticket.observation_probe();
         let dispatch = ticket.dispatch_probe();
@@ -749,6 +953,7 @@ impl ConfiguredRootConnection {
         });
         let mut attempt = OwnerAttempt {
             key,
+            completion_trace: Arc::new(CompletionTrace::new()),
             phase: Phase::Prepare,
             flight_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             backend: backend.clone(),
@@ -769,13 +974,16 @@ impl ConfiguredRootConnection {
         let task = attempt.task(
             Phase::Prepare,
             TaskKind::Prepare(Box::new(Preparation {
+                root_path: root.path.clone(),
                 parent_components: attempt.parent_components.clone(),
+                name: attempt.name.clone(),
                 recovery,
                 job,
                 current,
+                health_wait: None,
             })),
         );
-        slot.attempt = Some(attempt);
+        slot.attempts.push(attempt);
         Ok(FileCreateStep::Task(task))
     }
     fn check_create_attempt(&self, attempt: &OwnerAttempt) -> Result<(), Error> {
@@ -796,7 +1004,7 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::ConfiguredRootChanged);
         }
-        let (tracker, recovery) = self.file_rename_guard_context(&attempt.backend)?;
+        let (tracker, recovery) = self.file_create_guard_context(&attempt.backend)?;
         if !Arc::ptr_eq(&tracker, &attempt.tracker) || !Arc::ptr_eq(&recovery, &attempt.recovery) {
             return Err(Error::ProviderUnavailable);
         }
@@ -810,7 +1018,12 @@ impl ConfiguredRootConnection {
             .create_owner
             .try_borrow_mut()
             .map_err(|_| Error::ConnectionStateInvalid)?;
-        let expected = slot.attempt.as_ref().ok_or(Error::ConnectionStateInvalid)?;
+        let index = slot
+            .attempts
+            .iter()
+            .position(|attempt| Arc::ptr_eq(&attempt.key, &reply.key))
+            .ok_or(Error::ConnectionStateInvalid)?;
+        let expected = &slot.attempts[index];
         let disposition = ReplyKey::disposition(
             &expected.key,
             &reply.key,
@@ -829,8 +1042,11 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::ConnectionStateInvalid);
         }
-        let mut attempt = slot.attempt.take().ok_or(Error::ConnectionStateInvalid)?;
+        let mut attempt = slot.attempts.remove(index);
         if disposition == ReplyDisposition::Retire || self.check_create_attempt(&attempt).is_err() {
+            attempt
+                .completion_trace
+                .fail_at(CompletionStage::OriginalContext);
             attempt.job.cancel();
             if attempt.local.is_none() {
                 return Err(Error::ProviderUnavailable);
@@ -838,6 +1054,34 @@ impl ConfiguredRootConnection {
             return Ok(FileCreateStep::Finished(attempt.incomplete()));
         }
         match reply.kind {
+            ReplyKind::PrepareDeferred(preparation, failure) => {
+                // Correlation/disposition above proved the original Prepare's
+                // task has actually disposed. Never defer custody or dispatch.
+                // claim_dispatch occurs only after capture and immediately sets
+                // dispatched; ticket currentness was checked on this owner.
+                if !failure.is_recovery_quota_busy()
+                    || attempt.phase != Phase::Prepare
+                    || !attempt.flight_done.load(Ordering::Acquire)
+                    || attempt.local.is_some()
+                    || attempt.dispatched.load(Ordering::Acquire)
+                    || self
+                        .root
+                        .as_ref()
+                        .is_none_or(|root| preparation.root_path != root.path)
+                    || preparation.parent_components != attempt.parent_components
+                    || preparation.name != attempt.name
+                    || !Arc::ptr_eq(&preparation.recovery, &attempt.recovery)
+                    || !Arc::ptr_eq(&preparation.current, &attempt.current)
+                    || preparation.job.deadline() != attempt.job.deadline()
+                    || preparation.job.is_stopped()
+                    || !(preparation.current)(attempt.key.authorization)
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                let task = attempt.task(Phase::Prepare, TaskKind::Prepare(preparation));
+                slot.attempts.push(attempt);
+                Ok(FileCreateStep::DeferredBeforeCapture(task))
+            }
             ReplyKind::Prepared(result) => {
                 let prepared = result.map_err(|_| Error::EditRecoveryUnavailable)?;
                 let expected = self
@@ -858,6 +1102,8 @@ impl ConfiguredRootConnection {
                     &attempt,
                     &prepared.admission,
                     &prepared.rename,
+                    &prepared.native_facts,
+                    &slot.attempts,
                 )? {
                     CaptureResult::Busy => {
                         return Ok(FileCreateStep::Finished(
@@ -871,25 +1117,35 @@ impl ConfiguredRootConnection {
                     }
                     CaptureResult::Ready(captured) => *captured,
                 };
-                if self.check_create_attempt(&attempt).is_err()
-                    || local.lease.mark_submitted().is_err()
-                {
+                if self.check_create_attempt(&attempt).is_err() {
+                    attempt
+                        .completion_trace
+                        .fail_at(CompletionStage::OriginalContext);
                     return Ok(FileCreateStep::Finished(
                         crate::FreshFileCreateOutcome::CapturedLocalIncomplete,
                     ));
                 }
+                // Claim the original live ticket before writing Submitted. A
+                // refused claim has no send and must retain a pending capture.
                 if !attempt.ticket.claim_dispatch() {
                     return Ok(FileCreateStep::Finished(
                         crate::FreshFileCreateOutcome::CapturedLocalIncomplete,
                     ));
                 }
                 attempt.dispatched.store(true, Ordering::Release);
+                // Write-ahead history still precedes construction of any Send
+                // task; a persistence refusal cannot dispatch the body.
+                if local.lease.mark_submitted().is_err() {
+                    return Ok(FileCreateStep::Finished(
+                        crate::FreshFileCreateOutcome::CapturedLocalIncomplete,
+                    ));
+                }
                 attempt.local = Some(local);
                 let task = attempt.task(
                     Phase::Send,
                     TaskKind::Send(Box::new((prepared.admission, joined))),
                 );
-                slot.attempt = Some(attempt);
+                slot.attempts.push(attempt);
                 Ok(FileCreateStep::Task(task))
             }
             ReplyKind::Sent(pair) => {
@@ -919,6 +1175,9 @@ impl ConfiguredRootConnection {
                 }
                 local.remote_verified = true;
                 if self.check_create_attempt(&attempt).is_err() {
+                    attempt
+                        .completion_trace
+                        .fail_at(CompletionStage::OriginalContext);
                     return Ok(FileCreateStep::Finished(
                         crate::FreshFileCreateOutcome::RemoteVerifiedLocalIncomplete,
                     ));
@@ -927,7 +1186,7 @@ impl ConfiguredRootConnection {
                     Phase::Refresh,
                     TaskKind::Refresh(Box::new((admission, proof))),
                 );
-                slot.attempt = Some(attempt);
+                slot.attempts.push(attempt);
                 Ok(FileCreateStep::Task(task))
             }
             ReplyKind::Refreshed(pair) => {
@@ -953,14 +1212,14 @@ impl ConfiguredRootConnection {
             return false;
         };
         slot.closed = true;
-        if let Some(attempt) = slot.attempt.as_ref() {
+        for attempt in &slot.attempts {
             attempt.job.cancel();
-            if !attempt.flight_done.load(Ordering::Acquire) {
-                return false;
-            }
         }
-        slot.attempt.take();
-        true
+        // Keep every original native capture until its actual SDK/body flight
+        // has disposed; no one result can release a sibling claim.
+        slot.attempts
+            .retain(|attempt| !attempt.flight_done.load(Ordering::Acquire));
+        slot.attempts.is_empty()
     }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn reconcile_fresh_personal_file_create(
@@ -986,6 +1245,32 @@ impl ConfiguredRootConnection {
                 FileCreateStep::Task(task) => {
                     self.advance_fresh_personal_file_create(task.execute())?
                 }
+                FileCreateStep::DeferredBeforeCapture(task) => {
+                    // This synchronous convenience caller has no scheduling
+                    // owner. Dispose first, then retire only its original key;
+                    // never execute repeatedly, cancel a shared job or close peers.
+                    let key = Arc::clone(&task.key);
+                    drop(task);
+                    let mut slot = self
+                        .create_owner
+                        .try_borrow_mut()
+                        .map_err(|_| Error::ConnectionStateInvalid)?;
+                    let index = slot
+                        .attempts
+                        .iter()
+                        .position(|attempt| Arc::ptr_eq(&attempt.key, &key))
+                        .ok_or(Error::ConnectionStateInvalid)?;
+                    let attempt = &slot.attempts[index];
+                    if attempt.phase != Phase::Prepare
+                        || !attempt.flight_done.load(Ordering::Acquire)
+                        || attempt.local.is_some()
+                        || attempt.dispatched.load(Ordering::Acquire)
+                    {
+                        return Err(Error::ConnectionStateInvalid);
+                    }
+                    slot.attempts.remove(index);
+                    return Ok(crate::FreshFileCreateOutcome::BusyBeforeCapture);
+                }
             };
         }
     }
@@ -994,6 +1279,8 @@ impl ConfiguredRootConnection {
         attempt: &OwnerAttempt,
         admission: &Admission,
         rename: &Arc<FileRenameStore>,
+        native_facts: &NativeCreateFacts,
+        siblings: &[OwnerAttempt],
     ) -> Result<CaptureResult, Error> {
         use sha2::Digest;
         self.check_create_attempt(attempt)?;
@@ -1059,9 +1346,18 @@ impl ConfiguredRootConnection {
         };
         let reference = source.reference()?;
         let (snapshot, usn) = plain(&reference)?;
-        if !same_edit_snapshot(before, snapshot)
+        if before.identity != snapshot.identity
+            || before.file_attributes != snapshot.file_attributes
+            || before.reparse_tag != snapshot.reparse_tag
+            || before.placeholder_state != snapshot.placeholder_state
             || snapshot.identity.volume_serial != physical.volume_serial
             || snapshot.identity == parent_snapshot.identity
+            || siblings.iter().any(|sibling| {
+                sibling
+                    .local
+                    .as_ref()
+                    .is_some_and(|local| local.snapshot.identity == snapshot.identity)
+            })
         {
             return Err(Error::ConfiguredRootChanged);
         }
@@ -1073,6 +1369,15 @@ impl ConfiguredRootConnection {
             &expected,
         ) {
             return Err(Error::ConfiguredRootChanged);
+        }
+        // Explorer may finish its last write between the metadata probe and
+        // the exclusive source open. No body, intent or dispatch exists yet.
+        // Keep the original candidate/deadline and reacquire all admission on
+        // the next turn; identity, shape, link and path mismatches above hold.
+        if before.file_size != snapshot.file_size
+            || before.last_write_time != snapshot.last_write_time
+        {
+            return Ok(CaptureResult::Busy);
         }
         drop(probe); // No leaf share restriction remains during network phases.
         let verify = || -> Result<(), Error> {
@@ -1112,6 +1417,33 @@ impl ConfiguredRootConnection {
             volume_serial: snapshot.identity.volume_serial,
             file_index: snapshot.identity.file_index,
         };
+        let mut native_parents = Vec::with_capacity(_ancestors.len() + 2);
+        native_parents.push(LocalFileIdentity {
+            volume_serial: physical.volume_serial,
+            file_index: physical.file_index,
+        });
+        native_parents.extend(_ancestors.iter().map(|(_, snapshot)| LocalFileIdentity {
+            volume_serial: snapshot.identity.volume_serial,
+            file_index: snapshot.identity.file_index,
+        }));
+        native_parents.push(LocalFileIdentity {
+            volume_serial: parent_snapshot.identity.volume_serial,
+            file_index: parent_snapshot.identity.file_index,
+        });
+        let mut full_components = attempt.parent_components.clone();
+        full_components.push(attempt.name.clone());
+        // Worker classification grants no capture authority. Match its native
+        // facts against this owner's freshly pinned chain and protected source
+        // before reserving or publishing any snapshot or dispatching a send.
+        if !native_facts.matches(
+            physical,
+            &full_components,
+            FreshCreateTargetKind::File,
+            local_file,
+            &native_parents,
+        ) {
+            return Err(Error::ConfiguredRootChanged);
+        }
         let entry = LocalNamespaceEntry {
             parent: NamespaceParent {
                 scope: captured.scope.clone(),
@@ -1239,6 +1571,22 @@ impl ConfiguredRootConnection {
         admission: Admission,
         proof: RefreshedCreateReadback,
     ) -> Result<crate::FreshFileCreateOutcome, Error> {
+        let trace = Arc::clone(&attempt.completion_trace);
+        trace.enter(CompletionStage::OriginalContext);
+        let result = self.finish_create_local_traced(attempt, local, admission, proof, &trace);
+        if let Err(error) = &result {
+            trace.fail_error(error);
+        }
+        result
+    }
+    fn finish_create_local_traced(
+        &self,
+        attempt: &mut OwnerAttempt,
+        local: LocalCapture,
+        admission: Admission,
+        proof: RefreshedCreateReadback,
+        trace: &CompletionTrace,
+    ) -> Result<crate::FreshFileCreateOutcome, Error> {
         use crate::FreshFileCreateOutcome::*;
         self.check_create_attempt(attempt)?;
         let components: Vec<_> = attempt
@@ -1274,13 +1622,14 @@ impl ConfiguredRootConnection {
         let after_publication = || {
             current(authorization)
                 && self
-                    .file_rename_guard_context(backend)
+                    .file_create_guard_context(backend)
                     .is_ok_and(|(actual_tracker, actual)| {
                         Arc::ptr_eq(&actual, &recovery) && Arc::ptr_eq(&actual_tracker, &tracker)
                     })
         };
         // Full original context/recovery checks occur outside backend.state.
         if !after_publication() {
+            trace.fail();
             return Ok(RemoteVerifiedLocalIncomplete);
         }
         let inside_publication = || {
@@ -1291,23 +1640,28 @@ impl ConfiguredRootConnection {
                 && !backend.is_revoked()
                 && self
                     .state
-                    .unverifiable_placeholder_closes
+                    .observed_unverifiable_closes
                     .load(Ordering::Acquire)
                     == 0
         };
         let complete = |final_reference: &SourceReference<'_>| -> Result<(), Error> {
+            trace.enter(CompletionStage::OriginalContext);
             if !inside_publication() {
                 return Err(Error::EditRecoveryUnavailable);
             }
             admission
                 .check(backend)
                 .map_err(|_| Error::ProviderUnavailable)?;
+            trace.enter(CompletionStage::RootIdentity);
             root.verify_identity(true)?;
+            trace.enter(CompletionStage::RootRegistration);
             root.verify_registered()?;
+            trace.enter(CompletionStage::SourceSnapshot);
             let (now, current_usn) = plain(final_reference)?;
             if !same_edit_snapshot(snapshot, now) || current_usn != usn {
                 return Err(Error::ConfiguredRootChanged);
             }
+            trace.enter(CompletionStage::ParentIdentity);
             let (_, actual_parent, _pins) = native_namespace_directory::pin_namespace_parent(
                 root,
                 &admission.parent.route,
@@ -1315,82 +1669,150 @@ impl ConfiguredRootConnection {
                 &components,
                 FILE_READ_ATTRIBUTES,
             )?;
-            if actual_parent.identity != parent_snapshot.identity
-                || !windows_paths_equal(
-                    &final_path_for_handle(final_reference.raw)
-                        .map_err(|_| Error::ConfiguredRootChanged)?,
-                    &expected,
-                )
-            {
+            if actual_parent.identity != parent_snapshot.identity {
                 return Err(Error::ConfiguredRootChanged);
             }
+            trace.enter(CompletionStage::SourcePath);
+            if !windows_paths_equal(
+                &final_path_for_handle(final_reference.raw)
+                    .map_err(|_| Error::ConfiguredRootChanged)?,
+                &expected,
+            ) {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            trace.enter(CompletionStage::SourceHashBeforeConvert);
             hash_source(final_reference, snapshot.file_size, &capture_job, &digest)?;
+            trace.enter(CompletionStage::SourceSnapshotAfterHash);
             let after = plain(final_reference)?;
             if !same_edit_snapshot(snapshot, after.0) || after.1 != usn {
                 return Err(Error::ConfiguredRootChanged);
             }
             Ok(())
         };
+        trace.enter(CompletionStage::Publication);
         let result = admission.publish_and_complete(backend, &proof, |identity| {
             // Metadata HTTP has finished. Re-reference only this SAME owner;
             // a foreground break refuses completion, never reopen/rebase.
+            trace.enter(CompletionStage::SourceReference);
             let final_reference = source.reference()?;
             complete(&final_reference)?;
+            trace.enter(CompletionStage::OriginalContext);
+            admission
+                .check(backend)
+                .map_err(|_| Error::ProviderUnavailable)?;
+            trace.enter(CompletionStage::RootIdentity);
+            root.verify_identity(true)?;
+            trace.enter(CompletionStage::RootRegistration);
+            root.verify_registered()?;
+            trace.enter(CompletionStage::OriginalContext);
+            if !inside_publication() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            trace.enter(CompletionStage::CompletionClaim);
+            if !ticket.claim_completion() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
             let mut converted_usn = 0i64;
-            // SAFETY: referenced WRITE_ACCESS Win32 borrow; synchronous NONE
-            // conversion retains all bytes, with a live 16-byte identity.
+            // SAFETY: same exclusive WRITE_ACCESS owner, continuously
+            // referenced across original proofs and this one convert-and-mark.
+            // All bytes remain resident; no dehydration, force or retry.
+            trace.enter(CompletionStage::ConvertAndMarkInSync);
             let hr = unsafe {
                 CfConvertToPlaceholder(
                     final_reference.raw,
                     identity.as_ptr().cast(),
                     16,
-                    0,
+                    CF_CONVERT_FLAG_MARK_IN_SYNC,
                     &mut converted_usn,
                     null_mut(),
                 )
             };
-            if hr < 0 {
+            if hr != 0 {
                 return Err(native_error("convert fresh file-create", hr));
             }
-            if converted_usn <= 0 {
+            trace.enter(CompletionStage::ConvertedUsn);
+            if converted_usn < 0 {
                 return Err(Error::EditRecoveryUnavailable);
             }
+            trace.enter(CompletionStage::PlaceholderIdentity);
             verify_completion_identity(source.0, identity)?;
+            trace.enter(CompletionStage::ConvertedShape);
+            validate_converted(&final_reference, snapshot, &expected, identity, true)?;
+            trace.enter(CompletionStage::SourceHashAfterConvert);
             hash_source(&final_reference, snapshot.file_size, &capture_job, &digest)?;
-            let mut compare_usn =
-                completion_usn(final_reference.raw, snapshot.identity.file_index)?;
-            if compare_usn <= 0 || compare_usn != converted_usn {
+            trace.enter(CompletionStage::ConvertedUsnRead);
+            let observed_usn = completion_usn(final_reference.raw, snapshot.identity.file_index)?;
+            trace.enter(CompletionStage::ConvertedUsnCompare);
+            if observed_usn <= 0 || (converted_usn > 0 && observed_usn != converted_usn) {
                 return Err(Error::ConfiguredRootChanged);
             }
-            validate_converted(&final_reference, snapshot, &expected, identity, false)?;
-            if !ticket.claim_completion() {
+            trace.enter(CompletionStage::OriginalContext);
+            admission
+                .check(backend)
+                .map_err(|_| Error::ProviderUnavailable)?;
+            trace.enter(CompletionStage::RootIdentity);
+            root.verify_identity(true)?;
+            trace.enter(CompletionStage::RootRegistration);
+            root.verify_registered()?;
+            trace.enter(CompletionStage::OriginalContext);
+            if !inside_publication() {
                 return Err(Error::EditRecoveryUnavailable);
             }
-            // SAFETY: same protected owner and a fresh positive compare USN.
-            // Never NULL/zero fallback; a mismatch is retained incomplete.
-            let hr = unsafe { CfSetInSyncState(source.0, 1, 0, &mut compare_usn) };
-            if hr < 0 {
-                return Err(native_error("complete fresh file-create", hr));
-            }
-            validate_converted(&final_reference, snapshot, &expected, identity, true)?;
+            trace.enter(CompletionStage::ConversionJournal);
+            let compare_usn =
+                journal_converted_usn(&final_reference, snapshot.identity.file_index)?;
+            trace.enter(CompletionStage::ConversionJournalStable);
             hash_source(&final_reference, snapshot.file_size, &capture_job, &digest)?;
-            let after_usn = completion_usn(final_reference.raw, snapshot.identity.file_index)?;
-            if compare_usn <= 0 || after_usn != compare_usn {
-                return Err(Error::ConfiguredRootChanged);
-            }
+            validate_converted(&final_reference, snapshot, &expected, identity, true)?;
+            admission
+                .check(backend)
+                .map_err(|_| Error::ProviderUnavailable)?;
             root.verify_identity(true)?;
             root.verify_registered()?;
             if !inside_publication() {
                 return Err(Error::EditRecoveryUnavailable);
             }
+            if completion_usn(final_reference.raw, snapshot.identity.file_index)? != compare_usn {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            trace.enter(CompletionStage::InSyncShape);
+            validate_converted(&final_reference, snapshot, &expected, identity, true)?;
+            trace.enter(CompletionStage::SourceHashAfterSync);
+            hash_source(&final_reference, snapshot.file_size, &capture_job, &digest)?;
+            trace.enter(CompletionStage::InSyncUsnRead);
+            let after_usn = completion_usn(final_reference.raw, snapshot.identity.file_index)?;
+            trace.enter(CompletionStage::InSyncUsnCompare);
+            if compare_usn <= 0 || after_usn != compare_usn {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            trace.enter(CompletionStage::FinalRootIdentity);
+            root.verify_identity(true)?;
+            trace.enter(CompletionStage::FinalRootRegistration);
+            root.verify_registered()?;
+            trace.enter(CompletionStage::FinalCurrent);
+            if !inside_publication() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            trace.enter(CompletionStage::Publication);
             Ok(final_reference)
         });
         let final_reference = match result {
-            Ok(reference) if after_publication() => reference,
-            _ => return Ok(RemoteVerifiedLocalIncomplete),
+            Ok(reference) => {
+                trace.enter(CompletionStage::PostPublicationCurrent);
+                if !after_publication() {
+                    trace.fail();
+                    return Ok(RemoteVerifiedLocalIncomplete);
+                }
+                reference
+            }
+            Err(error) => {
+                trace.fail_error(&error);
+                return Ok(RemoteVerifiedLocalIncomplete);
+            }
         };
         // Backend state/provider permit are now gone. Keep the SAME source
         // reference while taking record/quota locks for linked custody.
+        trace.enter(CompletionStage::CompletionReport);
         let completion = NativeFileCreateCompletion {
             _reference: &final_reference,
             store: store.snapshot_store().clone(),
@@ -1401,24 +1823,66 @@ impl ConfiguredRootConnection {
                 .map_err(|_| Error::EditRecoveryUnavailable)?,
         };
         let custody = (|| {
+            trace.enter(CompletionStage::CustodyCurrent);
             if !after_publication() || admission.check(backend).is_err() {
                 return Err(crate::streamed_store::StoreError::Invalid);
             }
+            trace.enter(CompletionStage::SnapshotLease);
             let mut snapshot_lease = store
                 .snapshot_store()
                 .acquire_dispatch(completion.snapshot().1)?;
+            trace.enter(CompletionStage::SnapshotAck);
             let acknowledged = snapshot_lease.acknowledge_create(&completion)?;
+            trace.enter(CompletionStage::CustodyCurrent);
             if !after_publication() || admission.check(backend).is_err() {
                 return Err(crate::streamed_store::StoreError::Invalid);
             }
+            trace.enter(CompletionStage::JoinCompletion);
             lease.record_local_completed(&completion, &acknowledged)
         })();
         Ok(if custody.is_ok() {
             LocallyCompleted
         } else {
+            trace.fail();
             RemoteVerifiedLocalIncomplete
         })
     }
+}
+
+// One journal phase for an already verified conversion on the SAME referenced
+// exclusive owner. Never repeat it to rebase a refused comparison or update.
+// This is postproof, not a data flush, writer fence or completion authority.
+// Each caller retains its original conversion and completion protocol; this
+// helper grants no conversion, in-sync update or acknowledgment authority.
+fn journal_converted_usn(
+    source: &SourceReference<'_>,
+    expected_file_id: u64,
+) -> Result<i64, Error> {
+    const FSCTL_WRITE_USN_CLOSE_RECORD: u32 = 0x0009_00ef;
+    let mut usn = 0_i64;
+    let mut io = CompletionIo::new()?;
+    // SAFETY: the original referenced raw handle, exact aligned output and
+    // owned OVERLAPPED/event remain live until definitive I/O completion.
+    // This appends a close record without changing file data or permissions.
+    let result = unsafe {
+        DeviceIoControl(
+            source.raw,
+            FSCTL_WRITE_USN_CLOSE_RECORD,
+            null(),
+            0,
+            (&mut usn as *mut i64).cast(),
+            size_of::<i64>() as u32,
+            null_mut(),
+            (&mut io.overlapped as *mut CompletionOverlapped).cast(),
+        )
+    };
+    if io.finish(source.raw, result)? != size_of::<i64>() as u32
+        || usn <= 0
+        || completion_usn(source.raw, expected_file_id)? != usn
+    {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    Ok(usn)
 }
 
 fn hash_source(

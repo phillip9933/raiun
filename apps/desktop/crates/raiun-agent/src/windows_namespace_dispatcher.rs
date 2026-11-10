@@ -1,6 +1,14 @@
 //! One owner-thread observer and ordered, volatile routing. Names/counters are
 //! metadata only; existing consumers independently admit every mutation.
-const MAX_WORK: usize = 64;
+// A work item consumes at least one already-validated kernel hint. Keep the
+// volatile plan bounded by that same full-batch limit rather than refusing a
+// valid bulk copy before any independent native create admission can run.
+#[cfg(windows)]
+const MAX_WORK: usize = raiun_control_windows::directory_notifications::MAX_NOTIFICATION_HINTS;
+// The planner is also compiled by existing host-only regressions, where the
+// Windows adapter dependency is absent. Production uses the shared limit above.
+#[cfg(not(windows))]
+const MAX_WORK: usize = 1024;
 const MAX_PAIRS: usize = 32;
 /// Held until a typed non-admitting directory classifier and native evidence
 /// distinguish provider-created placeholders from new ordinary directories.
@@ -146,6 +154,9 @@ fn route_accounted(
     creates: bool,
     accounted: &[bool],
 ) -> Result<Vec<Work>, &'static str> {
+    if hints.len() > MAX_WORK {
+        return Err("Namespace batch limit");
+    }
     let mut result = Vec::new();
     let mut endpoints: Vec<&[String]> = Vec::new();
     let mut pair = 0;
@@ -264,7 +275,10 @@ impl Cursor {
         self.index < self.work.len()
     }
     fn admit(&mut self, work: Vec<Work>) -> Result<(), &'static str> {
-        if self.held || self.pending() || work.len() > MAX_WORK {
+        if work.len() > MAX_WORK {
+            return Err("Namespace batch limit");
+        }
+        if self.held || self.pending() {
             return Err("Namespace cursor unavailable");
         }
         self.work = work;
@@ -324,13 +338,109 @@ mod connected {
         OpenCloudPlaceholderBackend,
     };
     use raiun_control_windows::directory_notifications::{
-        DirectoryAction, NotificationBatch, ObserverPoll,
-        directory_rename_hints::{RenameHintBatch, pair_move_hints},
+        DirectoryAction, DirectoryHint, NotificationBatch, ObserverPoll, RescanReason,
+        directory_rename_hints::{RenameHintBatch, RenameHintReason, pair_move_hints},
     };
-    use std::{sync::Arc, time::Duration};
+    use std::{collections::VecDeque, sync::Arc, time::Duration};
+
+    const MAX_WAITING_BATCHES: usize = MAX_WORK;
+    const MAX_QUEUED_HINTS: usize = 16 * MAX_WORK;
+    const MAX_QUEUED_WEIGHT: usize = 4 * 1024 * 1024;
+    type QueuedBatch = (NotificationBatch, usize);
+
+    fn queued_batch_weight(hints: &[DirectoryHint]) -> Option<usize> {
+        // Charge batch/queue headers, every owned hint and String header, and
+        // all UTF-8 component bytes. Double the structural charge conservatively
+        // for allocation/spare-capacity overhead; this is a queue weight budget,
+        // not an estimate of the complete process's memory usage.
+        let mut weight = std::mem::size_of::<QueuedBatch>()
+            .checked_add(std::mem::size_of::<VecDeque<QueuedBatch>>())?;
+        for hint in hints {
+            weight = weight.checked_add(std::mem::size_of::<DirectoryHint>())?;
+            for component in hint.components() {
+                weight = weight
+                    .checked_add(std::mem::size_of::<String>())?
+                    .checked_add(component.len())?;
+            }
+        }
+        weight.checked_mul(2)
+    }
 
     pub(crate) const HOLD: &str =
         "File namespace sync needs attention. Existing recovery files have been kept.";
+    const BACKLOG_LIMIT: &str =
+        "File namespace sync paused: notification backlog limit. Recovery files have been kept.";
+    const BATCH_LIMIT: &str =
+        "File namespace sync paused: notification batch limit. Recovery files have been kept.";
+    const RENAME_LIMIT: &str =
+        "File namespace sync paused: rename batch limit. Recovery files have been kept.";
+    const OBSERVER_LOSS: &str =
+        "File namespace sync paused: notification continuity lost. Recovery files have been kept.";
+    const OBSERVER_INVALID: &str =
+        "File namespace sync paused: malformed notification batch. Recovery files have been kept.";
+    const OBSERVER_STOPPED: &str =
+        "File namespace sync paused: observer stopped. Recovery files have been kept.";
+    const OBSERVER_UNAVAILABLE: &str =
+        "File namespace sync paused: observer unavailable. Recovery files have been kept.";
+    const CONTEXT_CHANGED: &str =
+        "File namespace sync paused: observer context changed. Recovery files have been kept.";
+    const PLAN_PAIRING: &str =
+        "File namespace sync paused: incomplete rename plan. Recovery files have been kept.";
+    const PLAN_AMBIGUOUS: &str =
+        "File namespace sync paused: ambiguous namespace plan. Recovery files have been kept.";
+    const PLAN_UNSUPPORTED: &str =
+        "File namespace sync paused: unsupported namespace plan. Recovery files have been kept.";
+    const PLAN_STATE: &str =
+        "File namespace sync paused: planner state unavailable. Recovery files have been kept.";
+    const OWNER_HOLD: &str = "File namespace sync paused: native owner preflight needs attention. Recovery files have been kept.";
+
+    // Only fixed, nonsecret reasons cross this boundary. The create consumer
+    // can also retain its exact local HRESULT; never notification names, paths,
+    // formatted OS errors or server text.
+    fn plan_hold(reason: &'static str) -> &'static str {
+        match reason {
+            "Namespace batch limit" => BATCH_LIMIT,
+            "Unpaired completed replacement hint" | "Unpaired namespace notification" => {
+                PLAN_PAIRING
+            }
+            "Ambiguous completed replacement endpoints" | "Ambiguous namespace endpoints" => {
+                PLAN_AMBIGUOUS
+            }
+            "Unsupported create namespace"
+            | "Unsupported observed namespace"
+            | "Unsupported namespace rename"
+            | "Unsupported namespace removal" => PLAN_UNSUPPORTED,
+            "Namespace cursor unavailable" | "Namespace generation exhausted" => PLAN_STATE,
+            "Observed entry needs attention" => OWNER_HOLD,
+            _ => HOLD,
+        }
+    }
+    pub(crate) fn observer_hold(reason: RescanReason) -> &'static str {
+        match reason {
+            RescanReason::Limit => BATCH_LIMIT,
+            RescanReason::EmptyCompletion => OBSERVER_LOSS,
+            RescanReason::MalformedBuffer => OBSERVER_INVALID,
+            RescanReason::NativeError(_) => OBSERVER_UNAVAILABLE,
+            RescanReason::RootChanged => CONTEXT_CHANGED,
+            RescanReason::Cancelled => OBSERVER_STOPPED,
+        }
+    }
+    fn pairing_hold(reason: RenameHintReason) -> &'static str {
+        match reason {
+            RenameHintReason::SourceRescan(reason) => observer_hold(reason),
+            RenameHintReason::Limit => BATCH_LIMIT,
+            RenameHintReason::UnpairedOldName
+            | RenameHintReason::UnpairedNewName
+            | RenameHintReason::InterleavedRename => PLAN_PAIRING,
+            RenameHintReason::DifferentParent | RenameHintReason::UnsupportedName => {
+                PLAN_UNSUPPORTED
+            }
+            RenameHintReason::CaseOnlyRename
+            | RenameHintReason::DuplicateEndpoint
+            | RenameHintReason::RenameChain
+            | RenameHintReason::CaseAmbiguousEndpoint => PLAN_AMBIGUOUS,
+        }
+    }
     #[cfg(all(test, debug_assertions))]
     #[derive(Clone, Copy, Debug)]
     pub(crate) struct Observation {
@@ -342,6 +452,18 @@ mod connected {
         pub(crate) directory_offers: u64,
         pub(crate) provider_directory_skipped: bool,
     }
+    #[derive(Clone, serde::Serialize)]
+    pub(crate) struct ActivitySnapshot {
+        pub(crate) last_wait: &'static str,
+        pub(crate) held: bool,
+        pub(crate) waiting_batches: usize,
+        pub(crate) queued_hints: usize,
+        pub(crate) cursor_remaining: usize,
+        pub(crate) pending_files: usize,
+        pub(crate) create_last_wait: Option<&'static str>,
+        pub(crate) lanes: Vec<create::LaneObservation>,
+        pub(crate) executor: Option<super::super::windows_create_executor::ExecutorActivity>,
+    }
     pub(crate) struct Dispatcher {
         rename: Option<Box<rename::Producer>>,
         mkdir: Option<mkdir::Producer>,
@@ -349,7 +471,14 @@ mod connected {
         attached: bool,
         instance: Option<u64>,
         batch: Option<NotificationBatch>,
+        waiting_batches: VecDeque<QueuedBatch>,
+        queued_hints: usize,
+        queued_weight: usize,
         cursor: Cursor,
+        hold_reason: Option<create::FailureContext>,
+        pending_files: Vec<(Vec<String>, u64)>,
+        file_wave_started: bool,
+        last_wait: &'static str,
         #[cfg(all(test, debug_assertions))]
         fixture_directory: bool,
         #[cfg(all(test, debug_assertions))]
@@ -410,7 +539,14 @@ mod connected {
                 attached: false,
                 instance: None,
                 batch: None,
+                waiting_batches: VecDeque::new(),
+                queued_hints: 0,
+                queued_weight: 0,
                 cursor: Cursor::default(),
+                hold_reason: None,
+                pending_files: Vec::new(),
+                file_wave_started: false,
+                last_wait: "unknown",
                 #[cfg(all(test, debug_assertions))]
                 fixture_directory: false,
                 #[cfg(all(test, debug_assertions))]
@@ -423,10 +559,41 @@ mod connected {
             self.create = Some(producer);
             self
         }
+        /// Copy existing owner observations only; never poll, drain or advance.
+        pub(crate) fn activity_snapshot(
+            &self,
+            workers: Option<&create::Workers>,
+        ) -> ActivitySnapshot {
+            ActivitySnapshot {
+                last_wait: self.last_wait,
+                held: self.cursor.held || self.hold_reason.is_some(),
+                waiting_batches: self.waiting_batches.len(),
+                queued_hints: self.queued_hints,
+                cursor_remaining: self.cursor.work.len().saturating_sub(self.cursor.index),
+                pending_files: self.pending_files.len(),
+                create_last_wait: self.create.as_ref().map(create::Producer::last_wait),
+                lanes: self
+                    .create
+                    .as_ref()
+                    .map_or_else(Vec::new, create::Producer::lane_observations),
+                executor: workers.map(|workers| workers.activity_snapshot()),
+            }
+        }
         pub(crate) fn stop_create(&mut self, connection: &ConfiguredRootConnection) {
             if let Some(create) = &mut self.create {
                 create.stop(connection);
             }
+        }
+        /// A terminal transport fact grants no new dispatch authority. Cancel
+        /// the same original jobs and preserve the first fixed hold reason.
+        pub(crate) fn hold_observer_loss(
+            &mut self,
+            connection: &ConfiguredRootConnection,
+            reason: RescanReason,
+        ) {
+            self.hold_reason.get_or_insert(observer_hold(reason).into());
+            self.stop_create(connection);
+            self.hold();
         }
         pub(crate) fn drain_create(
             &mut self,
@@ -459,8 +626,14 @@ mod connected {
             self.rename.as_deref()
         }
         pub(crate) fn hold(&mut self) {
+            self.last_wait = "held";
+            self.hold_reason.get_or_insert(HOLD.into());
             self.cursor.hold();
             self.batch = None;
+            self.waiting_batches.clear();
+            self.queued_hints = 0;
+            self.queued_weight = 0;
+            self.pending_files.clear();
             if let Some(file) = &mut self.rename {
                 file.hold();
             }
@@ -505,13 +678,130 @@ mod connected {
             save_or_command_active: bool,
             workers: Option<&mut create::Workers>,
         ) -> Result<(), &'static str> {
+            // A held owner is never polled or replayed. Preserve its original
+            // fixed reason instead of replacing it with generic HOLD next tick.
+            if let Some(reason) = self.hold_reason {
+                self.last_wait = "held";
+                return Err(reason.message());
+            }
             let result =
                 self.tick_inner(connection, backend, root, save_or_command_active, workers);
-            if result.is_err() {
+            if let Err(reason) = result {
+                self.hold_reason.get_or_insert(reason.into());
                 self.stop_create(connection);
                 self.hold();
             }
             result
+        }
+        pub(crate) fn failure_hresult(&self) -> Option<u32> {
+            self.hold_reason.and_then(create::FailureContext::hresult)
+        }
+        /// Initial readiness only: arm the original observer without polling,
+        /// routing hints or admitting any namespace operation. Connect publishes
+        /// success only after this exact instance reports pending native IO.
+        pub(crate) fn arm_observer(
+            &mut self,
+            connection: &mut ConfiguredRootConnection,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            root: ConfiguredRootIdentity,
+        ) -> Result<(), &'static str> {
+            if self.attached || self.instance.is_some() || !self.current(backend, root) {
+                return Err(CONTEXT_CHANGED);
+            }
+            let value = connection
+                .attach_namespace_observer()
+                .map_err(|_| OBSERVER_UNAVAILABLE)?;
+            if value.root_identity() != root
+                || value.provider_scope() != backend.scope()
+                || value.instance() == 0
+                || !self.current(backend, root)
+            {
+                return Err(CONTEXT_CHANGED);
+            }
+            if !matches!(value.poll(), ObserverPoll::Pending) {
+                return Err(OBSERVER_UNAVAILABLE);
+            }
+            self.attached = true;
+            self.instance = Some(value.instance());
+            Ok(())
+        }
+        // Preserve the same producer failure as one held fact before mapping
+        // its fixed text into the existing dispatcher result. No owner action.
+        fn create_result<T>(
+            result: Result<T, create::FailureContext>,
+            hold: &mut Option<create::FailureContext>,
+        ) -> Result<T, &'static str> {
+            result.map_err(|failure| {
+                hold.get_or_insert(failure);
+                failure.message()
+            })
+        }
+        /// Service transport even while an earlier batch waits on SDK/native
+        /// work. Keep complete batches in order on this original owner only.
+        fn pump_observer(
+            &mut self,
+            connection: &mut ConfiguredRootConnection,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            root: ConfiguredRootIdentity,
+        ) -> Result<bool, &'static str> {
+            // One attach OR dequeue from the same original transport owner.
+            // Complete batches stay separate; held instances are never replaced.
+            if !self.attached {
+                return self.arm_observer(connection, backend, root).map(|()| false);
+            }
+            let value = connection
+                .poll_namespace_observer(Duration::ZERO)
+                .map_err(|_| OBSERVER_UNAVAILABLE)?;
+            if value.root_identity() != root
+                || value.provider_scope() != backend.scope()
+                || value.instance() == 0
+                || self.instance.is_some_and(|id| id != value.instance())
+                || !self.current(backend, root)
+            {
+                return Err(CONTEXT_CHANGED);
+            }
+            self.attached = true;
+            self.instance = Some(value.instance());
+            match value.poll() {
+                ObserverPoll::Idle | ObserverPoll::Pending => Ok(false),
+                ObserverPoll::Stopped => Err(OBSERVER_STOPPED),
+                ObserverPoll::Batch(NotificationBatch::RescanRequired(reason)) => {
+                    Err(observer_hold(*reason))
+                }
+                ObserverPoll::Batch(batch @ NotificationBatch::Hints(hints)) => {
+                    // Inspect the complete batch before queueing, including a
+                    // malformed/ambiguous suffix. Never fuse batches or infer a
+                    // missing rename endpoint from a later completion.
+                    let pairs = match pair_move_hints(batch) {
+                        RenameHintBatch::Pairs(pairs) => pairs,
+                        RenameHintBatch::RescanRequired(reason) => {
+                            return Err(pairing_hold(reason));
+                        }
+                    };
+                    if pairs.len() > MAX_PAIRS {
+                        return Err(RENAME_LIMIT);
+                    }
+                    let queued_hints = self
+                        .queued_hints
+                        .checked_add(hints.len())
+                        .ok_or(BACKLOG_LIMIT)?;
+                    let weight = queued_batch_weight(hints).ok_or(BACKLOG_LIMIT)?;
+                    let queued_weight = self
+                        .queued_weight
+                        .checked_add(weight)
+                        .ok_or(BACKLOG_LIMIT)?;
+                    if self.waiting_batches.len() >= MAX_WAITING_BATCHES
+                        || queued_hints > MAX_QUEUED_HINTS
+                        || queued_weight > MAX_QUEUED_WEIGHT
+                    {
+                        return Err(BACKLOG_LIMIT);
+                    }
+                    self.waiting_batches.push_back((batch.clone(), weight));
+                    self.queued_hints = queued_hints;
+                    self.queued_weight = queued_weight;
+                    Ok(true)
+                }
+            }
         }
         fn tick_inner(
             &mut self,
@@ -519,153 +809,234 @@ mod connected {
             backend: &Arc<OpenCloudPlaceholderBackend>,
             root: ConfiguredRootIdentity,
             save_or_command_active: bool,
-            workers: Option<&mut create::Workers>,
+            mut workers: Option<&mut create::Workers>,
         ) -> Result<(), &'static str> {
+            self.last_wait = "advancing";
             if !self.current(backend, root) {
                 return Err(HOLD);
             }
+            // Bound owner-side intake work without limiting transport to one
+            // completed batch per idle tick. No candidate/HTTP work runs here.
+            // This snapshot controls intake only. The original post-intake
+            // gates below must still admit advancement using current state.
+            let can_service_create_result = !save_or_command_active
+                && !self.mkdir.as_ref().is_some_and(mkdir::Producer::is_paused)
+                && !connection.namespace_file_operation_pending();
+            for _ in 0..64 {
+                if !self.pump_observer(connection, backend, root)? {
+                    break;
+                }
+                // Validate at least one complete original observer batch, then
+                // let an already-returned SDK result reach its original owner
+                // before more guarded intake. Collection neither consumes a
+                // reply nor releases capacity; all later barriers, currentness
+                // and original deadline checks still apply.
+                if can_service_create_result
+                    && workers
+                        .as_deref_mut()
+                        .is_some_and(create::Workers::has_ready)
+                {
+                    break;
+                }
+            }
             if connection.namespace_file_operation_pending() {
+                self.last_wait = "native_file_operation_pending";
                 return Ok(());
             }
             if save_or_command_active || self.mkdir.as_ref().is_some_and(mkdir::Producer::is_paused)
             {
+                self.last_wait = "save_or_command_paused";
                 return Ok(());
             }
+            if let (Some(create), Some(workers)) = (&mut self.create, workers.as_deref_mut()) {
+                create.begin_round(workers);
+            }
+            if !self.pending_files.is_empty() {
+                // Gather only contiguous, same-parent ordinary file hints. This
+                // classification controls scheduling; each native create still
+                // independently proves its root, parent, encryption and custody.
+                let extend = !self.file_wave_started
+                    && self.pending_files.len() < super::super::windows_create_executor::WORKERS
+                    && self.cursor.front().is_some_and(|work| {
+                        let Work::Directory(index) = work else {
+                            return false;
+                        };
+                        let Some(NotificationBatch::Hints(hints)) = self.batch.as_ref() else {
+                            return false;
+                        };
+                        let Some(hint) = hints.get(index) else {
+                            return false;
+                        };
+                        let components = hint.components();
+                        if !self
+                            .create
+                            .as_ref()
+                            .is_some_and(|create| create.can_join(components))
+                        {
+                            return false;
+                        }
+                        let refs = components.iter().map(String::as_str).collect::<Vec<_>>();
+                        connection
+                            .observe_namespace_entry(&refs)
+                            .is_ok_and(|entry| entry.kind == NamespaceEntryKind::PlainFile)
+                    });
+                if !extend {
+                    self.file_wave_started = true;
+                    let create = self.create.as_mut().ok_or(HOLD)?;
+                    let workers = workers.as_deref_mut().ok_or(HOLD)?;
+                    let pending = std::mem::take(&mut self.pending_files);
+                    for (components, generation) in pending {
+                        if !Self::create_result(
+                            create.step(
+                                connection,
+                                backend,
+                                root,
+                                &components,
+                                generation,
+                                CreateKind::File,
+                                workers,
+                            ),
+                            &mut self.hold_reason,
+                        )? {
+                            self.pending_files.push((components, generation));
+                        }
+                    }
+                    // A directory, rename, parent change, or next batch cannot
+                    // overtake unfinished original captures from this wave.
+                    if !self.pending_files.is_empty() {
+                        self.last_wait = "file_wave_pending";
+                        return Ok(());
+                    }
+                    self.file_wave_started = false;
+                }
+            }
+            if !self.cursor.pending() && self.batch.is_some() {
+                self.batch = None;
+            }
             if self.batch.is_none() {
-                // Exactly ONE attach OR poll; both methods preserve connection-
-                // owned kernel storage. Never reattach a held/stopped instance.
-                let value = if self.attached {
-                    connection.poll_namespace_observer(Duration::ZERO)
-                } else {
-                    connection.attach_namespace_observer()
+                let Some((batch, weight)) = self.waiting_batches.pop_front() else {
+                    self.last_wait = "no_batch";
+                    return Ok(());
+                };
+                let NotificationBatch::Hints(hints) = &batch else {
+                    return Err(PLAN_STATE);
+                };
+                self.queued_hints = self
+                    .queued_hints
+                    .checked_sub(hints.len())
+                    .ok_or(PLAN_STATE)?;
+                self.queued_weight = self.queued_weight.checked_sub(weight).ok_or(PLAN_STATE)?;
+                // Retain original whole-batch validation at consumption. Queue
+                // membership remains only observation metadata, never authority.
+                let pairs = match pair_move_hints(&batch) {
+                    RenameHintBatch::Pairs(pairs) => pairs,
+                    RenameHintBatch::RescanRequired(reason) => return Err(pairing_hold(reason)),
+                };
+                if pairs.len() > MAX_PAIRS {
+                    return Err(RENAME_LIMIT);
                 }
-                .map_err(|_| HOLD)?;
-                if value.root_identity() != root
-                    || value.provider_scope() != backend.scope()
-                    || value.instance() == 0
-                    || self.instance.is_some_and(|id| id != value.instance())
-                    || !self.current(backend, root)
-                {
-                    return Err(HOLD);
-                }
-                self.attached = true;
-                self.instance = Some(value.instance());
-                match value.poll() {
-                    ObserverPoll::Idle | ObserverPoll::Pending => return Ok(()),
-                    ObserverPoll::Stopped => return Err(HOLD),
-                    ObserverPoll::Batch(batch) => {
-                        let RenameHintBatch::Pairs(pairs) = pair_move_hints(batch) else {
-                            return Err(HOLD);
-                        };
-                        if pairs.len() > MAX_PAIRS {
-                            return Err(HOLD);
-                        }
-                        let NotificationBatch::Hints(hints) = batch else {
-                            return Err(HOLD);
-                        };
-                        let inputs = hints
+                let inputs = hints
+                    .iter()
+                    .map(|hint| Hint {
+                        action: match hint.action() {
+                            DirectoryAction::Added => Action::Added,
+                            DirectoryAction::Modified => Action::Modified,
+                            DirectoryAction::Removed => Action::Removed,
+                            DirectoryAction::RenamedOldName => Action::Old,
+                            DirectoryAction::RenamedNewName => Action::New,
+                        },
+                        components: hint.components(),
+                    })
+                    .collect::<Vec<_>>();
+                let mut accounted = inputs
+                    .iter()
+                    .map(|hint| {
+                        let refs = hint
+                            .components
                             .iter()
-                            .map(|hint| Hint {
-                                action: match hint.action() {
-                                    DirectoryAction::Added => Action::Added,
-                                    DirectoryAction::Modified => Action::Modified,
-                                    DirectoryAction::Removed => Action::Removed,
-                                    DirectoryAction::RenamedOldName => Action::Old,
-                                    DirectoryAction::RenamedNewName => Action::New,
-                                },
-                                components: hint.components(),
-                            })
+                            .map(String::as_str)
                             .collect::<Vec<_>>();
-                        let mut accounted = inputs
+                        connection
+                            .completed_file_replacement(&refs)
+                            .map_err(|_| OWNER_HOLD)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                // A published replacement may arrive as temp->target.
+                // Suppress both pair endpoints only when the actual new
+                // target still matches that ORIGINAL completed receipt.
+                let mut retired_sources = Vec::new();
+                for i in 0..inputs.len().saturating_sub(1) {
+                    if inputs[i].action == Action::Old
+                        && inputs[i + 1].action == Action::New
+                        && accounted[i + 1]
+                        && inputs[i].components.len() == inputs[i + 1].components.len()
+                        && inputs[i].components[..inputs[i].components.len() - 1]
+                            == inputs[i + 1].components[..inputs[i + 1].components.len() - 1]
+                    {
+                        let old = inputs[i]
+                            .components
                             .iter()
-                            .map(|hint| {
-                                let refs = hint
-                                    .components
-                                    .iter()
-                                    .map(String::as_str)
-                                    .collect::<Vec<_>>();
-                                connection
-                                    .completed_file_replacement(&refs)
-                                    .map_err(|_| HOLD)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        // A published replacement may arrive as temp->target.
-                        // Suppress both pair endpoints only when the actual new
-                        // target still matches that ORIGINAL completed receipt.
-                        let mut retired_sources = Vec::new();
-                        for i in 0..inputs.len().saturating_sub(1) {
-                            if inputs[i].action == Action::Old
-                                && inputs[i + 1].action == Action::New
-                                && accounted[i + 1]
-                                && inputs[i].components.len() == inputs[i + 1].components.len()
-                                && inputs[i].components[..inputs[i].components.len() - 1]
-                                    == inputs[i + 1].components
-                                        [..inputs[i + 1].components.len() - 1]
-                            {
-                                let old = inputs[i]
-                                    .components
-                                    .iter()
-                                    .map(String::as_str)
-                                    .collect::<Vec<_>>();
-                                let new = inputs[i + 1]
-                                    .components
-                                    .iter()
-                                    .map(String::as_str)
-                                    .collect::<Vec<_>>();
-                                if !connection
-                                    .completed_replacement_source_absent(&old, &new)
-                                    .map_err(|_| HOLD)?
-                                {
-                                    return Err(HOLD);
-                                }
-                                accounted[i] = true;
-                                retired_sources.push(inputs[i].components);
-                            }
+                            .map(String::as_str)
+                            .collect::<Vec<_>>();
+                        let new = inputs[i + 1]
+                            .components
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>();
+                        if !connection
+                            .completed_replacement_source_absent(&old, &new)
+                            .map_err(|_| OWNER_HOLD)?
+                        {
+                            return Err(OWNER_HOLD);
                         }
-                        for (i, hint) in inputs.iter().enumerate() {
-                            if retired_sources.iter().any(|old| *old == hint.components) {
-                                accounted[i] = true;
-                            }
-                        }
-                        let work = route_accounted(
-                            &inputs,
-                            self.mkdir.is_some()
-                                || self
-                                    .create
-                                    .as_ref()
-                                    .is_some_and(create::Producer::allows_directory),
-                            self.create.is_some(),
-                            &accounted,
-                        )
-                        .map_err(|_| HOLD)?;
-                        if work.is_empty() {
-                            return Ok(());
-                        }
-                        self.cursor.admit(work).map_err(|_| HOLD)?;
-                        // Only untrusted notification data is cloned, not any
-                        // admission, publication receipt, store or native lease.
-                        self.batch = Some(batch.clone());
+                        accounted[i] = true;
+                        retired_sources.push(inputs[i].components);
                     }
                 }
+                for (i, hint) in inputs.iter().enumerate() {
+                    if retired_sources.iter().any(|old| *old == hint.components) {
+                        accounted[i] = true;
+                    }
+                }
+                let work = route_accounted(
+                    &inputs,
+                    self.mkdir.is_some()
+                        || self
+                            .create
+                            .as_ref()
+                            .is_some_and(create::Producer::allows_directory),
+                    self.create.is_some(),
+                    &accounted,
+                )
+                .map_err(plan_hold)?;
+                if work.is_empty() {
+                    self.last_wait = "batch_has_no_work";
+                    return Ok(());
+                }
+                self.cursor.admit(work).map_err(plan_hold)?;
+                // Only untrusted notification data is cloned, not any
+                // admission, publication receipt, store or native lease.
+                self.batch = Some(batch.clone());
             }
             if !self.current(backend, root) {
                 return Err(HOLD);
             }
             let work = self.cursor.front().ok_or(HOLD)?;
-            let generation = self.cursor.generation().map_err(|_| HOLD)?;
+            let generation = self.cursor.generation().map_err(plan_hold)?;
             match work {
                 Work::Rename(index) => {
-                    let RenameHintBatch::Pairs(pairs) =
-                        pair_move_hints(self.batch.as_ref().ok_or(HOLD)?)
-                    else {
-                        return Err(HOLD);
+                    let pairs = match pair_move_hints(self.batch.as_ref().ok_or(HOLD)?) {
+                        RenameHintBatch::Pairs(pairs) => pairs,
+                        RenameHintBatch::RescanRequired(reason) => {
+                            return Err(pairing_hold(reason));
+                        }
                     };
                     let pair = pairs.get(index).cloned().ok_or(HOLD)?;
                     let components = pair.new_components().to_vec();
                     let refs = components.iter().map(String::as_str).collect::<Vec<_>>();
                     let plain = connection
                         .observe_namespace_entry(&refs)
-                        .map_err(|_| HOLD)?
+                        .map_err(|_| OWNER_HOLD)?
                         .kind
                         == NamespaceEntryKind::PlainFile;
                     if plain
@@ -677,23 +1048,26 @@ mod connected {
                         // A plain destination has no original cloud MOVE
                         // admission. Reuse fresh create-only/If-None-Match;
                         // neither hint nor this path deletes the source.
-                        if self.create.as_mut().ok_or(HOLD)?.step(
-                            connection,
-                            backend,
-                            root,
-                            &components,
-                            generation,
-                            CreateKind::File,
-                            workers.ok_or(HOLD)?,
+                        if Self::create_result(
+                            self.create.as_mut().ok_or(HOLD)?.step(
+                                connection,
+                                backend,
+                                root,
+                                &components,
+                                generation,
+                                CreateKind::File,
+                                workers.ok_or(HOLD)?,
+                            ),
+                            &mut self.hold_reason,
                         )? {
-                            self.cursor.complete().map_err(|_| HOLD)?;
+                            self.cursor.complete().map_err(plan_hold)?;
                         }
                     } else {
                         self.rename
                             .as_mut()
                             .ok_or(HOLD)?
                             .dispatch_pair(connection, backend, root, pair, generation)?;
-                        self.cursor.complete().map_err(|_| HOLD)?;
+                        self.cursor.complete().map_err(plan_hold)?;
                     }
                 }
                 Work::Directory(index) => {
@@ -707,7 +1081,11 @@ mod connected {
                     if !directory_ready && self.create.is_none() {
                         return Err(HOLD);
                     }
-                    if self.create.as_ref().is_some_and(create::Producer::active) {
+                    if self
+                        .create
+                        .as_ref()
+                        .is_some_and(|create| create.active_kind_for(generation).is_some())
+                    {
                         let NotificationBatch::Hints(hints) = self.batch.as_ref().ok_or(HOLD)?
                         else {
                             return Err(HOLD);
@@ -719,18 +1097,28 @@ mod connected {
                         let kind = self
                             .create
                             .as_ref()
-                            .and_then(create::Producer::active_kind)
+                            .and_then(|create| create.active_kind_for(generation))
                             .ok_or(HOLD)?;
-                        if self.create.as_mut().ok_or(HOLD)?.step(
-                            connection,
-                            backend,
-                            root,
-                            components,
-                            generation,
-                            kind,
-                            workers.ok_or(HOLD)?,
+                        if Self::create_result(
+                            self.create.as_mut().ok_or(HOLD)?.step(
+                                connection,
+                                backend,
+                                root,
+                                components,
+                                generation,
+                                kind,
+                                workers.as_deref_mut().ok_or(HOLD)?,
+                            ),
+                            &mut self.hold_reason,
                         )? {
-                            self.cursor.complete().map_err(|_| HOLD)?;
+                            self.cursor.complete().map_err(plan_hold)?;
+                        } else if self
+                            .create
+                            .as_ref()
+                            .is_some_and(|create| create.pipeline_ready(generation))
+                        {
+                            self.pending_files.push((components.to_vec(), generation));
+                            self.cursor.complete().map_err(plan_hold)?;
                         }
                     } else if !self.cursor.directory_started {
                         let NotificationBatch::Hints(hints) = self.batch.as_ref().ok_or(HOLD)?
@@ -772,23 +1160,26 @@ mod connected {
                                     .is_some_and(create::Producer::allows_file),
                             )
                         };
-                        match selection.map_err(|_| HOLD)? {
+                        match selection.map_err(plan_hold)? {
                             Selection::OfferDirectory => {
                                 if self
                                     .create
                                     .as_ref()
                                     .is_some_and(create::Producer::allows_directory)
                                 {
-                                    if self.create.as_mut().ok_or(HOLD)?.step(
-                                        connection,
-                                        backend,
-                                        root,
-                                        &components,
-                                        generation,
-                                        CreateKind::Directory,
-                                        workers.ok_or(HOLD)?,
+                                    if Self::create_result(
+                                        self.create.as_mut().ok_or(HOLD)?.step(
+                                            connection,
+                                            backend,
+                                            root,
+                                            &components,
+                                            generation,
+                                            CreateKind::Directory,
+                                            workers.ok_or(HOLD)?,
+                                        ),
+                                        &mut self.hold_reason,
                                     )? {
-                                        self.cursor.complete().map_err(|_| HOLD)?;
+                                        self.cursor.complete().map_err(plan_hold)?;
                                     }
                                 } else {
                                     // Kind/FileID are hints only. The original consumer
@@ -812,7 +1203,7 @@ mod connected {
                                 // ownership, clean-content or upload claim is made.
                                 #[cfg(all(test, debug_assertions))]
                                 {
-                                    let observed = observed.map_err(|_| HOLD)?;
+                                    let observed = observed.map_err(|_| OWNER_HOLD)?;
                                     let index =
                                         if observed.kind == NamespaceEntryKind::CloudDirectory {
                                             0
@@ -827,21 +1218,27 @@ mod connected {
                                     self.fixture_counts[index] =
                                         self.fixture_counts[index].checked_add(1).ok_or(HOLD)?;
                                 }
-                                self.cursor.complete().map_err(|_| HOLD)?;
+                                self.cursor.complete().map_err(plan_hold)?;
                             }
                             Selection::CreateFile => {
                                 let create = self.create.as_mut().ok_or(HOLD)?;
-                                let workers = workers.ok_or(HOLD)?;
-                                if create.step(
-                                    connection,
-                                    backend,
-                                    root,
-                                    &components,
-                                    generation,
-                                    CreateKind::File,
-                                    workers,
+                                let workers = workers.as_deref_mut().ok_or(HOLD)?;
+                                if Self::create_result(
+                                    create.step(
+                                        connection,
+                                        backend,
+                                        root,
+                                        &components,
+                                        generation,
+                                        CreateKind::File,
+                                        workers,
+                                    ),
+                                    &mut self.hold_reason,
                                 )? {
-                                    self.cursor.complete().map_err(|_| HOLD)?;
+                                    self.cursor.complete().map_err(plan_hold)?;
+                                } else if create.pipeline_ready(generation) {
+                                    self.pending_files.push((components, generation));
+                                    self.cursor.complete().map_err(plan_hold)?;
                                 }
                             }
                         }
@@ -856,7 +1253,7 @@ mod connected {
                             .step_shared(connection, backend, root)
                         {
                             mkdir::SharedStep::Completed => {
-                                self.cursor.complete().map_err(|_| HOLD)?
+                                self.cursor.complete().map_err(plan_hold)?
                             }
                             mkdir::SharedStep::Waiting | mkdir::SharedStep::DeferredPristine => (),
                             mkdir::SharedStep::Held => return Err(HOLD),
@@ -867,9 +1264,10 @@ mod connected {
             if !self.current(backend, root) {
                 return Err(HOLD);
             }
-            if !self.cursor.pending() {
+            if !self.cursor.pending() && self.pending_files.is_empty() {
                 self.batch = None;
             }
+            self.last_wait = "awaiting_progress";
             Ok(())
         }
     }

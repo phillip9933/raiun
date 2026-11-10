@@ -11,9 +11,49 @@ const MAX_STREAMED_RECOVERY_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 struct SelectedStreamedRecord {
     store: Arc<SnapshotStore>,
     key: StreamedRecordKey,
+    new_create: bool,
 }
 
 impl DurablePreparedEditRecovery {
+    /// Select immutable v2 evidence without dispatch admission, locks that
+    /// create state, attempt events, or any native completion capability.
+    pub(super) fn try_check_recovered_streamed(
+        &self,
+        record_id: &str,
+        generation: u64,
+        remote: &dyn RecoveryRemote,
+    ) -> Result<Option<super::SavedEditCloudCheck>, crate::JournalError> {
+        let Some(context) = &self.streamed else {
+            return Ok(None);
+        };
+        let job = remote.begin_recovery_job(context.transfer_policy);
+        job.check().map_err(|_| crate::JournalError::InvalidState)?;
+        let Some(selected) = self.select_recovered_streamed(record_id, generation)? else {
+            return Ok(None);
+        };
+        // An ID that resolves in both protected formats is not selectable.
+        if self
+            .catalog
+            .find_journal_for_record(&self.scope, self.root_identity, record_id, generation)?
+            .is_some()
+        {
+            return Err(crate::JournalError::ScopeMismatch);
+        }
+        let result = if selected.new_create {
+            super::saved_edit_check::check_created(&selected.store, &selected.key, remote, &job)?
+        } else {
+            super::saved_edit_check::check_streamed(
+                &selected.store,
+                &selected.key,
+                self.scope.token_generation(),
+                remote,
+                &job,
+            )?
+        };
+        job.check().map_err(|_| crate::JournalError::InvalidState)?;
+        Ok(Some(result))
+    }
+
     /// Return None ONLY when no selected v2 record has this ID. Corruption,
     /// exhausted discovery, wrong generation and format collisions are errors,
     /// never permission to fall through to another format or account.
@@ -144,6 +184,7 @@ impl DurablePreparedEditRecovery {
                 found = Some(SelectedStreamedRecord {
                     store: Arc::clone(&store),
                     key: record.key,
+                    new_create: record.manifest.binding().remote.is_none(),
                 });
             }
         }

@@ -307,7 +307,7 @@ impl WindowsAgent {
                     now.server != session.server
                         || now.client_id != session.client_id
                         || now.expected_issuer != session.expected_issuer
-                        || now.access_token != session.access_token
+                        || !Self::same_session_authority(Some(now), Some(&session))
                         || now.expires_at != session.expires_at
                 })
             {

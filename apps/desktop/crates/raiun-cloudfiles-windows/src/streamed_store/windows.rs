@@ -3,8 +3,11 @@ use super::*;
 use crate::recovery_state::RecoveryStateRoot;
 use raiun_control_windows::{
     OwnedPrivateReader, PinnedDirectory, PinnedFileIdentity, PrivateDirectory,
+    PrivateMetadataReadError,
 };
 use std::{ffi::OsStr, fs::File};
+
+const _: () = assert!(PrivateDirectory::MAX_METADATA_READ_BYTES >= META_LIMIT as u64);
 
 struct WindowsDirectory {
     directory: Arc<PrivateDirectory>,
@@ -65,6 +68,9 @@ pub(super) fn existing_root(
     })))
 }
 impl Directory for WindowsDirectory {
+    fn immutable_metadata_reads(&self) -> bool {
+        true
+    }
     fn verify(&self) -> Result<(), StoreError> {
         self._admitted_state.verify_path().map_err(io_error)?;
         self.directory.verify_path().map_err(io_error)
@@ -123,6 +129,37 @@ impl Directory for WindowsDirectory {
             .open_owned_immutable_file(OsStr::new(name))
             .map_err(io_error)?;
         Ok(Box::new(file))
+    }
+    fn read_metadata_checked(
+        &self,
+        name: &str,
+        metadata_limit: u64,
+        remaining: &mut u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        self._admitted_state.verify_path().map_err(io_error)?;
+        let result =
+            self.directory
+                .read_metadata_checked(OsStr::new(name), metadata_limit, remaining);
+        self._admitted_state.verify_path().map_err(io_error)?;
+        result.map_err(|error| match error {
+            PrivateMetadataReadError::InvalidLength => StoreError::CorruptEvidence,
+            PrivateMetadataReadError::Budget => StoreError::ScanLimit,
+            PrivateMetadataReadError::Io(error) => io_error(error),
+        })
+    }
+    fn metadata_sizes(&self, names: &[String]) -> Result<Vec<u64>, StoreError> {
+        self.verify()?;
+        let mut sizes = Vec::with_capacity(names.len());
+        for chunk in names.chunks(PrivateDirectory::MAX_METADATA_SIZE_BATCH) {
+            let names: Vec<_> = chunk.iter().map(OsStr::new).collect();
+            sizes.extend(
+                self.directory
+                    .metadata_sizes_checked(&names)
+                    .map_err(io_error)?,
+            );
+        }
+        self.verify()?;
+        Ok(sizes)
     }
     fn open_quota_lock(&self) -> Result<Box<dyn PinnedRead>, StoreError> {
         self.verify()?;

@@ -56,16 +56,16 @@
       "sha256": "b5c80bb30797d3a2eeb0dbd85ce481bacfa1b9401c6e74c5fbb4134de26dd690"
     },
     {
-      "bytes": 61545,
+      "bytes": 61886,
       "path": "legal/windows-gnullvm/THIRD-PARTY-NOTICES.md",
-      "sha256": "fdffcf3db705175c70dedd80ed3330389a65f04bd90b4e4bcf9d635fa8924682"
+      "sha256": "bcd72c33789c3dd806cb141a8688ea673bae011c42a638314a0a181b7ca72d9a"
     }
   ],
   "gaps": [],
   "lock_sha256": {
-    "Cargo.lock": "ab2d96cf08c100183cbb474a8d64e61d3ff7af5ff9ea36f33061c0959139d5e0",
+    "Cargo.lock": "feb0ebf58e7fc376a573a76c537d1a063e8080b16961077413168e62fd33f53a",
     "desktop-shell/package-lock.json": "d0965d09c758ed7e5f3d1dcc1b1d869d5113f836fdf30c0915ddc850d3387932",
-    "desktop-shell/src-tauri/Cargo.lock": "601b59218b2517a01a22c3826364d84122ab3b161a1e7e4c011bd814776d3875",
+    "desktop-shell/src-tauri/Cargo.lock": "515e726034b491d4b4f98ee2aa13fb193b4bd733bd1a5e09294c07d1141774ef",
     "package-lock.json": "fc694dd4b238d9f55909d1a8229f1cfb8f063f042f2bb0256c20c73495dad64d"
   },
   "production_ui_packages": [
@@ -2026,6 +2026,7 @@
       "description": "Traits for key comparison in maps.",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "equivalent",
@@ -2657,6 +2658,25 @@
       "version": "0.3.4"
     },
     {
+      "declared_license": "MIT",
+      "description": "An HTTP/2 client and server",
+      "ecosystem": "cargo",
+      "graphs": [
+        "Cargo.toml"
+      ],
+      "name": "h2",
+      "notice_files": [
+        {
+          "bytes": 1054,
+          "path": "legal/windows-gnullvm/rust/h2-0.4.20/LICENSE",
+          "sha256": "b21623012e6c453d944b0342c515b631cfcbf30704c2621b291526b69c10724d"
+        }
+      ],
+      "repository": "https://github.com/hyperium/h2",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.4.20"
+    },
+    {
       "declared_license": "MIT OR Apache-2.0",
       "description": "A Rust port of Google's SwissTable hash map",
       "ecosystem": "cargo",
@@ -2709,6 +2729,7 @@
       "description": "A Rust port of Google's SwissTable hash map",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "hashbrown",
@@ -3415,6 +3436,7 @@
       "description": "A hash table with consistent order and fast iteration.",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "indexmap",
@@ -5260,6 +5282,44 @@
       "version": "0.17.14"
     },
     {
+      "declared_license": "Apache-2.0",
+      "description": "Read passwords in console applications (unix, windows, macos, wasm).",
+      "ecosystem": "cargo",
+      "graphs": [
+        "Cargo.toml"
+      ],
+      "name": "rpassword",
+      "notice_files": [
+        {
+          "bytes": 10173,
+          "path": "legal/windows-gnullvm/rust/rpassword-7.5.4/LICENSE-APACHE",
+          "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+        }
+      ],
+      "repository": "https://github.com/conradkleinespel/rpassword",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "7.5.4"
+    },
+    {
+      "declared_license": "Apache-2.0",
+      "description": "Utility functions for other crates, no backwards compatibility guarantees.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "Cargo.toml"
+      ],
+      "name": "rtoolbox",
+      "notice_files": [
+        {
+          "bytes": 10173,
+          "path": "legal/windows-gnullvm/rust/rtoolbox-0.0.6/LICENSE-APACHE",
+          "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+        }
+      ],
+      "repository": "https://github.com/conradkleinespel/rtoolbox",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.0.6"
+    },
+    {
       "declared_license": "MIT",
       "description": "Ergonomic wrapper for SQLite",
       "ecosystem": "cargo",
@@ -6776,10 +6836,16 @@
           "bytes": 1112,
           "path": "legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE_MIT",
           "sha256": "b7f455413bfe5f9d7da501a4468d4c5f866a432c325947e98cc9535e8b26cd6d"
+        },
+        {
+          "bytes": 1200,
+          "path": "legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/RAIUN-VENDOR.md",
+          "sha256": "465beae049c25a05bd666a9a77e112d7180437143906684ce675508d32f0b471"
         }
       ],
       "repository": "https://github.com/tauri-apps/plugins-workspace",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source": "vendored:tauri-plugin-single-instance-2.4.5",
+      "vendored_path": "desktop-shell/src-tauri/vendor/tauri-plugin-single-instance-2.4.5",
       "version": "2.4.5"
     },
     {
@@ -8129,6 +8195,7 @@
       "description": "Rust for Windows",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows",
@@ -8177,6 +8244,7 @@
       "description": "Windows collection types",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-collections",
@@ -8225,6 +8293,7 @@
       "description": "Core type support for COM and Windows",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-core",
@@ -8273,6 +8342,7 @@
       "description": "Windows async types",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-future",
@@ -8321,6 +8391,7 @@
       "description": "The implement macro for the Windows crates",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-implement",
@@ -8345,6 +8416,7 @@
       "description": "The interface macro for the Windows crates",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-interface",
@@ -8369,6 +8441,7 @@
       "description": "Linking for Windows",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-link",
@@ -8418,6 +8491,7 @@
       "description": "Windows numeric types",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-numerics",
@@ -8490,6 +8564,7 @@
       "description": "Windows error handling",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-result",
@@ -8538,6 +8613,7 @@
       "description": "Windows string types",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-strings",
@@ -8586,7 +8662,8 @@
       "description": "Rust for Windows",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-sys",
       "notice_files": [
@@ -8732,6 +8809,7 @@
       "description": "Windows threading",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "windows-threading",

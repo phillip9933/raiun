@@ -57,7 +57,8 @@ fn check_context(
     if trusted.profile_id() != scope.account_id()
         || trusted.server_origin() != scope.server_origin()
         || client.server_origin().as_deref() != Some(trusted.server_origin())
-        || client.token_generation() != trusted.token_generation()
+        || !client.provider_generation_is_current(trusted.token_generation())
+        || !client.provider_credentials_match(trusted.account_id(), None, None)
     {
         return Err(refused());
     }
@@ -1542,7 +1543,7 @@ impl WindowsVaultReadBinding {
         let _route = self.publication_gate.read().map_err(|_| refused())?;
         self.check_current()?;
         self.client
-            .with_token_generation(self.trusted.token_generation(), || {
+            .with_provider_generation(self.trusted.token_generation(), || {
                 self.sessions
                     .with_session_epoch(&self.scope, &self.epoch, || {
                         if self.revoked.load(Ordering::Acquire) {
@@ -1597,7 +1598,7 @@ impl WindowsVaultReadBinding {
         let _route = self.publication_gate.write().map_err(|_| unavailable())?;
         self.check_current().map_err(|_| unavailable())?;
         self.client
-            .with_token_generation(self.trusted.token_generation(), || {
+            .with_provider_generation(self.trusted.token_generation(), || {
                 self.sessions
                     .with_session_epoch(&self.scope, &self.epoch, || {
                         if self.revoked.load(Ordering::Acquire) {
@@ -1651,7 +1652,7 @@ impl WindowsVaultReadBinding {
         }
         let token = self
             .client
-            .try_lock_token_generation(self.trusted.token_generation())
+            .try_lock_provider_generation(self.trusted.token_generation())
             .map_err(|_| BackendError::Unavailable)?
             .ok_or(BackendError::Unavailable)?;
         let session = self

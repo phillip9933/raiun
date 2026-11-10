@@ -59,6 +59,7 @@ fn parse(xml: &str, request: &str, logical: &str) -> Result<Vec<RemoteEntry>, Cl
 #[derive(Debug)]
 struct Seen {
     line: String,
+    depth: Option<String>,
     if_match: Option<String>,
     if_none_match: Option<String>,
     body: Vec<u8>,
@@ -166,6 +167,7 @@ fn read_request(socket: &mut TcpStream) -> Seen {
     socket.read_exact(&mut body).unwrap();
     Seen {
         line: text.lines().next().unwrap().to_owned(),
+        depth: value("Depth"),
         if_match: value("If-Match"),
         if_none_match: value("If-None-Match"),
         body,
@@ -256,22 +258,129 @@ fn stat_keeps_courses_ampersand_folder_scope() {
 
 #[test]
 fn mkdir_followup_preserves_escaped_ampersand_href() {
-    let fixture = Fixture::new(vec![
-        graph(),
-        prop(root()),
-        ("404 Not Found", String::new()),
-        prop(root()),
-        ("201 Created", String::new()),
-        graph(),
-        prop(root()),
-        prop(folder()),
-    ]);
-    let result = fixture.client().mkdir("drive-1", FOLDER);
-    let seen = fixture.finish();
-    assert_eq!(result.unwrap().path, FOLDER);
-    assert_eq!(seen.len(), 8);
-    assert_eq!(seen[4].line, format!("MKCOL {FOLDER_WIRE} HTTP/1.1"));
-    assert_eq!(seen[7].line, format!("PROPFIND {FOLDER_WIRE} HTTP/1.1"));
+    for unknown_child in [
+        None,
+        Some(""), // Preserve the incomplete-multistatus fallback regression.
+        Some("<d:response/>"),
+        Some(
+            "<d:response><d:propstat><d:prop><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
+        ),
+    ] {
+        let fallback = unknown_child.is_some();
+        let target = "/Courses & CEUs/new-folder";
+        let wire = "/dav/personal/Courses%20&%20CEUs/new-folder";
+        let created = dav(
+            "/dav/personal/Courses%20&amp;%20CEUs/new-folder",
+            true,
+            Some("&quot;created-directory&quot;"),
+            0,
+        );
+        let mut responses = vec![
+            graph(),
+            prop(root()),
+            prop(folder()),
+            ("404 Not Found", String::new()),
+            ("201 Created", String::new()),
+            prop(root()),
+            prop(folder()),
+            prop(created.clone()),
+            prop(if let Some(child) = unknown_child {
+                if child.is_empty() {
+                    created.trim_end_matches("</d:multistatus>").to_owned()
+                } else {
+                    created.replace("</d:multistatus>", &format!("{child}</d:multistatus>"))
+                }
+            } else {
+                created.clone()
+            }),
+        ];
+        if fallback {
+            responses.push(prop(created));
+        }
+        responses.extend([prop(root()), prop(folder())]);
+        let fixture = Fixture::new(responses);
+        let preflights = Cell::new(0);
+        let result = fixture.client().mkdir_and_confirm_with_preflight_and_view(
+            "drive-1",
+            target,
+            &|space, root| {
+                assert_eq!(space.id, "drive-1");
+                assert_eq!(root.id, "stable-id");
+                preflights.set(preflights.get() + 1);
+                Ok(())
+            },
+        );
+        let seen = fixture.finish();
+        let (entry, observed_empty) = result.unwrap();
+        assert_eq!(entry.path, target);
+        assert!(entry.directory);
+        assert_eq!(observed_empty, !fallback);
+        assert_eq!(preflights.get(), 1);
+        assert_eq!(seen.len(), 11 + usize::from(fallback));
+        assert_eq!(seen[4].line, format!("MKCOL {wire} HTTP/1.1"));
+        assert!(seen[4].body.is_empty());
+        // Both post-MKCOL root/ancestry fences remain. Only the second
+        // exact target confirmation becomes a complete depth-one view.
+        assert_eq!(
+            seen.iter()
+                .filter(|request| request.line == format!("PROPFIND {FOLDER_WIRE} HTTP/1.1"))
+                .count(),
+            3
+        );
+        for index in [3, 7, 8] {
+            assert_eq!(seen[index].line, format!("PROPFIND {wire} HTTP/1.1"));
+        }
+        assert_eq!(seen[3].depth.as_deref(), Some("0"));
+        assert_eq!(seen[7].depth.as_deref(), Some("0"));
+        assert_eq!(seen[8].depth.as_deref(), Some("1"));
+        if fallback {
+            assert_eq!(seen[9].line, format!("PROPFIND {wire} HTTP/1.1"));
+            assert_eq!(seen[9].depth.as_deref(), Some("0"));
+        }
+        assert_eq!(
+            seen.iter()
+                .filter(|request| request.line.starts_with("MKCOL "))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn parent_proof_reuse_refuses_unsafe_parent_before_mutation() {
+    for (parent, expected) in [
+        (folder().replace("RDNVW", "R"), ErrorKind::Forbidden),
+        (
+            folder().replace("<d:collection/>", ""),
+            ErrorKind::Unsupported,
+        ),
+        (
+            folder().replace(
+                "</d:prop>",
+                "<d:getcontenttype>application/vnd.opencloud.vault</d:getcontenttype></d:prop>",
+            ),
+            ErrorKind::Unsupported,
+        ),
+        (
+            folder().replace("stable-id", "parent\tidentity"),
+            ErrorKind::InvalidResponse,
+        ),
+    ] {
+        let fixture = Fixture::new(vec![
+            graph(),
+            prop(root()),
+            prop(parent),
+            ("404 Not Found", String::new()),
+        ]);
+        let result = fixture
+            .client()
+            .mkdir_and_confirm("drive-1", "/Courses & CEUs/new-folder");
+        let seen = fixture.finish();
+        assert_eq!(result.unwrap_err().kind, expected);
+        assert!(seen.iter().all(
+            |request| request.line.starts_with("GET ") || request.line.starts_with("PROPFIND ")
+        ));
+    }
 }
 
 fn upload_responses(final_etag: Option<&str>) -> Vec<(&'static str, String)> {
@@ -389,7 +498,6 @@ fn directory_without_etag_can_list_and_create_but_does_not_invent_a_revision() {
         prop(unqualified_root()),
         prop(unqualified_folder()),
         ("404 Not Found", String::new()),
-        prop(unqualified_folder()),
         ("201 Created", String::new()),
         graph(),
         prop(unqualified_root()),
@@ -404,11 +512,11 @@ fn directory_without_etag_can_list_and_create_but_does_not_invent_a_revision() {
         .unwrap();
     let seen = fixture.finish();
     assert_eq!(entry.etag, "\"created-v1\"");
-    assert_eq!(seen.len(), 10);
-    assert_eq!(seen[5].line, format!("PUT {FILE_WIRE} HTTP/1.1"));
-    assert_eq!(seen[5].if_none_match.as_deref(), Some("*"));
-    assert!(seen[5].if_match.is_none());
-    assert_eq!(seen[5].body, CONTENT);
+    assert_eq!(seen.len(), 9);
+    assert_eq!(seen[4].line, format!("PUT {FILE_WIRE} HTTP/1.1"));
+    assert_eq!(seen[4].if_none_match.as_deref(), Some("*"));
+    assert!(seen[4].if_match.is_none());
+    assert_eq!(seen[4].body, CONTENT);
 }
 
 #[test]
@@ -498,4 +606,331 @@ fn directory_without_validator_refuses_delete_and_move_before_mutation_send() {
         );
     }
     assert!(fixture.finish().is_empty());
+}
+
+fn metadata_lookup_followup_listing(etag: Option<&str>) -> String {
+    let child = file(etag);
+    let child =
+        &child[child.find("<d:response>").unwrap()..child.find("</d:multistatus>").unwrap()];
+    folder().replace("</d:multistatus>", &format!("{child}</d:multistatus>"))
+}
+
+fn metadata_lookup_followup_missing(href: &str) -> String {
+    format!(
+        "<d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>{href}</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response></d:multistatus>"
+    )
+}
+
+#[test]
+fn metadata_lookup_followup_reobserves_whole_point_and_directory_proofs() {
+    for reason in [
+        "DAV response omitted an entity tag",
+        "DAV response omitted successful properties",
+    ] {
+        let error = invalid(reason);
+        assert!(incomplete_metadata(&error));
+        assert_eq!(
+            transfer_metadata_boundary(error, "Ordinary point metadata").message,
+            format!("Ordinary point metadata: {reason}")
+        );
+    }
+    assert!(!incomplete_metadata(&CloudError::new(
+        ErrorKind::Forbidden,
+        "DAV response omitted successful properties"
+    )));
+    assert!(!incomplete_metadata(&invalid(
+        "DAV response omitted an href"
+    )));
+    let fixture = Fixture::new(vec![
+        graph(),
+        prop(root()),
+        prop(folder()),
+        prop(file(None).replace("200 OK", "404 Not Found")),
+        graph(),
+        prop(root()),
+        prop(folder()),
+        prop(file(Some("&quot;ready&quot;"))),
+    ]);
+    let snapshot = fixture
+        .client()
+        .ordinary_stat_snapshot("drive-1", FILE)
+        .unwrap();
+    let seen = fixture.finish();
+    assert_eq!(snapshot.target.unwrap().etag, "\"ready\"");
+    assert_eq!(seen.len(), 8);
+    assert_eq!(seen[0].line, seen[4].line);
+    assert_eq!(seen[1].line, seen[5].line);
+    assert_eq!(seen[2].line, seen[6].line);
+    assert_eq!(seen[3].line, seen[7].line);
+    assert!(
+        seen.iter().all(
+            |request| request.line.starts_with("GET ") || request.line.starts_with("PROPFIND ")
+        )
+    );
+
+    let fixture = Fixture::new(vec![
+        graph(),
+        prop(root()),
+        prop(folder()),
+        prop(metadata_lookup_followup_listing(None)),
+        graph(),
+        prop(root()),
+        prop(folder()),
+        prop(metadata_lookup_followup_listing(Some("&quot;ready&quot;"))),
+    ]);
+    let snapshot = fixture
+        .client()
+        .directory_snapshot("drive-1", FOLDER, Some("stable-id"))
+        .unwrap();
+    let seen = fixture.finish();
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].etag, "\"ready\"");
+    assert_eq!(seen.len(), 8);
+    for index in 0..4 {
+        assert_eq!(seen[index].line, seen[index + 4].line);
+    }
+    assert!(
+        seen.iter().all(
+            |request| request.line.starts_with("GET ") || request.line.starts_with("PROPFIND ")
+        )
+    );
+}
+
+#[test]
+fn metadata_lookup_followup_persistent_incomplete_keeps_inner_error_and_bound() {
+    let mut responses = Vec::new();
+    for _ in 0..50 {
+        responses.extend([graph(), prop(root()), prop(folder()), prop(file(None))]);
+    }
+    let fixture = Fixture::new(responses);
+    let started = Instant::now();
+    let snapshot = fixture
+        .client()
+        .ordinary_stat_snapshot("drive-1", FILE)
+        .unwrap();
+    let elapsed = started.elapsed();
+    let seen = fixture.finish();
+    let error = snapshot.target.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidResponse);
+    assert_eq!(
+        error.message,
+        "Ordinary point metadata: DAV response omitted an entity tag"
+    );
+    assert_eq!(snapshot.root.path, "/");
+    assert!(elapsed >= Duration::from_secs(2));
+    assert!(elapsed < Duration::from_secs(5));
+    assert!(seen.len() >= 8 && seen.len() < 200);
+    assert_eq!(seen.len() % 4, 0);
+    assert!(
+        seen.iter().all(
+            |request| request.line.starts_with("GET ") || request.line.starts_with("PROPFIND ")
+        )
+    );
+}
+
+#[test]
+fn metadata_lookup_followup_exact_inner_404_is_scoped_not_found() {
+    let fixture = Fixture::new(vec![
+        graph(),
+        prop(root()),
+        prop(folder()),
+        prop(metadata_lookup_followup_missing(
+            "/dav/personal/Courses%20&amp;%20CEUs/notes.txt",
+        )),
+    ]);
+    let snapshot = fixture
+        .client()
+        .ordinary_stat_snapshot("drive-1", FILE)
+        .unwrap();
+    assert_eq!(snapshot.target.unwrap_err().kind, ErrorKind::NotFound);
+    assert_eq!(snapshot.root.path, "/");
+    assert_eq!(fixture.finish().len(), 4);
+}
+
+#[test]
+fn metadata_lookup_followup_404_requires_complete_single_exact_response() {
+    let good = metadata_lookup_followup_missing("/dav/personal/file");
+    let cases = [
+        good.replace("/dav/personal/file", "https://other.invalid/dav/personal/file"),
+        good.replace("/dav/personal/file", "/dav/personal/file/child"),
+        good.replace("/dav/personal/file", "/dav/personal/other"),
+        good.replace("</d:response>", "<d:status>HTTP/1.1 200 OK</d:status></d:response>"),
+        good.replace("</d:response>", "<d:href>/dav/personal/file</d:href></d:response>"),
+        good.replace("</d:response>", "<d:propstat><d:prop><d:getetag>\"present\"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"),
+        good.replace("</d:multistatus>", "<d:response><d:href>/dav/personal/file</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response></d:multistatus>"),
+        good.replace("</d:multistatus>", "<d:response/></d:multistatus>"),
+        good.replace("HTTP/1.1 404 Not Found", "garbage 404 Not Found"),
+        format!("{good}<malformed"),
+    ];
+    for xml in cases {
+        let error = parse_multistatus_with_depth(
+            xml.as_bytes(),
+            &Url::parse("https://cloud.invalid/dav/personal/file").unwrap(),
+            "/file",
+            true,
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidResponse);
+    }
+    // Failed properties alone and a missing validator are never absence.
+    for (xml, retryable) in [
+        (dav("/dav/personal/file", false, None, 3), true),
+        (
+            dav("/dav/personal/file", false, None, 3).replace("200 OK", "404 Not Found"),
+            true,
+        ),
+        (
+            dav("/dav/personal/file", false, None, 3).replace("200 OK", "403 Forbidden"),
+            true,
+        ),
+    ] {
+        let error = parse_multistatus_with_depth(
+            xml.as_bytes(),
+            &Url::parse("https://cloud.invalid/dav/personal/file").unwrap(),
+            "/file",
+            true,
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidResponse);
+        assert_eq!(incomplete_metadata(&error), retryable);
+    }
+}
+
+#[test]
+fn metadata_lookup_followup_depth_one_failure_never_returns_partial_snapshot() {
+    let failure =
+        metadata_lookup_followup_missing("/dav/personal/Courses%20&amp;%20CEUs/notes.txt");
+    let response =
+        &failure[failure.find("<d:response>").unwrap()..failure.find("</d:multistatus>").unwrap()];
+    let listing = folder().replace("</d:multistatus>", &format!("{response}</d:multistatus>"));
+    let fixture = Fixture::new(vec![graph(), prop(root()), prop(folder()), prop(listing)]);
+    let result = fixture
+        .client()
+        .directory_snapshot("drive-1", FOLDER, Some("stable-id"));
+    assert_eq!(result.err().unwrap().kind, ErrorKind::InvalidResponse);
+    assert_eq!(fixture.finish().len(), 4);
+    assert_eq!(
+        parse(
+            &metadata_lookup_followup_missing("/dav/personal/file"),
+            "https://cloud.invalid/dav/personal/file",
+            "/file"
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::InvalidResponse
+    );
+}
+
+#[test]
+fn metadata_lookup_followup_cancellation_and_generation_prevent_reobservation() {
+    let cancellation = OperationCancellation::new();
+    let mut reads = 0;
+    let result: Result<(), CloudError> = read_metadata_observation(
+        Some(&cancellation),
+        || {
+            reads += 1;
+            cancellation.cancel();
+            Err(invalid("DAV response omitted an entity tag"))
+        },
+        |result| {
+            Ok(result
+                .as_ref()
+                .is_err_and(|error| incomplete_metadata(error)))
+        },
+    );
+    assert_eq!(result.unwrap_err().kind, ErrorKind::Offline);
+    assert_eq!(reads, 1);
+
+    let fixture = Fixture::new(vec![]);
+    let client = fixture.client();
+    let context = RangeReadContext {
+        deadline: Instant::now() + Duration::from_secs(1),
+        token_generation: client.token_generation(),
+    };
+    client.token_generation.fetch_add(1, Ordering::AcqRel);
+    let _context = RangeContextGuard::enter(context);
+    let error = client
+        .ordinary_stat_snapshot("drive-1", FILE)
+        .err()
+        .unwrap();
+    assert_eq!(error.kind, ErrorKind::Unauthorized);
+    assert!(fixture.finish().is_empty());
+}
+
+#[test]
+fn empty_directory_delete_keeps_fresh_view_and_conditional_confirmation() {
+    for mode in ["empty", "nonempty", "malformed"] {
+        let directory = folder()
+            .replace("stable-id", "directory-id")
+            .replace("folder-v1", "after-child-delete");
+        let view = match mode {
+            "nonempty" => metadata_lookup_followup_listing(Some("&quot;child-v1&quot;"))
+                .replace("stable-id", "directory-id")
+                .replace("folder-v1", "after-child-delete"),
+            "malformed" => directory.replace("</d:multistatus>", "<d:response/></d:multistatus>"),
+            _ => directory.clone(),
+        };
+        let mut responses = vec![graph(), prop(root()), prop(directory), prop(view)];
+        if mode == "empty" {
+            responses.extend([
+                ("204 No Content", String::new()),
+                prop(root()),
+                ("404 Not Found", String::new()),
+            ]);
+        }
+        let fixture = Fixture::new(responses);
+        let preflights = Cell::new(0);
+        let result = fixture
+            .client()
+            .delete_empty_directory_and_confirm_with_preflight(
+                "drive-1",
+                FOLDER,
+                "directory-id",
+                &|space, root| {
+                    assert_eq!(space.id, "drive-1");
+                    assert_eq!(root.id, "stable-id");
+                    preflights.set(preflights.get() + 1);
+                    Ok(())
+                },
+            );
+        let seen = fixture.finish();
+        assert_eq!(seen[2].line, format!("PROPFIND {FOLDER_WIRE} HTTP/1.1"));
+        assert_eq!(seen[2].depth.as_deref(), Some("0"));
+        assert_eq!(seen[3].line, format!("PROPFIND {FOLDER_WIRE} HTTP/1.1"));
+        assert_eq!(seen[3].depth.as_deref(), Some("1"));
+        if mode == "empty" {
+            result.unwrap();
+            assert_eq!(seen.len(), 7);
+            assert_eq!(preflights.get(), 1);
+            assert_eq!(seen[4].line, format!("DELETE {FOLDER_WIRE} HTTP/1.1"));
+            assert_eq!(seen[4].if_match.as_deref(), Some("\"after-child-delete\""));
+            assert!(seen[4].if_none_match.is_none());
+            assert_eq!(seen[5].line, "PROPFIND /dav/personal/ HTTP/1.1");
+            assert_eq!(seen[6].line, format!("PROPFIND {FOLDER_WIRE} HTTP/1.1"));
+            assert_eq!(
+                seen.iter()
+                    .filter(|request| request.line.starts_with("DELETE "))
+                    .count(),
+                1
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.kind,
+                if mode == "nonempty" {
+                    ErrorKind::Conflict
+                } else {
+                    ErrorKind::InvalidResponse
+                }
+            );
+            assert_eq!(seen.len(), 4);
+            assert_eq!(preflights.get(), 0);
+            assert!(
+                seen.iter().all(|request| request.line.starts_with("GET ")
+                    || request.line.starts_with("PROPFIND "))
+            );
+        }
+    }
 }
