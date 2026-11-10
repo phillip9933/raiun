@@ -11,7 +11,6 @@ import { parseCacheLimit, cacheLimitDraft, formatStorageBytes, validateCacheLimi
 import { pickerUsesModal } from './guest-sharing';
 import { SharingController } from './sharing-controller';
 import { MediaJobsView } from './media-jobs';
-import { FolderJobsView } from './folder-jobs';
 import { folderCreationRoute, folderWorkspaceSpaceIds, type FolderDirection } from './folder-workspace';
 import { createPairSettingsDraft, discardPairSettingsDraft, normalizeFolderExclusion, pairSettingsUpdateRequest, persistedFolderPair, validateFolderExclusions, type FolderContentFilter, type FolderExclusion, type FolderExclusionKind, type PairSettingsDraft, type PersistedFolderPair } from './folder-settings';
 import { accountAvatarCacheKey, AccountAvatarCache, type AccountAvatarReply } from './account-avatar';
@@ -40,7 +39,7 @@ import { isVaultPasswordValidationError, shouldAnnounceVaultCloseBlocked, vaultD
 import raiunLogo from '../src-tauri/icons/raiun.svg';
 
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
-type Status = { connected: boolean; windows_drive_activity?: unknown; windows_recovery_retry_supported?: boolean; windows_recovery_cloud_check_supported?: boolean; offline?: boolean; offline_namespace?: boolean; refreshing?: boolean; agent_version?: string | null; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; saved_upload_check_supported?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_jobs_supported?: boolean; folder_sync_supported?: boolean; folder_settings_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_create_supported?: boolean; vault_copy_supported?: boolean; vault_move_supported?: boolean; vault_copy_verify_supported?: boolean; vault_access_mode?: 'native_read_only'; vault_in_app_browse_supported?: boolean; vault_offline_supported?: boolean; vault_offline_write_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
+type Status = { connected: boolean; windows_drive_activity?: unknown; windows_recovery_retry_supported?: boolean; windows_recovery_cloud_check_supported?: boolean; offline?: boolean; offline_namespace?: boolean; refreshing?: boolean; agent_version?: string | null; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; saved_upload_check_supported?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; folder_settings_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_create_supported?: boolean; vault_copy_supported?: boolean; vault_move_supported?: boolean; vault_copy_verify_supported?: boolean; vault_access_mode?: 'native_read_only'; vault_in_app_browse_supported?: boolean; vault_offline_supported?: boolean; vault_offline_write_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status; avatar_data_url?: string | null };
 type RemovedAccount = { id: string; label: string; local_data_preserved: true };
 type DesktopUpdateStatus = { state: 'idle' | 'current' | 'available' | 'unavailable' | 'downloaded' | 'dismissed' | 'error'; version: string | null; tag: string | null; release_url: string | null; notes: string | null; error: string | null; automatic_checks: boolean; channel: 'stable' | 'beta'; dismissed_tag: string | null; last_check_unix: number | null; key_configured: boolean; downloaded: boolean };
@@ -175,42 +174,6 @@ const mediaJobs = new MediaJobsView({
   busy: value => { state.mutationBusy = Math.max(0, state.mutationBusy + (value ? 1 : -1)); },
   render
 });
-const folderJobs = new FolderJobsView({
-  context: () => {
-    const status = state.status;
-    const generation = status?.auth_generation;
-    if (isWindowsAgentStatus(status) || status?.folder_jobs_supported !== true || state.accountSwitching ||
-        !state.selectedAccount || status.profile_id !== state.selectedAccount ||
-        !Number.isSafeInteger(generation) || generation == null || generation <= 0 || status.session_cleanup_uncertain === true) return null;
-    return { profileId: state.selectedAccount, accountEpoch: state.accountEpoch, authGeneration: generation,
-      connected: status.connected && !status.authenticating && !status.refreshing, reachable: state.agentReachable };
-  },
-  spaces: () => state.spaces,
-  spacesError: () => state.spacesError,
-  blocked: () => state.mutationBusy > 0 || state.nativeDialogBusy || state.accountSwitching,
-  active: () => state.page === 'transfers',
-  request,
-  chooseFolder: async () => {
-    if (state.nativeDialogBusy || state.accountSwitching) return null;
-    state.nativeDialogBusy = true;
-    render();
-    try {
-      const selected = await open({ directory: true, multiple: false, title: 'Choose a folder to upload' });
-      return typeof selected === 'string' ? selected : null;
-    } finally { state.nativeDialogBusy = false; render(); }
-  },
-  confirmDelete: async message => {
-    if (state.nativeDialogBusy || state.accountSwitching) return false;
-    state.nativeDialogBusy = true;
-    render();
-    try {
-      return await confirmDialog(message, { title: 'Delete cloud folder', kind: 'warning', okLabel: 'Delete folder', cancelLabel: 'Cancel' }) === true;
-    } finally { state.nativeDialogBusy = false; render(); }
-  },
-  busy: value => { state.mutationBusy = Math.max(0, state.mutationBusy + (value ? 1 : -1)); },
-  render
-});
-
 let refreshQueued = false;
 let passiveStatusRefreshQueued = false;
 let accountsSyncPromise: Promise<boolean> | null = null;
@@ -1429,7 +1392,6 @@ function transfersPage() {
     ${accountIssue ? `<div class="notice-card offline" role="alert"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>This account needs attention</b><p>${esc(accountIssue)}</p><p>Transfer history can be empty while this problem is still active.</p></div></div>` : ''}
     <div class="filter-tabs" role="group" aria-label="Provider activity filters">${filters.map(key => `<button class="filter-tab ${filter === key ? 'active' : ''}" data-filter="${key}" aria-pressed="${filter === key}">${transferTabSummary(key).label}${providerEnabled && state.agentReachable && state.status?.connected ? `<span class="tab-badge">${counts[key]}</span>` : ''}</button>`).join('')}</div>
     <p class="helper-note">${esc(summary.description)} ${esc(historyScope)} Counts reflect the agent’s 500 most recent records, not all past activity. Offline files and saved edits stay visible below.</p>
-    ${folderJobs.html()}
     ${windowsDriveActivityPanel()}
     ${isWindowsAgentStatus(state.status) ? windowsRecoverySettingsCard() : ''}
     ${!isWindowsAgentStatus(state.status) && state.agentReachable ? pendingOfflineWritesSection() : ''}
@@ -2711,7 +2673,6 @@ function desktopUpdateNotification() {
 }
 
 function leaveWorkspacePage(nextPage: Page) {
-  if (state.page === 'transfers' && nextPage !== 'transfers') folderJobs.leave();
   if (state.page === 'guest' && nextPage !== 'guest') {
     sharingWorkspace.leave();
     if (state.pickerPurpose === 'guest') { state.pickerGeneration++; state.pickerOpen = false; state.pickerPurpose = 'pair'; }
@@ -2738,8 +2699,6 @@ function navigateToPage(page: Page) {
   if (page === 'folders') void mediaJobs.refresh();
   if (page === 'settings') { void loadNetworkProxySettings(); void loadBandwidthSettings(); }
   if (page === 'transfers') {
-    void loadSpaces();
-    void folderJobs.refresh();
     if (isWindowsAgentStatus(state.status)) void loadWindowsRecoveryList();
     else void loadPendingOfflineWrites(true);
     if (vaultAppFeaturesAvailable()) void loadEncryptedEditRecoveries(true); if (vaultPendingFeaturesAvailable()) void refreshEncryptedRetryLatestStatuses();
@@ -3255,7 +3214,6 @@ function vaultDialog() {
 function bind() {
   const offlineControlScope = { epoch: state.accountEpoch, profileId: state.selectedAccount, spaceId: state.spaceId, generation: state.pickerGeneration, authGeneration: state.status?.auth_generation ?? null };
   mediaJobs.bind(app);
-  folderJobs.bind(app);
   app.querySelectorAll<HTMLElement>('[data-page]').forEach(el => el.addEventListener('click', () => navigateToPage(el.dataset.page as Page)));
   app.querySelector('#refresh')?.addEventListener('click', () => void refresh(true, true));
   app.querySelectorAll<HTMLButtonElement>('[data-account-id]').forEach(el => el.addEventListener('click', () => { if (el.dataset.accountId) void switchAccount(el.dataset.accountId); }));
@@ -4071,7 +4029,7 @@ async function cancelSignIn() {
   }
 }
 async function loadSpaces(force = false) {
-  if (!featureAvailable('folder_sync_supported') && !featureAvailable('media_jobs_supported') && !featureAvailable('vaults_supported') && state.status?.folder_jobs_supported !== true) return;
+  if (!featureAvailable('folder_sync_supported') && !featureAvailable('media_jobs_supported') && !featureAvailable('vaults_supported')) return;
   if (!state.status?.connected || state.spacesLoading) return;
   const epoch = state.accountEpoch;
   const serverKey = state.status.server?.trim() || '__connected__';
@@ -6214,7 +6172,6 @@ function activateAccount(profileId: string) {
   if (profileId === state.selectedAccount) return false;
   if (copyProducerUi.source) resetCopyProducerFlow();
   mediaJobs.reset();
-  folderJobs.reset();
   pairExclusionsUi.open.clear();
   pairExclusionsUi.edits.clear();
   pairExclusionsUi.drafts.clear();
@@ -6858,7 +6815,6 @@ async function refresh(showError = true, forceSpacesRefresh = false) {
     if (state.page === 'settings') void loadNetworkProxySettings();
     if (state.page === 'settings') void loadBandwidthSettings();
     if (state.page === 'folders') void mediaJobs.refresh();
-    if (state.page === 'transfers') void folderJobs.refresh();
     if (state.page === 'transfers' && state.status?.connected) scheduleEncryptedRetryLatestPoll(250);
     if (refreshQueued) { refreshQueued = false; void refresh(false); }
   }

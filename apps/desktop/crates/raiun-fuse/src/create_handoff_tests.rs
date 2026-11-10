@@ -297,13 +297,6 @@ fn create_handoff_mount_owner_stop_cancels_joins_without_unmount_and_closes_admi
     fs.finalize_create_handle(&handle).unwrap();
     barrier.wait_entered(1);
     let mut mount = MountHandle {
-        folder_jobs: FolderJobNamespace {
-            state: fs.state.clone(),
-            changed: fs.active_writer_changed.clone(),
-            spool_dir: fs.spool_dir.clone(),
-            vault_registry: fs.vault_registry.clone(),
-            notifier: fs.notifier.clone(),
-        },
         session: None,
         create_upload_owner: Some(owner),
         diagnostics: diagnostics::MountDiagnostics::new(),

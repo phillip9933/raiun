@@ -54,21 +54,11 @@ fn mount_only_action_allowed(action: &str, windows: bool) -> bool {
             | "mount"
             | "unmount"
             | "shutdown"
-    ) || (!windows
-        && cfg!(target_os = "linux")
+    ) || (windows
         && matches!(
             action,
-            "folder_job_prepare"
-                | "folder_job_start"
-                | "folder_job_status"
-                | "folder_job_list"
-                | "folder_job_cancel"
+            "windows_recovery_list" | "windows_recovery_retry" | "windows_recovery_check_cloud"
         ))
-        || (windows
-            && matches!(
-                action,
-                "windows_recovery_list" | "windows_recovery_retry" | "windows_recovery_check_cloud"
-            ))
 }
 
 #[cfg(test)]

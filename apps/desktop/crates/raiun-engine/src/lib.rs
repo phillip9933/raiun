@@ -37,7 +37,6 @@ pub use ordinary_create::{
 #[cfg(unix)]
 pub use ordinary_create::{CreateUploadHandle, CreateUploadOwner};
 mod db_owner;
-mod folder_jobs;
 mod folder_pair_document;
 pub mod folder_pairs;
 use db_owner::DbOwner;

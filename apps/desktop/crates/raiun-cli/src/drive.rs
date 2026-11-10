@@ -80,12 +80,6 @@ enum DriveCommand {
         #[command(subcommand)]
         command: EditCommand,
     },
-    /// Upload a new cloud folder or explicitly delete a whole cloud folder. Linux only.
-    #[cfg_attr(windows, command(hide = true))]
-    Folders {
-        #[command(subcommand)]
-        command: FolderCommand,
-    },
     /// Manage explicit per-user background startup using a valid configuration.
     Startup(crate::startup::StartupArgs),
 }
@@ -164,45 +158,6 @@ enum EditCommand {
         #[arg(long, value_name = "ROOT_RELATIVE")]
         local_relative_path: String,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum FolderCommand {
-    /// Upload a local folder to a new cloud folder, including its contents.
-    /// Existing destinations are refused; no automatic overwrite or merge.
-    Upload {
-        #[arg(long, value_name = "ABS")]
-        source: PathBuf,
-        #[arg(long)]
-        space_id: String,
-        /// Full new cloud folder path, for example /Holiday photos.
-        #[arg(long)]
-        path: String,
-    },
-    /// Prepare deletion of a cloud folder and all its cloud contents.
-    /// Without --confirm, only prints the prepared plan; nothing is deleted.
-    Delete {
-        #[arg(long)]
-        space_id: String,
-        /// Exact existing cloud folder path; the Space root is refused.
-        #[arg(long)]
-        path: String,
-        /// Authorize deleting this exact folder and all its cloud contents.
-        #[arg(long)]
-        confirm: bool,
-    },
-    /// Show one folder job from this account session.
-    Status {
-        #[arg(long, alias = "id")]
-        job_id: String,
-    },
-    /// Stop adding files; files already queued may finish.
-    Cancel {
-        #[arg(long, alias = "id")]
-        job_id: String,
-    },
-    /// List folder jobs for this account session.
-    List,
 }
 
 pub(crate) fn run(mut args: DriveArgs, config_arg: Option<PathBuf>) -> Result<(), String> {
@@ -356,27 +311,6 @@ pub(crate) fn run(mut args: DriveArgs, config_arg: Option<PathBuf>) -> Result<()
         }
     );
     let mut data = Value::Null;
-    if let DriveCommand::Folders { command } = &args.command {
-        data = execute_folders(command, &selected_profile, |request| {
-            request_agent(&executable, &state, request)
-        })?;
-        if !args.json {
-            match command {
-                FolderCommand::Delete { confirm: false, .. } => eprintln!(
-                    "Plan only; nothing was deleted. To delete this exact folder and all its cloud contents, repeat the command with --confirm."
-                ),
-                FolderCommand::Cancel { .. } => eprintln!(
-                    "Stop adding files; files already queued may finish. Check the job status for the outcome."
-                ),
-                FolderCommand::Upload { .. } | FolderCommand::Delete { confirm: true, .. } => {
-                    eprintln!(
-                        "Folder job submitted. Use drive folders status --job-id with this result's job_id to check its outcome."
-                    )
-                }
-                FolderCommand::Status { .. } | FolderCommand::List => {}
-            }
-        }
-    }
     if let DriveCommand::Edits { command } = &args.command {
         data = execute_edits(command, &selected_profile, cfg!(windows), |request| {
             request_agent(&executable, &state, request)
@@ -627,10 +561,6 @@ fn requests_for_platform(args: &DriveArgs, windows: bool) -> Result<Vec<Value>, 
     let profile = |action: &str| json!({"action":action,"profile_id":args.profile});
     Ok(match &args.command {
         DriveCommand::Serve | DriveCommand::Config { .. } | DriveCommand::Startup(_) => vec![],
-        DriveCommand::Folders { command } => {
-            validate_folder_inputs(command)?;
-            vec![]
-        }
         DriveCommand::Edits { command } => {
             validate_edit_inputs(command, windows)?;
             vec![]
@@ -747,212 +677,6 @@ fn local_edit_components(path: &str) -> Result<Vec<&str>, String> {
         return Err(invalid());
     }
     Ok(components)
-}
-
-fn valid_folder_text(value: &str, limit: usize) -> bool {
-    !value.is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
-}
-
-fn validate_folder_path(path: &str) -> Result<(), String> {
-    if !valid_folder_text(path, 4096)
-        || !path.starts_with('/')
-        || path == "/"
-        || path.contains('\\')
-        || path[1..]
-            .split('/')
-            .any(|part| matches!(part, "" | "." | ".."))
-    {
-        return Err("--path must be an exact cloud folder path starting with /, without empty, . or .. components; Space roots are refused".into());
-    }
-    Ok(())
-}
-
-fn validate_folder_inputs(command: &FolderCommand) -> Result<(), String> {
-    if !cfg!(target_os = "linux") {
-        return Err("drive folders currently requires Linux".into());
-    }
-    match command {
-        FolderCommand::Upload {
-            source,
-            space_id,
-            path,
-        } => {
-            absolute(source, "--source")?;
-            if !source.is_dir() {
-                return Err("--source must be an existing local folder".into());
-            }
-            if !valid_folder_text(space_id, 1024) {
-                return Err("--space-id must identify a Space from drive spaces".into());
-            }
-            validate_folder_path(path)?;
-        }
-        FolderCommand::Delete { space_id, path, .. } => {
-            if !valid_folder_text(space_id, 1024) {
-                return Err("--space-id must identify a Space from drive spaces".into());
-            }
-            validate_folder_path(path)?;
-        }
-        FolderCommand::Status { job_id } | FolderCommand::Cancel { job_id } => {
-            if !valid_folder_text(job_id, 256) {
-                return Err("--job-id must identify a folder job from this account session".into());
-            }
-        }
-        FolderCommand::List => {}
-    }
-    Ok(())
-}
-
-fn validate_folder_response(
-    response: &Value,
-    generation: u64,
-    expected_id: Option<&str>,
-    expected_target: Option<(&str, &str, &str)>,
-    prepared: bool,
-) -> Result<(), String> {
-    let invalid = || {
-        "Agent returned a folder job for an unexpected account session or target; inspect drive status before retrying".to_string()
-    };
-    let id = response["job_id"].as_str().ok_or_else(invalid)?;
-    if !valid_folder_text(id, 256)
-        || expected_id.is_some_and(|expected| expected != id)
-        || response["auth_generation"].as_u64() != Some(generation)
-        || !matches!(response["kind"].as_str(), Some("upload" | "delete"))
-        || !response["space_id"]
-            .as_str()
-            .is_some_and(|space| valid_folder_text(space, 1024))
-        || response["remote_path"]
-            .as_str()
-            .is_none_or(|path| validate_folder_path(path).is_err())
-        || !matches!(
-            response["state"].as_str(),
-            Some(
-                "prepared"
-                    | "queued"
-                    | "preparing"
-                    | "uploading"
-                    | "complete"
-                    | "cancelled"
-                    | "failed"
-                    | "interrupted"
-            )
-        )
-        || (prepared && response["state"] != "prepared")
-    {
-        return Err(invalid());
-    }
-    if let Some((kind, space, path)) = expected_target
-        && (response["kind"] != kind
-            || response["space_id"] != space
-            || response["remote_path"] != path)
-    {
-        return Err(invalid());
-    }
-    for field in ["files_total", "folders_total", "bytes_total"] {
-        if response[field].as_u64().is_none() {
-            return Err(invalid());
-        }
-    }
-    if !prepared {
-        for field in ["files_completed", "folders_completed", "bytes_completed"] {
-            if response[field].as_u64().is_none() {
-                return Err(invalid());
-            }
-        }
-        if response["cancel_requested"].as_bool().is_none() {
-            return Err(invalid());
-        }
-    }
-    Ok(())
-}
-
-fn execute_folders(
-    command: &FolderCommand,
-    profile: &str,
-    mut request: impl FnMut(&Value) -> Result<Value, String>,
-) -> Result<Value, String> {
-    validate_folder_inputs(command)?;
-    let status =
-        request(&json!({"action":"status","profile_id":profile,"required_mode":"mount_only"}))?;
-    if status["runtime_mode"] != "mount_only"
-        || status["profile_id"] != profile
-        || status["folder_jobs_supported"] != true
-        || status["session_cleanup_uncertain"] == true
-        || status["account_removing"] == true
-    {
-        return Err(
-            "Folder jobs require a supported Linux agent and fresh status for the selected profile"
-                .into(),
-        );
-    }
-    let generation = status["auth_generation"]
-        .as_u64()
-        .filter(|generation| *generation > 0)
-        .ok_or("Agent status did not identify this account session; check drive status")?;
-    let mut rpc = json!({"profile_id":profile,"required_mode":"mount_only","expected_auth_generation":generation});
-    let (target, start) = match command {
-        FolderCommand::Upload {
-            source,
-            space_id,
-            path,
-        } => {
-            rpc["source_path"] = json!(source);
-            (Some(("upload", space_id.as_str(), path.as_str())), true)
-        }
-        FolderCommand::Delete {
-            space_id,
-            path,
-            confirm,
-        } => (Some(("delete", space_id.as_str(), path.as_str())), *confirm),
-        FolderCommand::Status { job_id } | FolderCommand::Cancel { job_id } => {
-            rpc["action"] = json!(if matches!(command, FolderCommand::Cancel { .. }) {
-                "folder_job_cancel"
-            } else {
-                "folder_job_status"
-            });
-            rpc["job_id"] = json!(job_id);
-            let response = request(&rpc)?;
-            validate_folder_response(&response, generation, Some(job_id), None, false)?;
-            return Ok(response);
-        }
-        FolderCommand::List => {
-            rpc["action"] = json!("folder_job_list");
-            let response = request(&rpc)?;
-            for job in response
-                .as_array()
-                .ok_or("Agent returned an invalid folder-job list")?
-            {
-                validate_folder_response(job, generation, None, None, false)?;
-            }
-            return Ok(response);
-        }
-    };
-    let (kind, space_id, path) = target.ok_or("Missing folder target")?;
-    if status["connected"] != true
-        || status["authenticating"] == true
-        || status["refreshing"] == true
-        || status["restoring"] == true
-    {
-        return Err("Connect this account before preparing a folder upload or deletion".into());
-    }
-    rpc["action"] = json!("folder_job_prepare");
-    rpc["kind"] = json!(kind);
-    rpc["space_id"] = json!(space_id);
-    rpc["remote_path"] = json!(path);
-    let prepared = request(&rpc)?;
-    validate_folder_response(&prepared, generation, None, target, true)?;
-    if !start {
-        return Ok(prepared);
-    }
-    let job_id = prepared["job_id"]
-        .as_str()
-        .ok_or("Agent did not identify the prepared folder job")?;
-    // Start only this freshly admitted plan, using the same profile and session.
-    // No automatic retry can bind a failed request to a newer login or target.
-    let response = request(
-        &json!({"action":"folder_job_start","profile_id":profile,"required_mode":"mount_only","expected_auth_generation":generation,"job_id":job_id}),
-    )?;
-    validate_folder_response(&response, generation, Some(job_id), target, false)?;
-    Ok(response)
 }
 
 fn validate_edit_inputs(command: &EditCommand, windows: bool) -> Result<(), String> {
