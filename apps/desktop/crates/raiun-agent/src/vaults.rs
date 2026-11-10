@@ -4209,6 +4209,8 @@ mod tests {
             local_profile_id: "test-profile".into(),
             cache_jobs: Arc::new(offline_cache::CacheJobs::default()),
             write_reconcile_jobs: Arc::new(offline_cache::WriteReconcileJobs::default()),
+            #[cfg(target_os = "linux")]
+            folder_jobs: Arc::new(crate::folder_jobs::FolderJobs::new()),
             vault_pin_jobs: Arc::new(vault_pin_jobs::VaultPinJobs::default()),
             vault_edit_reconcile_jobs: Arc::new(
                 crate::vault_edit_jobs::VaultEditReconcileJobs::default(),

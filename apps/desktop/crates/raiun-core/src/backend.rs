@@ -612,6 +612,23 @@ pub trait CloudBackend: Send + Sync {
         preflight(&selected, &root)?;
         self.delete_and_confirm(space, path, expected_etag)
     }
+    /// Explicit whole-folder deletion, separate from filesystem empty rmdir.
+    /// Match the current ordinary directory's resource ID and strong revision
+    /// in the same preparation that calls local preflight, then issue exactly
+    /// one conditional parent DELETE. No implicit recursive fallback/retry.
+    fn delete_folder_and_confirm_with_preflight(
+        &self,
+        _space: &str,
+        _path: &str,
+        _expected_resource_id: &str,
+        _expected_etag: &str,
+        _preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+    ) -> Result<(), CloudError> {
+        Err(CloudError::new(
+            ErrorKind::Unsupported,
+            "whole-folder deletion is unavailable",
+        ))
+    }
     /// Move within one Space without overwriting an existing destination.
     fn rename(
         &self,

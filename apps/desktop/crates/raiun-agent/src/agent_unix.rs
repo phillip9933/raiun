@@ -2,6 +2,8 @@
 mod auth;
 mod autostart;
 mod encrypted_edit_recovery;
+#[cfg(target_os = "linux")]
+mod folder_jobs;
 mod namespace;
 mod offline_cache;
 mod ordinary_write_recovery;
@@ -162,6 +164,14 @@ struct AuthState {
 }
 
 trait MountedCloud: Send {
+    #[cfg(target_os = "linux")]
+    fn reserve_folder_job(&self, _space: &str, _path: &str) -> Result<raiun_fuse::FolderJobLease, String> {
+        Err("Folder jobs require the active Linux cloud drive".into())
+    }
+    #[cfg(target_os = "linux")]
+    fn create_upload_handle(&self) -> Option<raiun_engine::CreateUploadHandle> {
+        None
+    }
     fn diagnostics(&self) -> Option<raiun_fuse::diagnostics::DiagnosticsSnapshot> {
         None
     }
@@ -173,6 +183,14 @@ trait MountedCloud: Send {
 }
 
 impl MountedCloud for raiun_fuse::MountHandle {
+    #[cfg(target_os = "linux")]
+    fn reserve_folder_job(&self, space: &str, path: &str) -> Result<raiun_fuse::FolderJobLease, String> {
+        raiun_fuse::MountHandle::reserve_folder_job(self, space, path)
+    }
+    #[cfg(target_os = "linux")]
+    fn create_upload_handle(&self) -> Option<raiun_engine::CreateUploadHandle> {
+        raiun_fuse::MountHandle::create_upload_handle(self)
+    }
     fn diagnostics(&self) -> Option<raiun_fuse::diagnostics::DiagnosticsSnapshot> {
         Some(raiun_fuse::MountHandle::diagnostics(self))
     }
@@ -370,6 +388,8 @@ struct Runtime {
     local_profile_id: String,
     cache_jobs: Arc<offline_cache::CacheJobs>,
     write_reconcile_jobs: Arc<offline_cache::WriteReconcileJobs>,
+    #[cfg(target_os = "linux")]
+    folder_jobs: Arc<folder_jobs::FolderJobs>,
     vault_edit_reconcile_jobs: Arc<vault_edit_jobs::VaultEditReconcileJobs>,
     vault_pin_jobs: Arc<vault_pin_jobs::VaultPinJobs>,
     cache_error: Mutex<Option<String>>,
@@ -943,6 +963,8 @@ impl Runtime {
     // hooks only. Join them before taking settings/auth/sync locks or revoking
     // the original account. A busy unmount must not leave an uploader running.
     fn stop_mounted_create_uploads(&self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        self.folder_jobs.cancel_all_and_wait()?;
         let mut mounted = self.mount.lock().map_err(|_| "Mount state poisoned")?;
         if let Some(handle) = mounted.as_mut() {
             handle.stop_create_uploads()?;
@@ -2661,6 +2683,10 @@ impl Runtime {
         if self.shutdown.load(Ordering::Acquire) && action != "shutdown" {
             return Err("Agent is shutting down".into());
         }
+        #[cfg(target_os = "linux")]
+        if matches!(action, "folder_job_prepare" | "folder_job_start" | "folder_job_status" | "folder_job_list" | "folder_job_cancel") {
+            return self.handle_folder_job(&request);
+        }
         match action {
             "network_proxy" => self.network_proxy_value(),
             "network_proxy_set" => self.set_network_proxy(&request),
@@ -2841,6 +2867,7 @@ impl Runtime {
                     "auth_generation": generation,
                     "folder_settings_supported": self.mode == RuntimeMode::Desktop,
                     "saved_upload_check_supported": true,
+                    "folder_jobs_supported": cfg!(target_os = "linux"),
                     "queued_plaintext_upload_confirmation": if cfg!(target_os = "linux") { "server_response_and_metadata" } else { "full_readback" },
                     "provider_diagnostics": provider_diagnostics,
                     "create_admission_diagnostics": create_admission_diagnostics,
@@ -3511,6 +3538,8 @@ impl Runtime {
                     if let Ok(engine) = self.engine() {
                         engine.set_sync_paused(true);
                     }
+                    #[cfg(target_os = "linux")]
+                    self.folder_jobs.cancel_all_and_wait()?;
                     // Do not acknowledge pause while a sync/reconciliation
                     // network operation that already passed its check remains
                     // in flight. Future work sees the persisted pause first.
@@ -5074,6 +5103,8 @@ fn new_runtime_with_mode(
         local_profile_id,
         cache_jobs: Arc::new(offline_cache::CacheJobs::default()),
         write_reconcile_jobs: Arc::new(offline_cache::WriteReconcileJobs::default()),
+        #[cfg(target_os = "linux")]
+        folder_jobs: Arc::new(folder_jobs::FolderJobs::new()),
         vault_edit_reconcile_jobs: Arc::new(vault_edit_jobs::VaultEditReconcileJobs::default()),
         vault_pin_jobs: Arc::new(vault_pin_jobs::VaultPinJobs::default()),
         cache_error: Mutex::new(None),
@@ -7502,6 +7533,8 @@ mod tests {
             local_profile_id: "test-profile".into(),
             cache_jobs: Arc::new(offline_cache::CacheJobs::default()),
             write_reconcile_jobs: Arc::new(offline_cache::WriteReconcileJobs::default()),
+            #[cfg(target_os = "linux")]
+            folder_jobs: Arc::new(folder_jobs::FolderJobs::new()),
             vault_edit_reconcile_jobs: Arc::new(vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_pin_jobs: Arc::new(vault_pin_jobs::VaultPinJobs::default()),
             cache_error: Mutex::new(None),
@@ -8362,6 +8395,8 @@ mod tests {
             local_profile_id: "test-profile".into(),
             cache_jobs: Arc::new(offline_cache::CacheJobs::default()),
             write_reconcile_jobs: Arc::new(offline_cache::WriteReconcileJobs::default()),
+            #[cfg(target_os = "linux")]
+            folder_jobs: Arc::new(folder_jobs::FolderJobs::new()),
             vault_edit_reconcile_jobs: Arc::new(vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_pin_jobs: Arc::new(vault_pin_jobs::VaultPinJobs::default()),
             cache_error: Mutex::new(None),
@@ -8431,6 +8466,8 @@ mod tests {
             local_profile_id: "test-profile".into(),
             cache_jobs: Arc::new(offline_cache::CacheJobs::default()),
             write_reconcile_jobs: Arc::new(offline_cache::WriteReconcileJobs::default()),
+            #[cfg(target_os = "linux")]
+            folder_jobs: Arc::new(folder_jobs::FolderJobs::new()),
             vault_edit_reconcile_jobs: Arc::new(vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_pin_jobs: Arc::new(vault_pin_jobs::VaultPinJobs::default()),
             cache_error: Mutex::new(None),
@@ -9315,6 +9352,8 @@ mod tests {
             local_profile_id: "test-profile".into(),
             cache_jobs: Arc::new(offline_cache::CacheJobs::default()),
             write_reconcile_jobs: Arc::new(offline_cache::WriteReconcileJobs::default()),
+            #[cfg(target_os = "linux")]
+            folder_jobs: Arc::new(folder_jobs::FolderJobs::new()),
             vault_edit_reconcile_jobs: Arc::new(vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_pin_jobs: Arc::new(vault_pin_jobs::VaultPinJobs::default()),
             cache_error: Mutex::new(None),

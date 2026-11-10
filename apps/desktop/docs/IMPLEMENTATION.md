@@ -1,5 +1,39 @@
 # Desktop implementation status
 
+## Linux explicit folder jobs — 10 November 2026
+
+Linux GUI and headless CLI now use one account-bound folder-job scheduler for
+one-time uploads and whole-folder cloud deletion. The GUI entry is on Transfers;
+the CLI exposes `drive folders upload/delete/list/status/cancel`. A durable
+prepared plan is separate from permission to start. Deletion binds its original
+root, directory resource ID and strong ETag to one conditional parent DELETE;
+the backend checks that same target observation before local preflight. It does
+not enumerate or delete each remote child. Engine journal checks cover pending
+and conflicted ordinary writes under current and older roots for the account.
+
+The mounted provider lends an owned subtree reservation across the job. Active
+local writers, overlapping operations, known encrypted routes, frozen provider
+spools and incomplete recovery scans refuse admission. Registering an overlapping
+vault is also excluded while the job runs. Completion expires provider metadata
+and kernel entries without removing open snapshots or pending/recovery bytes.
+Existing filesystem rmdir semantics remain unchanged.
+
+Uploads build one metadata-only source plan, pin source identities, create new
+directories in parent order with four parallel siblings, then use four bounded
+snapshot/enqueue workers and the existing sole durable uploader. An exact job
+receipt is fsynced before acknowledging the cache handoff. Progress observes
+only those receipts and requires server-confirmed terminal state. Cancellation
+stops preparation; already queued uploads may finish. Failure never rolls back
+cloud folders, adopts a partial target, clears old records or automatically
+replays an interrupted plan. Source snapshots, receipts and account-bound
+history are retained. Existing cache quota and disk headroom bound job staging.
+
+Windows support, mounted-file-manager batch detection and automatic interrupted
+job resumption are not added. Linux app-token/OAuth storage and startup policy
+are unchanged. Validation stays limited to affected compilation/formatting,
+Linux package/update preservation and the owner's usual document folder; no
+new fixture, benchmark, full suite or failure matrix is a release gate.
+
 ## Linux ordinary transfer confirmation — 10 November 2026
 
 Linux GUI and headless mounts share the four-worker durable ordinary-create

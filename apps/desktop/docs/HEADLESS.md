@@ -20,6 +20,50 @@ their recovery copies and are not automatically resent. Normal stop and unmount
 cancel and join the owned upload workers, retaining pending recovery. Without
 usable cache storage, the established synchronous upload path remains available.
 
+## One-time folder jobs on Linux
+
+The Linux GUI and CLI share explicit folder jobs, separate from continuous
+folder sync and from Dolphin's individual filesystem operations. The account
+must be connected and mounted. Uploads require a new destination folder; they
+never merge with or overwrite an existing tree. The folder is scanned once,
+sibling directories are created in parallel, and four preparation workers feed
+the mounted drive's existing upload workers. Success counts server-confirmed
+files, not merely files accepted into the local queue.
+
+```sh
+raiun drive spaces
+raiun drive folders upload --source /absolute/local/Documents \
+  --space-id SPACE_ID --path /Documents
+raiun drive folders list
+raiun drive folders status --job-id JOB_ID
+# Prints a prepared plan without deleting cloud data:
+raiun drive folders delete --space-id SPACE_ID --path /Documents
+# Explicitly delete that folder and all its cloud contents:
+raiun drive folders delete --space-id SPACE_ID --path /Documents --confirm
+raiun drive folders cancel --job-id JOB_ID
+```
+
+Whole-folder deletion sends one conditional parent DELETE, with fresh matching
+root, folder identity and revision, after excluding pending local writes and
+recovery data. A Space root, encrypted location, changed target or busy subtree
+is refused. This is cloud deletion, not removal of an offline copy. The server's
+trash/retention policy applies; Raiun does not promise that every server can undo
+it. Normal filesystem `rmdir` still requires an empty directory.
+
+Stopping an upload job stops adding files; already admitted uploads may finish.
+Account transitions and normal shutdown join the job workers. Plans, exact
+receipts and private local copies remain under the selected account's state;
+interrupted jobs are shown for review and never automatically restarted or
+replayed. Sources with changed identities, symlinks, special files or hardlinks
+are refused. Staging is bounded by the existing cache quota and checked disk
+headroom. This first implementation retains at most 32 job directories per
+account, including interrupted plans; reaching that limit requires explicit
+local review rather than deleting recovery history automatically.
+
+The GUI exposes the same operations under **Transfers → Folder transfers** on
+Linux. Preparing or reviewing a deletion does not execute it. Installing the
+package does not change credentials, accounts, root paths or automatic startup.
+
 Successful queued ordinary uploads finish from the complete conditional upload
 acknowledgement and current server metadata (identity, revision, size and
 destination), without downloading every new file again. Local snapshot hashes

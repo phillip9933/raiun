@@ -1197,6 +1197,7 @@ pub struct VaultMountRoute {
 #[derive(Clone, Default)]
 pub struct VaultMountRegistry {
     routes: Arc<RwLock<VaultRouteMap>>,
+    folder_jobs: Arc<Mutex<std::collections::HashSet<(String, String)>>>,
 }
 
 impl VaultMountRoute {
@@ -1262,6 +1263,18 @@ impl VaultMountRegistry {
             .routes
             .write()
             .map_err(|_| io_error("vault route registry is unavailable"))?;
+        if self
+            .folder_jobs
+            .lock()
+            .map_err(|_| io_error("folder job registry is unavailable"))?
+            .iter()
+            .any(|(space, path)| space == &route.space_id && paths_overlap(path, &route.root_path))
+        {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "folder job overlaps the requested vault route",
+            ));
+        }
         if routes.contains_key(&key) {
             return Err(CloudError::new(
                 ErrorKind::Conflict,
@@ -1377,9 +1390,155 @@ pub struct MountHandle {
     root: PathBuf,
     source: String,
     diagnostics: Arc<diagnostics::MountDiagnostics>,
+    folder_jobs: FolderJobNamespace,
+}
+
+#[derive(Clone)]
+struct FolderJobNamespace {
+    state: Arc<Mutex<State>>,
+    changed: Arc<Condvar>,
+    spool_dir: PathBuf,
+    vault_registry: VaultMountRegistry,
+    notifier: Arc<Mutex<Option<fuser::Notifier>>>,
+}
+
+/// An owned namespace reservation. Keep it alive through every folder-job
+/// mutation and upload handoff. It never owns or removes pending file bytes.
+pub struct FolderJobLease {
+    namespace: FolderJobNamespace,
+    space: String,
+    path: String,
+    key: String,
+}
+
+impl Drop for FolderJobLease {
+    fn drop(&mut self) {
+        // Expire metadata while the subtree is still reserved. Keep inodes,
+        // open handles, recovery aliases and all pending copies intact.
+        let invalidations = if let Ok(mut state) = self.namespace.state.lock() {
+            state.lookup_absence_memos.clear();
+            state.lookup_empty_directory_hints.clear();
+            let mut invalidations = Vec::new();
+            for node in state.nodes.values_mut() {
+                let affected = match &node.kind {
+                    NodeKind::Remote { space, entry } => {
+                        space == &self.space && paths_overlap(&entry.path, &self.path)
+                    }
+                    NodeKind::Personal { space } | NodeKind::Space { space } => {
+                        space == &self.space
+                    }
+                    _ => false,
+                };
+                if affected {
+                    node.metadata_expires_at = Instant::now();
+                    invalidations.push((node.parent, node.name.clone(), node.ino));
+                }
+            }
+            invalidations
+        } else {
+            return;
+        };
+        if let Ok(notifier) = self.namespace.notifier.lock()
+            && let Some(notifier) = notifier.as_ref()
+        {
+            for (parent, name, ino) in invalidations {
+                let _ = notifier.inval_entry(INodeNo(parent), OsStr::new(&name));
+                let _ = notifier.inval_inode(INodeNo(ino), 0, -1);
+            }
+        }
+        // Match admission's registry-before-state order. A poisoned guard
+        // leaves the reservation in place, failing closed for later writes.
+        if let Ok(mut jobs) = self.namespace.vault_registry.folder_jobs.lock()
+            && let Ok(mut state) = self.namespace.state.lock()
+        {
+            state.active_writers.remove(&self.key);
+            jobs.remove(&(self.space.clone(), self.path.clone()));
+            self.namespace.changed.notify_all();
+        }
+    }
 }
 
 impl MountHandle {
+    pub fn create_upload_handle(&self) -> Option<CreateUploadHandle> {
+        self.create_upload_owner
+            .as_ref()
+            .map(CreateUploadOwner::handle)
+    }
+
+    /// Atomically exclude ordinary subtree mutations, then verify the whole
+    /// bounded recovery index. Busy/dirty handles and uncertain scans refuse
+    /// admission; no pending or cancelled working copy is deleted.
+    pub fn reserve_folder_job(&self, space: &str, path: &str) -> Result<FolderJobLease, String> {
+        raiun_core::validate_remote_path(path).map_err(str::to_owned)?;
+        if space.is_empty()
+            || space.len() > 512
+            || space.chars().any(char::is_control)
+            || path == "/"
+            || path.len() > 4096
+            || !self.is_mounted()
+        {
+            return Err("folder job requires a live mount and bounded non-root path".into());
+        }
+        let namespace = &self.folder_jobs;
+        let routes = namespace
+            .vault_registry
+            .routes
+            .read()
+            .map_err(|_| "vault route registry is unavailable")?;
+        // Even a revoked known route remains encryption-sensitive and may
+        // be unlocked again. Ordinary folder jobs cannot overlap its root.
+        if routes
+            .values()
+            .any(|route| route.space_id == space && paths_overlap(&route.root_path, path))
+        {
+            return Err("folder job overlaps a configured encrypted vault".into());
+        }
+        let mut jobs = namespace
+            .vault_registry
+            .folder_jobs
+            .lock()
+            .map_err(|_| "folder job registry is unavailable")?;
+        let key = format!("\0ordinary-subtree\0{space}\0{path}");
+        let mut state = namespace
+            .state
+            .lock()
+            .map_err(|_| "provider state is unavailable")?;
+        if state.active_writers.iter().any(|active| {
+            ordinary_subtree_path(active)
+                .or_else(|| active.split_once('\0'))
+                .is_some_and(|(active_space, active_path)| {
+                    active_space == space && paths_overlap(active_path, path)
+                })
+        }) {
+            return Err("folder subtree has an active local operation".into());
+        }
+        for handle in state.file_handles.values() {
+            // Never wait under State: RELEASE/commit may already hold this
+            // handle while waiting to publish its state changes.
+            let open = handle
+                .try_lock()
+                .map_err(|_| "open file state is busy or unavailable")?;
+            if matches!(&*open, OpenFile::Write(write) if write.space == space && paths_overlap(&write.path, path))
+            {
+                return Err("folder subtree has an open writable file".into());
+            }
+        }
+        state.active_writers.insert(key.clone());
+        jobs.insert((space.to_owned(), path.to_owned()));
+        drop(state);
+        drop(jobs);
+        drop(routes);
+        let lease = FolderJobLease {
+            namespace: namespace.clone(),
+            space: space.to_owned(),
+            path: path.to_owned(),
+            key,
+        };
+        ensure_folder_job_has_no_recovery(&namespace.spool_dir, space, path)
+            .map_err(|error| error.message)?;
+        Ok(lease)
+    }
+
     /// Return an immutable, serializable snapshot of bounded in-memory FUSE diagnostics.
     pub fn diagnostics(&self) -> diagnostics::DiagnosticsSnapshot {
         self.diagnostics.snapshot()
@@ -1700,6 +1859,13 @@ pub fn mount_with_vault_registry_and_create_handoff(
         None
     };
     let source = mount_source(&state_dir);
+    let folder_jobs = FolderJobNamespace {
+        state: Arc::clone(&filesystem.state),
+        changed: Arc::clone(&filesystem.active_writer_changed),
+        spool_dir: filesystem.spool_dir.clone(),
+        vault_registry: filesystem.vault_registry.clone(),
+        notifier: Arc::clone(&notifier),
+    };
     let mut config = Config::default();
     config.mount_options = vec![
         MountOption::FSName(source.clone()),
@@ -1720,6 +1886,7 @@ pub fn mount_with_vault_registry_and_create_handoff(
         root,
         source,
         diagnostics,
+        folder_jobs,
     })
 }
 
@@ -9323,6 +9490,96 @@ fn normalize_vault_root(path: &str) -> Result<String, CloudError> {
 fn normalize_entry_path(path: &str) -> Option<String> {
     normalize_vault_root(path).ok()
 }
+
+// Match the rename recovery exclusions, including frozen V3 handoffs. Also
+// require a stable whole-directory scan rather than accepting a stale page.
+fn ensure_folder_job_has_no_recovery(
+    spool_dir: &Path,
+    space: &str,
+    path: &str,
+) -> Result<(), CloudError> {
+    let stamp = || -> Result<_, CloudError> {
+        let metadata = fs::symlink_metadata(spool_dir).map_err(io_cloud)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(io_error("provider recovery directory is unsafe"));
+        }
+        Ok((
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        ))
+    };
+    let before = stamp()?;
+    let paths = [(space, path)];
+    (|| {
+        let mut after = None;
+        loop {
+            let page = recovery::list_recoveries(
+                spool_dir,
+                after.as_deref(),
+                recovery::MAX_RECOVERY_PAGE_SIZE,
+            )
+            .map_err(|_| io_error("could not inspect pending local data before folder job"))?;
+            if page.truncated || page.unrecognized_entries != 0 {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "pending local data scan is incomplete",
+                ));
+            }
+            for item in page.items {
+                if matches!(
+                    item.warnings.as_slice(),
+                    [recovery::RecoveryWarning::CancelledCreateWorkingCopy]
+                ) && item.space_id.is_some()
+                    && item.remote_path.is_some()
+                    && item.local_data_path.is_some()
+                    && item.bytes.is_some()
+                    && item.condition == Some(recovery::RecoveryConditionKind::Absent)
+                {
+                    // The cancelled working copy remains local recovery data,
+                    // but it carries no pending upload or remote mutation.
+                    // Its bytes are retained; only this local namespace
+                    // overlap blocker is waived.
+                    continue;
+                }
+                let (Some(space), Some(path)) =
+                    (item.space_id.as_deref(), item.remote_path.as_deref())
+                else {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "unidentified local recovery data prevents folder job",
+                    ));
+                };
+                if paths.iter().any(|(target_space, target)| {
+                    space == *target_space && paths_overlap(path, target)
+                }) {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "folder job subtree has pending local data",
+                    ));
+                }
+            }
+            match page.next_after {
+                Some(cursor) if after.as_ref().is_none_or(|old| &cursor > old) => {
+                    after = Some(cursor)
+                }
+                Some(_) => return Err(io_error("recovery scan did not advance")),
+                None => return Ok(()),
+            }
+        }
+    })()?;
+    if stamp()? != before {
+        return Err(io_error(
+            "provider recovery directory changed during folder admission",
+        ));
+    }
+    Ok(())
+}
+
 fn ordinary_subtree_path(key: &str) -> Option<(&str, &str)> {
     key.strip_prefix("\0ordinary-subtree\0")?.split_once('\0')
 }

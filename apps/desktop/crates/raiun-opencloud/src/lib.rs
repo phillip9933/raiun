@@ -4932,6 +4932,49 @@ impl CloudBackend for OpenCloudClient {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn delete_folder_and_confirm_with_preflight(
+        &self,
+        space: &str,
+        path: &str,
+        expected_resource_id: &str,
+        expected_etag: &str,
+        preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+    ) -> Result<(), CloudError> {
+        validate_logical_path(path)?;
+        if path == "/"
+            || path.ends_with('/')
+            || expected_resource_id.is_empty()
+            || expected_resource_id.len() > MAX_DAV_ENTRY
+            || expected_resource_id.chars().any(char::is_control)
+            || !is_strong_etag(expected_etag)
+        {
+            return Err(invalid(
+                "whole-folder deletion requires an exact non-root directory and revision",
+            ));
+        }
+        let operation = self.operation_context()?;
+        let context = operation.context;
+        self.ensure_context_current(context)?;
+        let (selected, url) = self.resolve_dav_with_context(space, path, Some(context))?;
+        let (target, root) = self.ensure_writable_target_with_root(&selected, &url, path)?;
+        validate_ordinary_create_directory(&target, path)?;
+        if target.id != expected_resource_id || target.etag != expected_etag {
+            return Err(conflict(
+                "folder identity or revision changed before deletion",
+            ));
+        }
+        preflight(&selected, &root)?;
+        self.ensure_context_current(context)?;
+        let (request, token) = self.request_with_context(Method::DELETE, &url, Some(context))?;
+        let response = request
+            .header(IF_MATCH, expected_etag)
+            .send()
+            .map_err(network)?;
+        checked(response, &[StatusCode::NO_CONTENT, StatusCode::OK], &token)?;
+        self.ensure_context_current(context)
+    }
+
     fn delete_and_confirm(
         &self,
         space: &str,
