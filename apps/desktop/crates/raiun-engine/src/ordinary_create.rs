@@ -1306,7 +1306,7 @@ mod owner {
                 )
                 .map_err(cache_cloud_error)?;
             // Fully validated disposable snapshot only. The synced immutable
-            // cache body and journal retain crash custody until verification;
+            // cache body and journal retain crash custody until completion;
             // no receipt/recovery state ever depends on this temp surviving.
             // Remember pause refusal independently of its present value: a
             // fast resume must not turn an unclaimed paused job into Conflict.
@@ -1423,37 +1423,46 @@ mod owner {
                     return Err(refused());
                 }
                 current(&|| check() && !self.inner.sync_paused.load(Ordering::Acquire))?;
-                stage.set("Verifying uploaded file");
-                let verified = match self.backend.verify_download_in_root_with_cancellation(
-                    scope.space_id(),
-                    &receipt.write.logical_path,
-                    &uploaded,
-                    &receipt.sha256,
-                    scope.root_resource_id(),
-                    token,
-                ) {
-                    Ok(Some(verified)) => verified,
-                    Ok(None) => {
-                        // Backends without full streaming verification retain
-                        // exact conditional readback into a disposable snapshot.
-                        let download = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
-                        let verified = self.backend.download_in_root_with_cancellation(
-                            scope.space_id(),
-                            &receipt.write.logical_path,
-                            Some(&uploaded.etag),
-                            download.path(),
-                            scope.root_resource_id(),
-                            token,
-                        )?;
-                        if hash_cancelled(download.path(), token)? != receipt.sha256
-                            || fs::metadata(download.path()).map_err(io_error)?.len()
-                                != receipt.byte_len
-                        {
-                            return Err(refused());
+                let server_confirmed = self.backend.server_confirms_new_upload();
+                let verified = if server_confirmed {
+                    // Only this invocation's successful owned upload can use
+                    // server confirmation. Saved uncertain/conflict checks
+                    // retain independent conditional full-body verification.
+                    uploaded.clone()
+                } else {
+                    stage.set("Verifying uploaded file");
+                    match self.backend.verify_download_in_root_with_cancellation(
+                        scope.space_id(),
+                        &receipt.write.logical_path,
+                        &uploaded,
+                        &receipt.sha256,
+                        scope.root_resource_id(),
+                        token,
+                    ) {
+                        Ok(Some(verified)) => verified,
+                        Ok(None) => {
+                            // Backends without full streaming verification retain
+                            // exact conditional readback into a disposable snapshot.
+                            let download =
+                                NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
+                            let verified = self.backend.download_in_root_with_cancellation(
+                                scope.space_id(),
+                                &receipt.write.logical_path,
+                                Some(&uploaded.etag),
+                                download.path(),
+                                scope.root_resource_id(),
+                                token,
+                            )?;
+                            if hash_cancelled(download.path(), token)? != receipt.sha256
+                                || fs::metadata(download.path()).map_err(io_error)?.len()
+                                    != receipt.byte_len
+                            {
+                                return Err(refused());
+                            }
+                            verified
                         }
-                        verified
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
                 };
                 if verified.id != uploaded.id
                     || verified.etag != uploaded.etag
@@ -1474,13 +1483,24 @@ mod owner {
                     scope,
                     &receipt.write.logical_path,
                     Some(&receipt.write.parent_resource_id),
-                    &|| check() && !self.inner.sync_paused.load(Ordering::Acquire),
+                    &|| {
+                        !token.is_cancelled()
+                            && check()
+                            && !self.inner.sync_paused.load(Ordering::Acquire)
+                    },
                     false,
                 )?;
-                current(&|| check() && !self.inner.sync_paused.load(Ordering::Acquire))?;
-                cache
-                    .complete_ordinary_create(scope, &claim, &verified, &receipt.sha256)
-                    .map_err(cache_cloud_error)?;
+                current(&|| {
+                    !token.is_cancelled()
+                        && check()
+                        && !self.inner.sync_paused.load(Ordering::Acquire)
+                })?;
+                if server_confirmed {
+                    cache.complete_server_confirmed_ordinary_create(scope, &claim, &verified)
+                } else {
+                    cache.complete_ordinary_create(scope, &claim, &verified, &receipt.sha256)
+                }
+                .map_err(cache_cloud_error)?;
                 completed = true;
                 Ok(())
             })();

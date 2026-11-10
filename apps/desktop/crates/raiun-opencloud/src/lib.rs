@@ -59,6 +59,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use quick_xml::{NsReader, events::Event, name::ResolveResult};
 use raiun_core::backend::{
@@ -3322,26 +3323,42 @@ impl OpenCloudClient {
         )?;
         let response = request.send().map_err(network)?;
         checked(response, &[StatusCode::CREATED], &token)?;
-        self.confirm_operation_root(&selected, path, &root.id, context)?;
 
-        // Match the engine's former backend readback plus post-operation stat:
-        // both observations must identify one published directory revision.
-        let first = self.stat_at_dav(&url, path)?;
-        let (verified, observed_empty) = if observe_empty && first.directory && !first.encrypted {
-            self.created_directory_view(&url, path, context)?
-        } else {
-            (self.stat_at_dav(&url, path)?, false)
-        };
-        self.confirm_operation_root(&selected, path, &root.id, context)?;
-        if !first.directory
-            || !verified.directory
-            || first.id.is_empty()
-            || first.id != verified.id
-            || first.etag != verified.etag
+        #[cfg(target_os = "linux")]
         {
-            return Err(invalid("created directory could not be verified"));
+            // One exact post-create observation supplies the published directory.
+            // A complete empty view may additionally grant the short provider hint;
+            // it is not authority for a later mutation.
+            let (verified, observed_empty) = if observe_empty {
+                self.created_directory_view(&url, path, context)?
+            } else {
+                (self.stat_at_dav(&url, path)?, false)
+            };
+            validate_ordinary_create_directory(&verified, path)?;
+            self.confirm_operation_root(&selected, path, &root.id, context)?;
+            Ok((verified, observed_empty))
         }
-        Ok((verified, observed_empty))
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.confirm_operation_root(&selected, path, &root.id, context)?;
+            let first = self.stat_at_dav(&url, path)?;
+            let (verified, observed_empty) = if observe_empty && first.directory && !first.encrypted
+            {
+                self.created_directory_view(&url, path, context)?
+            } else {
+                (self.stat_at_dav(&url, path)?, false)
+            };
+            self.confirm_operation_root(&selected, path, &root.id, context)?;
+            if !first.directory
+                || !verified.directory
+                || first.id.is_empty()
+                || first.id != verified.id
+                || first.etag != verified.etag
+            {
+                return Err(invalid("created directory could not be verified"));
+            }
+            Ok((verified, observed_empty))
+        }
     }
 
     fn created_directory_view(
@@ -3354,8 +3371,8 @@ impl OpenCloudClient {
         self.ensure_context_current(context)?;
         match listing {
             Ok(view) => Ok(view),
-            // The optional view grants no authority. Preserve the former
-            // second exact confirmation if that read-only view is unavailable;
+            // The optional view grants no authority. Use an exact observation
+            // without a hint if that read-only view is unavailable;
             // never repeat MKCOL or accept an incomplete empty listing.
             Err(_) => self.stat_at_dav(url, path).map(|entry| (entry, false)),
         }
@@ -3829,6 +3846,7 @@ impl OpenCloudClient {
             root_condition,
             preparation,
             None,
+            None,
         )
     }
 
@@ -3846,6 +3864,7 @@ impl OpenCloudClient {
         root_condition: Option<String>,
         preparation: BoundedOperationContext,
         is_current: Option<&dyn Fn() -> bool>,
+        expected_parent: Option<&str>,
     ) -> Result<RemoteEntry, CloudError> {
         let current = || {
             ensure_operation_active(operation)?;
@@ -3894,7 +3913,7 @@ impl OpenCloudClient {
         self.ensure_context_current(preparation_context)?;
         current()?;
         drop(preparation);
-        async_body::run_body_operation_cancellable(
+        let (response_etag, response_file_id) = async_body::run_body_operation_cancellable(
             &self.body_runtime,
             self.body_idle_timeout,
             total_timeout,
@@ -3920,6 +3939,8 @@ impl OpenCloudClient {
                         "authenticated provider generation changed",
                     ));
                 }
+                let sent_bytes = Arc::new(AtomicU64::new(0));
+                let counted_bytes = Arc::clone(&sent_bytes);
                 let body = async_body::budgeted_upload_stream(
                     tokio::fs::File::from_std(file),
                     size,
@@ -3935,19 +3956,40 @@ impl OpenCloudClient {
                             })
                     },
                     progress,
-                );
+                )
+                .map(move |chunk| {
+                    if let Ok(bytes) = &chunk {
+                        counted_bytes.fetch_add(bytes.len() as u64, Ordering::Release);
+                    }
+                    chunk
+                });
                 let response = request
                     .timeout(total_timeout)
                     .body(reqwest::Body::wrap_stream(body))
                     .send()
                     .await
                     .map_err(network)?;
-                checked_async(
+                let response = checked_async(
                     response,
                     &[StatusCode::CREATED, StatusCode::NO_CONTENT],
                     &response_token,
                 )?;
-                Ok(())
+                // A server may answer before consuming a request body. Such
+                // an acknowledgement cannot retire an unsent local snapshot.
+                if sent_bytes.load(Ordering::Acquire) != size {
+                    return Err(invalid("upload response preceded the complete file body"));
+                }
+                let etag = response
+                    .headers()
+                    .get(ETAG)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let file_id = response
+                    .headers()
+                    .get("OC-FileID")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                Ok((etag, file_id))
             },
         )?;
         ensure_operation_active(operation)?;
@@ -3968,7 +4010,18 @@ impl OpenCloudClient {
             self.ensure_context_current(post_context)?;
             self.ensure_security_current(security_generation)?;
             let result = if expected_root.is_some() {
-                self.check_transfer_root(&selected, path, expected_root)?;
+                let (root, parent) = self.ordinary_ancestor_root_and_last_observed_with_context(
+                    &selected,
+                    path,
+                    false,
+                    Some(post_context),
+                    None,
+                )?;
+                if expected_root.is_some_and(|expected| root.id != expected)
+                    || expected_parent.is_some_and(|expected| parent.id != expected)
+                {
+                    return Err(conflict("upload destination identity changed"));
+                }
                 self.stat_at_dav(&url, path)
             } else {
                 self.stat(space, path)
@@ -3983,11 +4036,35 @@ impl OpenCloudClient {
         if entry.size != size {
             return Err(invalid("uploaded file failed size verification"));
         }
+        if cfg!(target_os = "linux") && expected_parent.is_some() {
+            // Bind successful fresh-create completion to the revision actually
+            // acknowledged by PUT, never a same-size replacement observed later.
+            // An absent/weak response validator retains the claimed local body
+            // as uncertain for the existing explicit readback check.
+            let response_etag = response_etag
+                .filter(|etag| is_strong_etag(etag))
+                .ok_or_else(|| {
+                    invalid("upload acknowledgement omitted a strong revision; local copy retained")
+                })?;
+            if response_etag != entry.etag
+                || response_file_id.as_ref().is_some_and(|id| id != &entry.id)
+            {
+                return Err(conflict(
+                    "uploaded revision changed before confirmation; local copy retained",
+                ));
+            }
+        }
         Ok(entry)
     }
 }
 
 impl CloudBackend for OpenCloudClient {
+    fn server_confirms_new_upload(&self) -> bool {
+        // Linux fresh-create delivery uses the complete conditional PUT and
+        // its root/parent/leaf metadata confirmation. Recovery and Windows
+        // retain their independent full-content verification paths.
+        cfg!(target_os = "linux")
+    }
     fn server_origin(&self) -> Option<String> {
         Some(self.server.origin().ascii_serialization())
     }
@@ -4621,6 +4698,7 @@ impl CloudBackend for OpenCloudClient {
             Some(root_condition),
             preparation,
             Some(is_current),
+            Some(expected_parent),
         )
         .map(Some)
     }
@@ -4834,14 +4912,23 @@ impl CloudBackend for OpenCloudClient {
             .send()
             .map_err(network)?;
         checked(response, &[StatusCode::NO_CONTENT, StatusCode::OK], &token)?;
-        self.confirm_operation_root(&selected, path, &root.id, context)?;
-        match self.stat_at_dav(&url, path) {
-            Err(error) if error.kind == ErrorKind::NotFound => {
-                self.ensure_context_current(context)?;
-                Ok(())
+        #[cfg(target_os = "linux")]
+        {
+            // The successful conditional DELETE is the server's confirmation.
+            // Post-delete reads cannot strengthen its pre-send emptiness proof.
+            self.ensure_context_current(context)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.confirm_operation_root(&selected, path, &root.id, context)?;
+            match self.stat_at_dav(&url, path) {
+                Err(error) if error.kind == ErrorKind::NotFound => {
+                    self.ensure_context_current(context)?;
+                    Ok(())
+                }
+                Ok(_) => Err(invalid("deleted item is still present")),
+                Err(error) => Err(error),
             }
-            Ok(_) => Err(invalid("deleted item is still present")),
-            Err(error) => Err(error),
         }
     }
 
@@ -4887,17 +4974,26 @@ impl CloudBackend for OpenCloudClient {
             .map_err(network)?;
         checked(response, &[StatusCode::NO_CONTENT, StatusCode::OK], &token)?;
 
-        self.confirm_operation_root(&selected, path, &root.id, context)?;
-        match self.stat_at_dav(&url, path) {
-            Err(error) if error.kind == ErrorKind::NotFound => {
-                self.ensure_context_current(context)?;
-                Ok(())
+        #[cfg(target_os = "linux")]
+        {
+            // Treat the acknowledged conditional mutation as server-confirmed;
+            // a later replacement at the same path is a separate cloud operation.
+            self.ensure_context_current(context)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.confirm_operation_root(&selected, path, &root.id, context)?;
+            match self.stat_at_dav(&url, path) {
+                Err(error) if error.kind == ErrorKind::NotFound => {
+                    self.ensure_context_current(context)?;
+                    Ok(())
+                }
+                Ok(_) => Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "deleted item is still present",
+                )),
+                Err(error) => Err(error),
             }
-            Ok(_) => Err(CloudError::new(
-                ErrorKind::InvalidResponse,
-                "deleted item is still present",
-            )),
-            Err(error) => Err(error),
         }
     }
 

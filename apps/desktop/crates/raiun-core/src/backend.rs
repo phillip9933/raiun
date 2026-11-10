@@ -415,6 +415,18 @@ pub trait CloudBackend: Send + Sync {
         ))
     }
 
+    /// Whether a successful `upload_new_in_root_with_preflight` confirms a
+    /// freshly claimed create without an independent full-body GET. Opting in
+    /// requires sending the complete source body, checking the successful
+    /// terminal upload status, and returning validated current root, path,
+    /// resource ID, strong ETag, size and ordinary writable permissions.
+    /// Cancellation and caller currentness must fence the entire operation.
+    /// This is server confirmation, not an independently read-back byte hash,
+    /// and never authorizes completing historical uncertain/conflict records.
+    fn server_confirms_new_upload(&self) -> bool {
+        false
+    }
+
     /// Deliver a new ordinary file after one fresh preparation observation.
     /// `claim` must be called exactly once, after validating root, ordered
     /// ordinary parents and target absence, and before any body is sent. False

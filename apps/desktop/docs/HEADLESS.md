@@ -20,6 +20,15 @@ their recovery copies and are not automatically resent. Normal stop and unmount
 cancel and join the owned upload workers, retaining pending recovery. Without
 usable cache storage, the established synchronous upload path remains available.
 
+Successful queued ordinary uploads finish from the complete conditional upload
+acknowledgement and current server metadata (identity, revision, size and
+destination), without downloading every new file again. Local snapshot hashes
+and pending recovery remain protected. This is server-confirmed delivery, not
+an independent comparison of the remote bytes; interrupted/uncertain saved
+uploads still require their existing readback check. Linux folder creation and
+deletion also avoid duplicate post-operation metadata requests. Filesystem
+directory removal still requires an empty directory.
+
 ## Build and install
 
 From `apps/desktop`, use Rust and its existing native build dependencies (C

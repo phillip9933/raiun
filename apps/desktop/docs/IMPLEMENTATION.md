@@ -1,5 +1,44 @@
 # Desktop implementation status
 
+## Linux ordinary transfer confirmation — 10 November 2026
+
+Linux GUI and headless mounts share the four-worker durable ordinary-create
+pipeline. Fresh uploads now finish after the complete conditional PUT is
+acknowledged and the server's exact ordinary file identity, strong ETag, size,
+root and parent are confirmed. The metadata must match the strong ETag from
+that PUT response (and its file ID when supplied). Missing or changed response
+validators leave the upload uncertain with its local copy retained. The client no longer downloads every successful
+new upload again. The source snapshot is still locally hash-checked; this is
+server-confirmed delivery, not an independent remote-content hash proof.
+`Verified` remains the compatible terminal journal state for these fresh
+completions. Agent status exposes `queued_plaintext_upload_confirmation` so the
+confirmation policy is explicit. Interrupted/uncertain saved-upload checks,
+encrypted transfers, existing-file edits and Windows delivery keep their
+existing independent readback behavior. Failed or cancelled sends preserve
+their immutable bodies and are never automatically replayed by this change.
+
+Linux deletion trusts a successful conditional DELETE acknowledgement rather
+than walking ancestors and querying the deleted path again. All pre-send
+account/root/encryption, pending-file and recovery exclusions remain; filesystem
+`rmdir` still requires an empty directory. Folder creation uses one published
+directory observation and one post-operation root check instead of two of each.
+No negative encryption observation is cached across operations.
+
+Official OpenCloud desktop source reviewed at
+`6f1e060efd762bacb5754258d3d380b397162088` likewise finishes successful uploads
+from acknowledgement/metadata, deletes a removed directory with one parent
+request and follows MKCOL with metadata, without full upload readback. Its
+upload paths can send a capability-selected checksum; Raiun's new completion
+policy does not claim server-side checksum validation. Ordinary web upload
+completion also relies on uploader success. Dolphin supplies individual
+unlink/rmdir/mkdir calls; it does not supply the whole-tree plan used by the
+web uploader or sync client. Whole-tree cloud deletion and parallel folder
+preparation therefore remain separate work, not claimed by these reductions.
+
+Validation is limited to affected compilation, formatting, Linux packaging and
+the existing bounded normal workflow. Built artifacts are not native execution
+or measured speedup evidence; current delivery results are recorded separately.
+
 ## Windows routine renewal and ordinary upload scheduling — 5 November 2026
 
 The Agent retains one exact generation/session/account/Personal-root credential

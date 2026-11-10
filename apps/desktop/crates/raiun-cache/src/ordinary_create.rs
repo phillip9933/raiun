@@ -11,6 +11,9 @@ pub enum OrdinaryCreateState {
     Claimed = 2,
     Uncertain = 3,
     Conflict = 4,
+    /// Terminal success: independently byte-verified, or server-confirmed for
+    /// a fresh owned upload. The persisted value does not distinguish these;
+    /// it is not evidence that an independent cloud-body hash was obtained.
     Verified = 5,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +85,23 @@ fn strong_etag(value: &str) -> bool {
         && value.as_bytes()[1..value.len() - 1]
             .iter()
             .all(|b| *b == 0x21 || (0x23..=0x7e).contains(b) || *b >= 0x80)
+}
+fn validate_create_completion(
+    receipt: &OrdinaryCreateReceipt,
+    remote: &RemoteEntry,
+) -> Result<(), CacheError> {
+    validate_entry(remote)?;
+    if remote.directory
+        || remote.encrypted
+        || !remote.writable
+        || remote.path != receipt.write.logical_path
+        || remote.size != receipt.byte_len
+        || !strong_etag(&remote.etag)
+        || remote.id == receipt.write.content.resource_id
+    {
+        return Err(CacheError::Conflict);
+    }
+    Ok(())
 }
 fn state(value: i64) -> Result<OrdinaryCreateState, CacheError> {
     match value {
@@ -888,6 +908,7 @@ impl Cache {
     ) -> Result<OrdinaryCreateReceipt, CacheError> {
         self.finish_create(scope, &claim, None)
     }
+    /// Complete a fresh owned create after independent cloud-body verification.
     pub fn complete_ordinary_create(
         &self,
         scope: &CacheScope,
@@ -895,19 +916,24 @@ impl Cache {
         verified: &RemoteEntry,
         verified_sha256: &str,
     ) -> Result<OrdinaryCreateReceipt, CacheError> {
-        validate_entry(verified)?;
-        if verified.directory
-            || verified.encrypted
-            || !verified.writable
-            || verified.path != claim.receipt.write.logical_path
-            || verified.size != claim.receipt.byte_len
-            || verified_sha256 != claim.receipt.sha256
-            || !strong_etag(&verified.etag)
-            || verified.id == claim.receipt.write.content.resource_id
-        {
+        validate_create_completion(&claim.receipt, verified)?;
+        if verified_sha256 != claim.receipt.sha256 {
             return Err(CacheError::Conflict);
         }
         self.finish_create(scope, claim, Some(verified))
+    }
+    /// Complete only the current owned claim after the engine's opted-in
+    /// backend confirms the complete upload and validates current metadata.
+    /// No remote readback digest is asserted. Local hash/custody stay bound to
+    /// the immutable claim; the nonce/state CAS refuses stopped or old claims.
+    pub fn complete_server_confirmed_ordinary_create(
+        &self,
+        scope: &CacheScope,
+        claim: &OrdinaryCreateClaim,
+        confirmed: &RemoteEntry,
+    ) -> Result<OrdinaryCreateReceipt, CacheError> {
+        validate_create_completion(&claim.receipt, confirmed)?;
+        self.finish_create(scope, claim, Some(confirmed))
     }
     /// Complete a stopped create only after the engine independently reads
     /// and hashes its exact current cloud revision. This never grants send

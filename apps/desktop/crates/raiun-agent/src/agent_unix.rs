@@ -2841,6 +2841,7 @@ impl Runtime {
                     "auth_generation": generation,
                     "folder_settings_supported": self.mode == RuntimeMode::Desktop,
                     "saved_upload_check_supported": true,
+                    "queued_plaintext_upload_confirmation": if cfg!(target_os = "linux") { "server_response_and_metadata" } else { "full_readback" },
                     "provider_diagnostics": provider_diagnostics,
                     "create_admission_diagnostics": create_admission_diagnostics,
                     "connected": connected,
