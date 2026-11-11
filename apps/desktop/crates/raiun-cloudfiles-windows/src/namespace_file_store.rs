@@ -1810,14 +1810,16 @@ fn history_counts_existing_inner(
         let directory = files.child(&key, false)?;
         let names = directory.entries(budget.remaining_entries())?;
         budget.entries(names.len())?;
-        let mut ids = std::collections::BTreeSet::new();
-        let mut unique = std::collections::HashSet::new();
+        let unique: std::collections::HashSet<_> = names.iter().map(String::as_str).collect();
+        if unique.len() != names.len() {
+            return Err(StoreError::CorruptEvidence);
+        }
+        // Index this bounded listing once under the existing quota lease.
+        // Each decoder receives all names for its record in the same order.
+        let mut names_by_record = std::collections::BTreeMap::<&str, Vec<String>>::new();
         for name in &names {
-            if !unique.insert(name) {
-                return Err(StoreError::CorruptEvidence);
-            }
             let (id, suffix) = record_name(name)?;
-            if !names.contains(&format!("{id}.intent")) {
+            if !unique.contains(format!("{id}.intent").as_str()) {
                 return Err(StoreError::IncompleteEvidence);
             }
             if suffix == "dispatch.lock" {
@@ -1827,7 +1829,7 @@ fn history_counts_existing_inner(
                 }
                 pin.verify()?;
             }
-            ids.insert(id.to_owned());
+            names_by_record.entry(id).or_default().push(name.clone());
         }
         if scope.profile_id == provider.profile_id()
             && scope.server_origin == provider.server_origin()
@@ -1836,7 +1838,7 @@ fn history_counts_existing_inner(
             && scope.root_file_index == physical.file_index
         {
             records = records
-                .checked_add(ids.len())
+                .checked_add(names_by_record.len())
                 .ok_or(StoreError::ScanLimit)?;
             if records > remaining {
                 return Err(StoreError::ScanLimit);
@@ -1858,12 +1860,12 @@ fn history_counts_existing_inner(
             // and noneligible joins gain no new IO or budget charge. Do not
             // retain the view beyond this decoder. Direct readers enumerate.
             let snapshot_history = decoder.base.namespace_snapshot_histories();
-            for id in ids {
+            for (id, record_names) in names_by_record {
                 let loaded = decoder.load_names_with_history(
                     &*directory,
-                    &id,
+                    id,
                     &scope,
-                    &names,
+                    &record_names,
                     budget,
                     false,
                     Some(&snapshot_history),
