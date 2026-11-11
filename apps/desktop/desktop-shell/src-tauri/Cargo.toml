@@ -24,7 +24,7 @@ serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "=2.4.5", path = "vendor/tauri-plugin-single-instance-2.4.5" }
-tauri-plugin-updater = "=2.14.0"
+tauri-plugin-updater = "=2.14.1"
 tempfile = "=3.27.0"
 url = "2"
 zeroize = "1"
