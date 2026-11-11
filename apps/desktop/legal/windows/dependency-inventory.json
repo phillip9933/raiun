@@ -56,14 +56,14 @@
       "sha256": "b5c80bb30797d3a2eeb0dbd85ce481bacfa1b9401c6e74c5fbb4134de26dd690"
     },
     {
-      "bytes": 56268,
+      "bytes": 56265,
       "path": "legal/windows/THIRD-PARTY-NOTICES.md",
-      "sha256": "10c910dc35394350b68c668b7873c494ee4f73f40649e051d152e7a53895769f"
+      "sha256": "6ef0b342599b53365246001b92dec72bca798ad5271fcaf297583ffaac57de11"
     }
   ],
   "gaps": [],
   "lock_sha256": {
-    "Cargo.lock": "feb0ebf58e7fc376a573a76c537d1a063e8080b16961077413168e62fd33f53a",
+    "Cargo.lock": "7baef69d9aa4b234b4c226329c4a9b72aa89c14c452a10611daa033d34bbb81c",
     "desktop-shell/package-lock.json": "d0965d09c758ed7e5f3d1dcc1b1d869d5113f836fdf30c0915ddc850d3387932",
     "desktop-shell/src-tauri/Cargo.lock": "515e726034b491d4b4f98ee2aa13fb193b4bd733bd1a5e09294c07d1141774ef",
     "package-lock.json": "fc694dd4b238d9f55909d1a8229f1cfb8f063f042f2bb0256c20c73495dad64d"
@@ -4781,7 +4781,6 @@
       "description": "High performance xml reader and writer",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "quick-xml",
@@ -4795,6 +4794,25 @@
       "repository": "https://github.com/tafia/quick-xml",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.38.4"
+    },
+    {
+      "declared_license": "MIT",
+      "description": "High performance xml reader and writer",
+      "ecosystem": "cargo",
+      "graphs": [
+        "Cargo.toml"
+      ],
+      "name": "quick-xml",
+      "notice_files": [
+        {
+          "bytes": 1105,
+          "path": "legal/windows/rust/quick-xml-0.41.0/LICENSE-MIT.md",
+          "sha256": "5b2c207dcf571267ebe0bbdd5bf321f561ddc22ff597e7b363e96f4539507a29"
+        }
+      ],
+      "repository": "https://github.com/tafia/quick-xml",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.41.0"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -5499,25 +5517,7 @@
       "description": "Web PKI X.509 Certificate Verification.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
-      ],
-      "name": "rustls-webpki",
-      "notice_files": [
-        {
-          "bytes": 916,
-          "path": "legal/windows/rust/rustls-webpki-0.103.15/LICENSE",
-          "sha256": "5b698ca13897be3afdb7174256fa1574f8c6892b8bea1a66dd6469d3fe27885a"
-        }
-      ],
-      "repository": "https://github.com/rustls/webpki",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.103.15"
-    },
-    {
-      "declared_license": "ISC",
-      "description": "Web PKI X.509 Certificate Verification.",
-      "ecosystem": "cargo",
-      "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "rustls-webpki",
@@ -8085,13 +8085,13 @@
       "notice_files": [
         {
           "bytes": 2371,
-          "path": "legal/windows/rust/webpki-roots-1.0.9/LICENSE",
+          "path": "legal/windows/rust/webpki-roots-1.0.10/LICENSE",
           "sha256": "e271993808fec50ab29350b39539cdec611a9103f827e0aa26d61da70e2d33f8"
         }
       ],
       "repository": "https://github.com/rustls/webpki-roots",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "1.0.9"
+      "version": "1.0.10"
     },
     {
       "declared_license": "MIT",

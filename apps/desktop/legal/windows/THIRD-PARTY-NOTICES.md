@@ -205,6 +205,7 @@ The exact target lock hashes, declared license expressions, source references, r
 - `precomputed-hash 0.1.1` — MIT; `legal/windows/rust/precomputed-hash-0.1.1/LICENSE`
 - `proc-macro2 1.0.107` — MIT OR Apache-2.0; `legal/windows/rust/proc-macro2-1.0.107/LICENSE-APACHE`, `legal/windows/rust/proc-macro2-1.0.107/LICENSE-MIT`
 - `quick-xml 0.38.4` — MIT; `legal/windows/rust/quick-xml-0.38.4/LICENSE-MIT.md`
+- `quick-xml 0.41.0` — MIT; `legal/windows/rust/quick-xml-0.41.0/LICENSE-MIT.md`
 - `quinn 0.11.12` — MIT OR Apache-2.0; `legal/windows/rust/quinn-0.11.12/LICENSE-APACHE`, `legal/windows/rust/quinn-0.11.12/LICENSE-MIT`
 - `quinn-proto 0.11.19` — MIT OR Apache-2.0; `legal/windows/rust/quinn-proto-0.11.19/LICENSE-APACHE`, `legal/windows/rust/quinn-proto-0.11.19/LICENSE-MIT`
 - `quinn-udp 0.5.16` — MIT OR Apache-2.0; `legal/windows/rust/quinn-udp-0.5.16/LICENSE-APACHE`, `legal/windows/rust/quinn-udp-0.5.16/LICENSE-MIT`
@@ -232,7 +233,6 @@ The exact target lock hashes, declared license expressions, source references, r
 - `rustls 0.23.46` — Apache-2.0 OR ISC OR MIT; `legal/windows/rust/rustls-0.23.46/LICENSE-APACHE`, `legal/windows/rust/rustls-0.23.46/LICENSE-ISC`, `legal/windows/rust/rustls-0.23.46/LICENSE-MIT`
 - `rustls-pki-types 1.15.1` — MIT OR Apache-2.0; `legal/windows/rust/rustls-pki-types-1.15.1/LICENSE-APACHE`, `legal/windows/rust/rustls-pki-types-1.15.1/LICENSE-MIT`
 - `rustls-platform-verifier 0.7.1` — MIT OR Apache-2.0; `legal/windows/rust/rustls-platform-verifier-0.7.1/LICENSE-APACHE`, `legal/windows/rust/rustls-platform-verifier-0.7.1/LICENSE-MIT`
-- `rustls-webpki 0.103.15` — ISC; `legal/windows/rust/rustls-webpki-0.103.15/LICENSE`
 - `rustls-webpki 0.103.16` — ISC; `legal/windows/rust/rustls-webpki-0.103.16/LICENSE`
 - `ryu 1.0.23` — Apache-2.0 OR BSL-1.0; `legal/windows/rust/ryu-1.0.23/LICENSE-APACHE`, `legal/windows/rust/ryu-1.0.23/LICENSE-BOOST`
 - `salsa20 0.10.2` — MIT OR Apache-2.0; `legal/windows/rust/salsa20-0.10.2/LICENSE-APACHE`, `legal/windows/rust/salsa20-0.10.2/LICENSE-MIT`
@@ -339,7 +339,7 @@ The exact target lock hashes, declared license expressions, source references, r
 - `want 0.3.2` — MIT; `legal/windows/rust/want-0.3.2/LICENSE`
 - `web-time 1.1.0` — MIT OR Apache-2.0; `legal/windows/rust/web-time-1.1.0/LICENSE-APACHE`, `legal/windows/rust/web-time-1.1.0/LICENSE-MIT`
 - `web_atoms 0.2.6` — MIT OR Apache-2.0; `legal/windows/rust/web_atoms-0.2.6/LICENSE-APACHE`, `legal/windows/rust/web_atoms-0.2.6/LICENSE-MIT`
-- `webpki-roots 1.0.9` — CDLA-Permissive-2.0; `legal/windows/rust/webpki-roots-1.0.9/LICENSE`
+- `webpki-roots 1.0.10` — CDLA-Permissive-2.0; `legal/windows/rust/webpki-roots-1.0.10/LICENSE`
 - `webview2-com 0.39.1` — MIT; `legal/windows/webview2-rs/LICENSE-MIT.txt`
 - `webview2-com-macros 0.8.1` — MIT; `legal/windows/webview2-rs/LICENSE-MIT.txt`
 - `webview2-com-sys 0.39.1` — MIT; `legal/windows/webview2-rs/LICENSE-MIT.txt`
