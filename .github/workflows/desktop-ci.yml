@@ -59,7 +59,7 @@ jobs:
       - run: cargo clippy --manifest-path desktop-shell/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo test --manifest-path desktop-shell/src-tauri/Cargo.toml --locked
       - name: Upload Linux beta package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: raiun-desktop-linux-x86_64
           path: apps/desktop/target/raiun-desktop-linux-x86_64.tar.gz
