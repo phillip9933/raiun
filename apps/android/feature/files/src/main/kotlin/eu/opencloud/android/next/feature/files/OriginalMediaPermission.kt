@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -95,8 +94,7 @@ internal fun rememberOriginalMediaPermission(
 
     return { files ->
         val permissionMissing =
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-                context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) !=
+            context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) !=
                 PackageManager.PERMISSION_GRANTED
         if (preferences.askForLocationPermission &&
             permissionMissing &&

@@ -8,9 +8,9 @@ Tap the version at the bottom of the navigation menu to open App updates directl
 
 When a newer compatible release is found, Raiun shows a **New version available** popup after the app is unlocked. It includes release notes and Download update, or Install update when a verified download is ready. **Later** dismisses the current offer; it remains available in App updates, and a different newer release can prompt again. The focused popup tests cover the button callback, but do not establish dismissal behavior across process death. Returning to the foreground requests a check through the library's existing daily throttle; the library respects Check automatically. No extra polling or automatic installation is added.
 
-The unreleased candidate pins `io.github.phillip9933:android-updater:0.2.1` in `gradle/libs.versions.toml`. The independent library source is maintained outside this monorepo. Raiun consumes its exported Maven publication in `third_party/android-updater/`, including a complete corresponding source snapshot and license. Gradle verifies SHA-256 pins and the exact Maven file set during configuration; repository content filtering prevents falling back to a mutable local or remote copy. Builds do not follow a sibling source checkout or use `mavenLocal()`.
+The unreleased candidate pins `io.github.phillip9933:android-updater:1.0.0` in `gradle/libs.versions.toml`. The independent library source is maintained outside this monorepo. Raiun consumes its exported Maven publication in `third_party/android-updater/`, including a complete corresponding source snapshot and license. Gradle verifies SHA-256 pins and the exact Maven file set during configuration; repository content filtering prevents falling back to a mutable local or remote copy. Builds do not follow a sibling source checkout or use `mavenLocal()`.
 
-Version 0.2.1 is published in [`phillip9933/android-app-updater`](https://github.com/phillip9933/android-app-updater/releases/tag/v0.2.1), at source revision `60b8fb82aa14ab0fc115ee9f9f96d3cc2c60f5fc`. Published Raiun 1.1.0 continues to contain updater 0.2.0. The library uses the neutral Kotlin package `io.github.phillip9933.appupdater`. The vendored artifact/source bundle allows a clean Raiun checkout to build without a sibling checkout. Verify the immutable release, corresponding source and artifact hashes for every pin update. This work does not change Kura's networking policy or manifest.
+Version 1.0.0 is published in [`phillip9933/android-app-updater`](https://github.com/phillip9933/android-app-updater/releases/tag/v1.0.0), at source revision `0613457c079d675dffcb4b5181e37959628cbbc4`. Published Raiun 1.6.0 contains updater 0.2.1. The library uses the Kotlin package `io.github.phillip9933.appupdater`. The vendored artifact/source bundle allows a clean Raiun checkout to build without a sibling checkout. Verify the immutable release, corresponding source and artifact hashes for every pin update.
 
 ## Ownership and compatibility
 
@@ -19,6 +19,29 @@ The library owns feed parsing, daily checks, Wi-Fi download work, private APK ca
 Raiun's existing application ID, signing identity and all cloud/offline/vault/backup data remain unchanged. The existing updater preferences (`android_updates`), APK cache subdirectory (`updates`) and FileProvider authority are retained. Scheduled work is updated to the library worker class rather than keeping requests that name removed classes. Persisted public configuration lets workers restart without an Activity; configuration tokens prevent old work from acting on a changed release source.
 
 Only one update configuration per app process is supported. This library targets universal APK releases from public GitHub repositories, with matching version names and increasing version codes. The policy requires the installed signing identity, a non-debuggable APK and a higher version code. Historical consumer test evidence and remaining acceptance limits are recorded below and in TESTING.md. Desktop and Play split-package updating need their own installation flows.
+
+## Android 12 minimum
+
+Raiun 1.6.0 ships updater 0.2.1. Its GitHub release check has no minimum-OS
+metadata, so a release requiring Android 12 can appear on Android 8–11 and
+be downloaded there. The APK must pass verification before Raiun offers
+installation. When Android's package parser can read the archive metadata,
+the verifier checks the APK minimum against the device's SDK. When the
+platform rejects the archive first, Raiun shows its general verification error.
+
+A disposable Android 8 (API 26) emulator test with the exact bundled verifier
+accepted a synthetic API 26 APK and rejected the equivalent API 31 APK as
+`INVALID_APK` because the platform returned no archive metadata. A direct
+system install rejected the API 31 APK and retained the installed fixture.
+This verifies native rejection on API 26. The Android 8.1–11 AOSP archive
+parsers were checked in source and also reject a higher minimum SDK.
+
+Android 8–11 users can keep Raiun 1.6.0 installed with their data. They can
+turn off automatic downloads in App updates to avoid downloading an
+incompatible APK. After upgrading the OS to Android 12 or later, install the
+new release over the existing app to keep its data.
+
+## Historical debug-APK verification
 
 **Android 15 debug-APK verification:** native API 35 testing found that archive `ApplicationInfo.flags` can be zero even when the compiled manifest declares `android:debuggable="true"`. Version 0.1.2 therefore failed debug-APK rejection on API 35; package identity, version and signing-key checks still passed. Version 0.1.3 reads the compiled manifest through public Android resource APIs and fails closed if it cannot read it. The library's isolated harness passed ten native cases on each API 26 and API 35, including resource-valued flags. Raiun's 0.1.3 published-artifact verifier/provider suite passed nine tests on each API 26 and API 35. This includes rejection of the correctly signed debug fixture that previously failed on API 35. System-installer upgrade evidence is recorded in TESTING.md; these synthetic tests do not establish a production-signed phone upgrade.
 
@@ -65,3 +88,37 @@ Raiun independently verified the public 0.2.0 bundle, tag/source and seven paylo
 The local candidate consumes immutable updater 0.2.1. Its public Maven/source bundle SHA-256 is `cc528b338cb293851ccca3ff964ede320a9e63d0bf2b1c586f92cebb3926a9a6`; the AAR SHA-256 is `78d5f42c866c2430c52e858a653e8f54b1a4d344cefdd0762ea267e5e3b5373b`. Both the outer checksum and all seven payload pins were independently checked. Previous 0.2.0 vendor bytes remain in local project outputs.
 
 The patch cancels obsolete queued automatic downloads when there is no eligible candidate. Public APIs, internal test-constructor shape, runtime dependency versions, minimum API 26, namespaces, settings, cache/provider paths and app identity are unchanged. Publisher [quality](https://github.com/phillip9933/android-app-updater/actions/runs/40324634811) and [API 26/API 35 native](https://github.com/phillip9933/android-app-updater/actions/runs/40324634783) workflows passed on the released source; those are library results, not Raiun phone-upgrade evidence. Consumer validation and remaining physical higher-version acceptance are recorded in TESTING.md. No Raiun signing or publication is included.
+
+## Updater 1.0.0 adoption — 20 November 2026
+
+The public bundle SHA-256 is
+`13b0fa5df7524091191e063c9b25bdb4d222866053228754d98ea3f1d1e72763`.
+All seven payload checksums and the tag's source revision were verified. The
+released AAR SHA-256 is
+`5be67e6bc30c370347631d5a1f3208f11b6f807f3a1aef84f6a1d615cb414c70`.
+The new artifact keeps the existing public API and transitive dependency
+versions. It checks signing identity before manifest resources, selects an
+explicit eligible system installer, and tightens background retry, queued
+download and changed-asset handling.
+
+Raiun retains its foreground install button, permission flow, updater preferences
+and WorkManager configuration. A null installer result without an SDK error now
+shows the existing installer-unavailable message. The returned component and
+private file read grant pass directly to the foreground launcher.
+
+On disposable API 31 and API 35 emulators, the prior 0.2.1 host verified a
+synthetic cached APK before replacement with the 1.0.0 host. The same-code SDK
+replacement retained the cache, disabled automatic checks and downloads, beta
+channel, dismissed notice, denied install permission and private sentinel.
+The new manager also reconstructed from its persisted bootstrap after clearing
+its singleton. Each platform passed the seed and migration cases plus eleven
+scanner, verifier and provider cases. The opt-in
+`AppUpdate100MigrationAndroidTest` records this contract separately from the
+historical 0.1.3 namespace test.
+
+A separate disposable-emulator journey on both API levels prepared an explicit,
+exported system installer with `INSTALL_PACKAGES`, showed its confirmation,
+cancelled while retaining code 62, then explicitly confirmed the synthetic
+code 63 update. The private sentinel survived. These journeys used the existing
+Android debug test identity. Physical production-signed upgrades remain a
+separate acceptance check.

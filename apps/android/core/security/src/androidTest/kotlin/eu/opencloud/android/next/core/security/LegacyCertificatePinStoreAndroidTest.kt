@@ -46,6 +46,43 @@ class LegacyCertificatePinStoreAndroidTest {
             assertArrayEquals(published, target.readBytes())
         }
 
+    @Test fun matchingOrphanPublicationRetainsBothHostPolicies() =
+        withFixture { directory, preferences ->
+            val otherHost = "other.example.test"
+
+            fun restoreLegacyPins() {
+                assertTrue(
+                    preferences
+                        .edit()
+                        .putStringSet("pins.$HOST", setOf(PIN))
+                        .putStringSet("pins.$otherHost", setOf(OTHER_PIN))
+                        .commit(),
+                )
+            }
+            restoreLegacyPins()
+            assertEquals(setOf(PIN), LegacyCertificatePinStore(directory, preferences).pinsFor(HOST))
+            val target = File(directory, "legacy-v1.bin")
+            val pending = File(target.path + ".new")
+            val expected = target.readBytes()
+            assertTrue(target.renameTo(pending))
+            restoreLegacyPins()
+
+            assertEquals(setOf(PIN), LegacyCertificatePinStore(directory, preferences).pinsFor(HOST))
+            assertEquals(setOf(OTHER_PIN), LegacyCertificatePinStore(directory, preferences).pinsFor(otherHost))
+
+            assertFalse(preferences.contains("pins.$HOST"))
+            assertFalse(preferences.contains("pins.$otherHost"))
+            assertArrayEquals(expected, target.readBytes())
+            assertFalse(pending.exists())
+            assertTrue(target.delete())
+            val failure =
+                assertThrows(TransportPolicyException::class.java) {
+                    LegacyCertificatePinStore(directory, preferences).pinsFor(HOST)
+                }
+            assertEquals(OpenCloudError.Trust, failure.error)
+            assertFalse(pending.exists())
+        }
+
     @Test fun corruptionAfterMigrationRefusesTrustInsteadOfReturningAnUnpinnedPolicy() =
         withFixture { directory, preferences ->
             assertTrue(preferences.edit().putStringSet("pins.$HOST", setOf(PIN)).commit())

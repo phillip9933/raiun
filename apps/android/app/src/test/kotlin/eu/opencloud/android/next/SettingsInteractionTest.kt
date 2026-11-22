@@ -284,7 +284,7 @@ class SettingsInteractionTest {
     }
 
     @Test
-    @Config(sdk = [26, 35])
+    @Config(sdk = [31, 35])
     fun languageMenuOffersSupportedLanguagesAndPreservesRegionalChoice() {
         val language = mutableStateOf("")
         compose.setContent {

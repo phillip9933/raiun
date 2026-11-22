@@ -357,10 +357,7 @@ internal class VaultOfflineGroupPublisher(
         }
         val relative = source.relativePath.removePrefix(prefix)
         val plain = cipher.decryptPath(relative)
-        if (plain.split('/').any {
-                invalidPlainSegment(it)
-            }
-        ) {
+        if (plain.split('/').any(::isInvalidOfflinePlainSegment)) {
             integrity()
         }
     }
@@ -417,11 +414,6 @@ internal class VaultOfflineGroupPublisher(
         }
         return size
     }
-
-    private fun invalidPlainSegment(value: String): Boolean =
-        value.isBlank() || value in setOf(".", "..") || invalidPlainCharacters(value)
-
-    private fun invalidPlainCharacters(value: String): Boolean = '\\' in value || value.any(Char::isISOControl)
 
     private suspend fun resolveFailure(
         directory: File,

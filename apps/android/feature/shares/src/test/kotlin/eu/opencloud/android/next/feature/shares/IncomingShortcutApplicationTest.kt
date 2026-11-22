@@ -19,7 +19,7 @@ import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.SQLiteMode
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35])
+@Config(sdk = [31, 35])
 // Route/admission assertions do not cover native rasterization, fonts or SQLite behavior.
 @GraphicsMode(GraphicsMode.Mode.LEGACY)
 @SQLiteMode(SQLiteMode.Mode.LEGACY)

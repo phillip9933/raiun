@@ -25,7 +25,7 @@ import org.robolectric.annotation.GraphicsMode
 
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [26, 35], qualifiers = "w320dp-h640dp", application = Application::class)
+@Config(sdk = [31, 35], qualifiers = "w320dp-h640dp", application = Application::class)
 class EncryptedUnlockSettingsTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 

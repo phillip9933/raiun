@@ -35,7 +35,7 @@ import org.robolectric.annotation.Config
 
 /** Exercises the product sheet and real chooser/service; only synthetic credentials and local fixtures are used. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35], qualifiers = "w360dp-h800dp")
+@Config(sdk = [31, 35], qualifiers = "w360dp-h800dp")
 class ServerWebAppActionTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     private var localOpens = 0

@@ -32,7 +32,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [28], application = Application::class)
+@Config(sdk = [31], application = Application::class)
 class OrdinaryExportOwnerTest {
     @Test fun `accepted export retains original source and gate across account roundtrip`() =
         runBlocking {

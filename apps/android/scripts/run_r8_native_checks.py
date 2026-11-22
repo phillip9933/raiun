@@ -127,7 +127,7 @@ def parse_instrumentation(output: str) -> dict[str, int | str]:
 
 
 def gradle_base(project: Path, offline: bool) -> list[str]:
-    command = [str(project / "gradlew")]
+    command = [str(project / "gradlew"), "--stacktrace", "--max-workers=2"]
     if offline:
         command.append("--offline")
     return command
@@ -141,7 +141,7 @@ def main() -> int:
     parser.add_argument("--sdk", required=True, type=Path, help="Android SDK root")
     parser.add_argument("--serial", required=True, help="Explicit emulator serial, for example emulator-5554")
     parser.add_argument("--expected-avd", required=True, help="Exact AVD name expected on the serial")
-    parser.add_argument("--api", required=True, type=int, choices=(26, 35), help="Expected emulator SDK/API level")
+    parser.add_argument("--api", required=True, type=int, choices=(31, 35), help="Expected emulator SDK/API level")
     parser.add_argument("--offline", action="store_true", help="Pass Gradle --offline to every Gradle phase")
     parser.add_argument("--timeout-seconds", type=int, default=30 * 60,
                         help="Maximum duration for each build/instrumentation phase (default: 1800)")

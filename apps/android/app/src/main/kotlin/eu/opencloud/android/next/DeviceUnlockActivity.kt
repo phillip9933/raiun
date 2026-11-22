@@ -2,7 +2,6 @@ package eu.opencloud.android.next
 
 import android.app.Activity
 import android.app.KeyguardManager
-import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
@@ -48,25 +47,20 @@ class DeviceUnlockActivity : AppCompatActivity() {
                         errorCode: Int,
                         errString: CharSequence,
                     ) {
-                        if (errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON) showCredentials() else finish()
+                        finish()
                     }
                 },
             )
         if (savedInstanceState != null) return
         if (lock.biometricEnabled && lock.biometricAvailable) {
-            val builder =
+            val promptInfo =
                 BiometricPrompt.PromptInfo
                     .Builder()
                     .setTitle(getString(R.string.app_lock_unlock_biometric))
                     .setSubtitle(getString(R.string.app_lock_biometric_subtitle))
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                builder.setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL)
-            } else {
-                builder
-                    .setAllowedAuthenticators(BIOMETRIC_STRONG)
-                    .setNegativeButtonText(getString(R.string.app_lock_use_device_credentials))
-            }
-            prompt.authenticate(builder.build())
+                    .setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL)
+                    .build()
+            prompt.authenticate(promptInfo)
         } else {
             showCredentials()
         }

@@ -27,7 +27,7 @@ import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35])
+@Config(sdk = [31, 35])
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class VaultRootManagementTest {
     @After

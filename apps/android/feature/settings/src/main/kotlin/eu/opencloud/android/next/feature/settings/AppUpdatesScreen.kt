@@ -344,7 +344,12 @@ private fun UpdateInstallButton(manager: UpdateManager) {
             busy = true
             error = null
             try {
-                manager.prepareInstall()?.let { installer.launch(it) }
+                val intent = manager.prepareInstall()
+                if (intent != null) {
+                    installer.launch(intent)
+                } else if (manager.state.value.error == null) {
+                    error = R.string.updates_installer_error
+                }
             } catch (_: ActivityNotFoundException) {
                 error = R.string.updates_installer_error
             } catch (_: SecurityException) {

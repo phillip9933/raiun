@@ -80,7 +80,7 @@ substitute for those results. No production signing or publication is included.
 
 ## Preview and ordinary export ownership
 
-The local refactoring after Android 1.5.0 adds `OrdinaryExportOwnerTest` and `VaultPreviewActionsTest`. They cover account-epoch changes during export, one in-flight export across account round trips, cancelled preparation/provider writes, local-copy retention after failure, edit-buffer wiping before a save starts, late save results after replacing a preview, external-launch failures and lease cleanup after a cancelled download returns. The vault fixtures execute on Robolectric API 26 and API 35; they are not connected-native or physical-device tests. Successful external-copy fixtures initialize WorkManager just as the provider fixtures do.
+The local refactoring after Android 1.5.0 adds `OrdinaryExportOwnerTest` and `VaultPreviewActionsTest`. They cover account-epoch changes during export, one in-flight export across account round trips, cancelled preparation/provider writes, local-copy retention after failure, edit-buffer wiping before a save starts, late save results after replacing a preview, external-launch failures and lease cleanup after a cancelled download returns. The vault fixtures execute on Robolectric API 31 and API 35; they are not connected-native or physical-device tests. Successful external-copy fixtures initialize WorkManager just as the provider fixtures do.
 
 Run these together with `BrowserAccountContextTest`, `VaultViewModelTransferTest`, `VaultPreviewContentTest` and `VaultViewModelRaceTest` before the broader quality checks. Existing lock/provider/native checks remain relevant; these unit fixtures do not establish behavior for every external app or document provider.
 
@@ -92,7 +92,7 @@ See [OpenCloud 9 compatibility](OPENCLOUD-9.md) for the protocol scope, security
 
 ## Android emulator gates
 
-Run the connected instrumentation suites on **both API 26 and API 35**, matching the API matrix in the [emulator workflow](../../../.github/workflows/emulator.yml). The documented task list below is the release gate; ensure CI runs every listed module, including `core:sync`, on both API levels. The gate must pass on the exact release commit; historical runs on earlier commits do not establish that result.
+Run the connected instrumentation suites on **both API 31 and API 35**, matching the API matrix in the [emulator workflow](../../../.github/workflows/emulator.yml). The documented task list below is the release gate; ensure CI runs every listed module, including `core:sync`, on both API levels. The gate must pass on the exact release commit; historical runs on earlier commits do not establish that result.
 
 ```sh
 ./gradlew :app:connectedDebugAndroidTest \
@@ -183,7 +183,7 @@ After extraction on 2026-10-24, the standalone library passed all 40 host tests 
 
 Raiun then passed `ktlintCheck`, `detekt`, all 1,348 remaining host tests (zero failures or skips), screenshot verification, release lint and debug/unsigned release assembly against the pinned 0.1.0 artifact. Engine tests moved to the library rather than being dropped. The merged manifest contains exactly one nonexported updater provider, with read grants scoped to `cache/updates/`. In isolated copies, Gradle rejected both a modified AAR and an unlisted Maven file before resolution. The artifact/source bundle is pinned and no sibling source path is used. These are local results; no GitHub CI or native signed installation is claimed. See [library integration](APP-UPDATES.md).
 
-Before release, test the complete upgrade with two consecutively versioned APKs using the original signing identity on API 26 and API 35, plus a physical phone. Automated metadata-policy tests do not establish native APK signature enforcement or a successful system installation.
+Before release, test the complete upgrade with two consecutively versioned APKs using the original signing identity on API 31 and API 35, plus a physical phone. Automated metadata-policy tests do not establish native APK signature enforcement or a successful system installation.
 
 - In Settings → App updates, check manually, switch channels, and disable automatic checks. The current release should report no newer release until a newer eligible Android APK exists. Desktop releases must never appear.
 - With a newer eligible release, read its notes, dismiss it with Later, download it, cancel, and retry. Automatic download must wait for unmetered Wi-Fi; manual download may use cellular.
@@ -955,3 +955,68 @@ No real KeyChain identity, private deployment, Wi-Fi SSID or account is required
 Physical network transitions, browser/IdP behavior and system certificate
 provisioning remain separate acceptance boundaries. Exact current results belong
 in the task evidence rather than being inferred from these fixture descriptions.
+
+### Android 1.6.0 post-merge CI failure
+
+The [API 26 run on the 1.6.0 merge commit](https://github.com/phillip9933/raiun/actions/runs/42358443102/job/128361517365)
+recorded 98 passing regular instrumentation cases and seven explicit skips.
+The job failed during `:app:packageR8Validation`, before the optimized
+instrumentation suite ran. The retained log ends at Gradle's packaging worker
+exception, so the underlying cause remains undetermined. The optimized runner
+now records Gradle stack traces and uses the same two-worker limit as the
+regular instrumentation build.
+
+### Local scanner and updater 1.0.0 integration — 20 November 2026
+
+Both stable SDK bundles were verified against public release hashes and all
+consumed artifact pins. The scanner's new processing classes are combined with
+the exact previously reviewed OpenCV native bytes under the new
+`app.raiun.vendor:scanner-processing-opencv:1.0.0-raiun-native.1` coordinate.
+The app continues to require API 31.
+
+All 33 focused host executions passed: 23 updater UI/lifecycle/persistence cases,
+four scanner-location cases and six German scanner-resource cases.
+App/settings formatting and static analysis, release lint, debug and
+instrumentation assembly, and unsigned optimized release assembly passed.
+Native integrity checks verified all 20 packaged libraries in both debug and
+release APKs. The 33 native-inventory and eleven runtime-advisory checker
+regressions also passed.
+
+Each disposable API 31/API 35 emulator passed an old-0.2.1 state seed, the
+1.0.0 same-code host replacement, and eleven scanner/verifier/provider cases.
+Migration retains disabled checks/downloads, channel, dismissal, cached APK,
+denied install permission and a private sentinel. Bootstrap reconstruction is
+tested after clearing the SDK singleton. A separate native installer journey
+on each API verified cancellation, explicit confirmation, system handler
+admission and private-data retention through a synthetic code 62-to-63 update.
+The journey uses the Android debug test identity.
+
+Evidence is retained in project outputs under
+`android-library-upgrades-20261120/`, with public bundle receipts under
+`android-updater-1.0.0-20261120/` and
+`android-scanner-1.0.0-20261120/`.
+These are local consumer checks. Physical camera quality, ARM64 execution and
+production-signed phone upgrade acceptance remain separate from this run.
+
+## Scanner 1.1.0 local integration — 20 November 2026
+
+The local candidate consumes five scanner 1.1.0 modules and keeps OCR disabled.
+The source-bound processing substitute retains all 1.1.0 Java code while replacing
+only the two OpenCV libraries with the identical reviewed native backport.
+The installer ZIP, Gradle metadata/runtime pins, notices and native inventory
+must agree; see [scanner setup](OFFLINE-SCANNER-SDK.md) and the source-bound
+[repackaging proof](../third_party/native-security-fixes/provenance/scanner-1.1.0-repackaging.json).
+
+Focused host coverage is `ScannerLocationGoldenTest` and
+`ScannerGermanResourcesTest`. Packaged integration uses
+`ScannerSdkIntegrationAndroidTest` on API31/API35 for full-resolution JPEG,
+multipage PDF, diagnostics-off output and cancellation cleanup. These cases
+exercise the packaged native processor without a camera; they do not measure
+handheld corner detection, Auto image quality, ARM64 timing or real uploads.
+Keep those checks separate from the scanner publisher's synthetic benchmarks.
+
+Project-container evidence and test APKs are under
+`outputs/android-scanner-1.1.0-20261120/`. That directory's results and source
+manifest identify the tested candidate; earlier 1.0.0 results are historical.
+The local test version is 1.6.1-test.2/code64, requiring Android 12 or newer.
+No publication is part of this integration.

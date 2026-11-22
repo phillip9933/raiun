@@ -20,7 +20,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35])
+@Config(sdk = [31, 35])
 class LaunchIntentViewModelTest {
     @Test fun unprocessedCallbackSurvivesRecreationWithoutEnteringSavedState() {
         val controller = Robolectric.buildActivity(ComponentActivity::class.java, callback()).setup()

@@ -38,7 +38,7 @@ import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35], shadows = [DirectoryAwareLinuxShadow::class])
+@Config(sdk = [31, 35], shadows = [DirectoryAwareLinuxShadow::class])
 class TlsPolicyTest {
     @get:Rule val directoryModel = DirectoryLinuxModelRule()
     private val context: Context = RuntimeEnvironment.getApplication()

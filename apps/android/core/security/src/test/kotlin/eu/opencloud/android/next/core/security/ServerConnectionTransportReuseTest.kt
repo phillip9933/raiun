@@ -9,17 +9,25 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowNetwork
 
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [31, 35])
 class ServerConnectionTransportReuseTest {
     private val context get() = RuntimeEnvironment.getApplication()
 
-    @After fun retireTransports() = ScopedTransportCache.invalidateAll()
+    @Before fun resetMonitor() = resetWifiServerNetworkMonitor()
+
+    @After fun retireTransports() {
+        resetWifiServerNetworkMonitor()
+        ScopedTransportCache.invalidateAll()
+    }
 
     @Test fun `unchanged route retains DNS socket factory and pool with independent caller dispatchers`() {
         val router = ServerConnectionRoute(context)
@@ -139,4 +147,12 @@ class ServerConnectionTransportReuseTest {
     private companion object {
         const val SERVER = "https://cloud.example.test"
     }
+}
+
+/** Robolectric can reuse the sandbox's statics with a different application and system services. */
+internal fun resetWifiServerNetworkMonitor() {
+    WifiServerNetworkMonitor::class.java
+        .getDeclaredField("processInstance")
+        .apply { isAccessible = true }
+        .set(null, null)
 }

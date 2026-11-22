@@ -28,7 +28,7 @@ Both updater-verification APKs and the separate incoming-share provider APK are 
 
 Preserve that standalone APK, mapping and merged configuration before building the instrumentation target. The test harness has a separate opt-in for AndroidX tracing/Kotlin helper methods and the updater verifier's test-only reflection seam. Those rules must not be used for standalone size or native-probe acceptance. They are not production requirements. The current harness also needs an exact compiled test-to-target ABI inventory, described below; the two opt-in flags alone do not retain every method called by the separate test APK.
 
-On each explicitly selected disposable API 26/API 35 emulator, build and run the app's native suite with the explicit harness property:
+On each explicitly selected disposable API 31/API 35 emulator, build and run the app's native suite with the explicit harness property:
 
 ```sh
 ANDROID_SERIAL=<authorized-emulator-serial> ./gradlew \

@@ -325,7 +325,7 @@ internal fun VaultDownloadJob.decryptedOfflineEntry(cipher: VaultCipherEngine): 
             source.relativePath.removePrefix("${location.vaultPath}/")
         }
     val path = cipher.decryptPath(relative)
-    if (path.split('/').any { invalidOfflineSegment(it) }) {
+    if (path.split('/').any(::isInvalidOfflinePlainSegment)) {
         throw eu.opencloud.android.next.core.network.OpenCloudException(
             eu.opencloud.android.next.core.network.OpenCloudError.DownloadIntegrity,
         )
@@ -340,10 +340,4 @@ internal fun VaultDownloadJob.decryptedOfflineEntry(cipher: VaultCipherEngine): 
         source.size,
         source.strongETag,
     )
-}
-
-private fun invalidOfflineSegment(segment: String): Boolean {
-    val traversal = segment.isBlank() || segment in setOf(".", "..")
-    val malformed = '\\' in segment || segment.any(Char::isISOControl)
-    return traversal || malformed
 }

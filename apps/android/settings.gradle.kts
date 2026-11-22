@@ -82,7 +82,7 @@ dependencyResolutionManagement {
         }
         maven {
             name = "OfflineScannerRelease"
-            url = uri(rootDir.resolve(".gradle/open-android-doc-scanner-0.8.0-beta.1/maven"))
+            url = uri(rootDir.resolve(".gradle/open-android-doc-scanner-1.1.0/maven"))
             content {
                 includeGroup("dev.offlinescan")
             }

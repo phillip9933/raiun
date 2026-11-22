@@ -22,4 +22,4 @@ After installing the pinned scanner SDK, run `scripts/validate-locale-resources.
 
 Check text fit, enlarged fonts, language selection, switching back to System default, plural counts, scanner screens, and security confirmations on a phone. Structural validation alone is not a linguistic or physical-device review.
 
-The local scanner pin is 0.8.0-beta.1. Its scanner UI AAR is byte-identical to 0.7.0, so the existing resource overlays remain applicable; run the validator against the newly pinned cache. OCR is a separate module and is not included in Raiun by this update.
+The scanner pin is 1.1.0. Keep checking locale overlays against the English definitions in the installed, pinned scanner AAR and review the capture, review and save UI when upgrading. OCR is a separate module and is not included in Raiun.

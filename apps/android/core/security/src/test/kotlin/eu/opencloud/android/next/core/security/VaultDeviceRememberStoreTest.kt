@@ -24,7 +24,7 @@ class VaultDeviceRememberStoreTest {
     @get:Rule val temporaryFolder = TemporaryFolder()
 
     @Test
-    @Config(sdk = [26])
+    @Config(sdk = [31])
     fun unsupportedPlatformRejectsKeyCreationBeforeKeystoreAccess() {
         val crypto = AndroidVaultDeviceRememberCrypto()
         assertFalse(crypto.isPlatformSupported())

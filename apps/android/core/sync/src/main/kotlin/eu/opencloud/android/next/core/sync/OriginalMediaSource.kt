@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.AssetFileDescriptor
 import android.net.Uri
-import android.os.Build
 import android.os.CancellationSignal
 import android.provider.MediaStore
 import android.system.ErrnoException
@@ -32,7 +31,7 @@ fun isEligibleOriginalMediaSource(
     uri: Uri,
 ): Boolean =
     when {
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || uri.scheme != "content" -> false
+        uri.scheme != "content" -> false
         uri.authority == MediaStore.AUTHORITY -> isMediaCollectionItem(uri) && isImage(context, uri)
         // Keep the picker-granted document URI as the selected source. MediaDocumentsProvider
         // chooses the representation it exposes; converting it to MediaStore would change the
@@ -74,8 +73,7 @@ internal fun requestsOriginalMedia(
     context: Context,
     uri: Uri,
 ): Boolean =
-    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-        isEligibleOriginalMediaSource(context, uri) &&
+    isEligibleOriginalMediaSource(context, uri) &&
         context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED
 
 /** Provider metadata can describe the redacted representation while reads return the original. */
@@ -91,7 +89,7 @@ fun openUploadSource(
     uri: Uri,
 ): InputStream {
     val original =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && requestsOriginalMedia(context, uri)) {
+        if (requestsOriginalMedia(context, uri)) {
             MediaStore.setRequireOriginal(uri)
         } else {
             uri
@@ -109,7 +107,7 @@ internal fun openIncomingUploadSource(
     pollReady: (StructPollfd, Int) -> Boolean = { descriptor, timeout -> Os.poll(arrayOf(descriptor), timeout) > 0 },
 ): InputStream {
     val source =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && requestsOriginalMedia(context, uri)) {
+        if (requestsOriginalMedia(context, uri)) {
             MediaStore.setRequireOriginal(uri)
         } else {
             uri

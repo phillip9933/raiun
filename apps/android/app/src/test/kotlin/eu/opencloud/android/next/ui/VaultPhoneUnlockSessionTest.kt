@@ -43,7 +43,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35])
+@Config(sdk = [31, 35])
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class VaultPhoneUnlockSessionTest {
     private val application: Application get() = ApplicationProvider.getApplicationContext()

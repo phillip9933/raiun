@@ -22,3 +22,9 @@ The libyuv notice is retained from the official Android upstream [LICENSE](https
 No reuse-candidate application UI source was copied. DocQuad preprocessing and heatmap decoding conventions informed a new Kotlin adapter. OpenCV Java classes for excluded modules remain in the upstream wrapper JAR, but those native methods are unsupported; the public scanner API exposes no OpenCV types. Benchmark images are synthetic and contain no personal documents.
 
 This technical attribution inventory is not a legal certification. Preserve all upstream notices and review dependency changes against the actual final packaged graph.
+
+## Optional OCR module (0.8.0 development)
+
+`scanner-ocr-tesseract` includes Java/JNI bindings from [Tesseract4Android 4.9.0](https://github.com/adaptech-cz/Tesseract4Android/tree/4.9.0) (Apache-2.0 Java/JNI wrapper), Tesseract 5.5.3 with local model-parser fixes (Apache-2.0), Leptonica 1.85.0 (BSD-style), libjpeg 9f (IJG) and libpng 1.6.59 (libpng license). These dependencies are optional for SDK integrations and included in the sample app for OCR testing. Retain upstream bundled notices when redistributing the optional engine. Host-supplied language models have their own provenance and licensing; the pinned tessdata_fast English/Japanese test models are Apache-2.0 and appear only in test build output. See [OCR integration](docs/OCR.md).
+
+The OCR binaries are rebuilt rather than taken from the upstream 4.9.0 AAR. See `tools/build_ocr_native.py` and `evidence/ocr-native-build.json` for source archive hashes, patches and binary provenance. License texts are packaged under `third_party_licenses/ocr`.

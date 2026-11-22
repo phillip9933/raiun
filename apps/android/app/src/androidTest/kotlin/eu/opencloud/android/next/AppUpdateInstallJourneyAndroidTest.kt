@@ -1,8 +1,10 @@
 package eu.opencloud.android.next
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
@@ -122,6 +124,16 @@ class AppUpdateInstallJourneyAndroidTest {
             assertEquals("content", intent.data?.scheme)
             assertEquals("${context.packageName}.android-updates", intent.data?.authority)
             assertTrue(intent.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+            val component = requireNotNull(intent.component)
+
+            @Suppress("DEPRECATION")
+            val handler = context.packageManager.getActivityInfo(component, 0)
+            assertTrue(handler.exported)
+            assertTrue(handler.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM != 0)
+            assertEquals(
+                PackageManager.PERMISSION_GRANTED,
+                context.packageManager.checkPermission(Manifest.permission.INSTALL_PACKAGES, component.packageName),
+            )
 
             val status = File(context.filesDir, "synthetic-updater-install-status.json")
 
@@ -196,7 +208,7 @@ class AppUpdateInstallJourneyAndroidTest {
     @Suppress("DEPRECATION")
     private fun installedVersionCode(context: Context): Long {
         val info = context.packageManager.getPackageInfo(context.packageName, 0)
-        return if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+        return info.longVersionCode
     }
 
     private fun sha256(file: File): String =

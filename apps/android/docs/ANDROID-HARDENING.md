@@ -69,7 +69,7 @@ The Android API checks the launch-time permission snapshot for URIs actually car
 
 Recreation checks the original launch again instead of restoring an approval boolean. A forced `onNewIntent` delivery is visibly rejected, preserving the original intent, caller and batch. The Activity does not rebind them with `setIntent`; see [Activity.getCaller](https://developer.android.com/reference/android/app/Activity#getCaller()). Existing private-provider restrictions, user upload confirmation, staging limits and cancellation remain authoritative.
 
-API 26–34 retain the existing incoming-share flow and cannot establish this general `startActivity` caller proof. A readable source on those versions must not be described as verified sender provenance. The newer check does not identify the original human sender or establish permission across every chooser/profile forwarding chain.
+Supported devices on API 31–34 retain the incoming-share flow without this general `startActivity` caller proof. A readable source on those versions must not be described as verified sender provenance. The newer check does not identify the original human sender or establish permission across every chooser/profile forwarding chain.
 
 ## Validation boundaries
 

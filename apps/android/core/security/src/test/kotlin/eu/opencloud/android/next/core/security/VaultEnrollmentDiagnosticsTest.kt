@@ -57,7 +57,7 @@ class VaultEnrollmentDiagnosticsTest {
     }
 
     @Test
-    @Config(sdk = [26])
+    @Config(sdk = [31])
     fun publicKeystoreCodeIsAbsentBeforeApi33() {
         val result = classifyEnrollmentCryptoFailure(keystoreError("private provider detail"))
 

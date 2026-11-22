@@ -111,6 +111,9 @@ private fun hasInvalidNameStructure(name: String): Boolean {
     return traversal || separator || name.any(Char::isISOControl)
 }
 
+internal fun isInvalidOfflinePlainSegment(segment: String): Boolean =
+    segment.isBlank() || hasInvalidNameStructure(segment)
+
 internal fun vaultFolderName(name: String): String {
     val safeName = validateSingleName(name.removeSuffix(".vault"))
     return "$safeName.vault"
