@@ -4,7 +4,7 @@ Run build and packaging commands from `apps/android`. See the [coordinated relea
 
 For each release, freeze features and verify the app version name and strictly increasing version code before validation. Run the quality checks and Android emulator matrix on the exact commit intended for the release. Review all failures; do not silently waive checks. Build with development credentials empty, verify package/version, APK signature, the original release-certificate fingerprint and 16-KiB ZIP/native alignment. Publish only artifacts built from that validated commit, with release notes, known limitations, third-party notices and SHA256SUMS. A release tag must point to the validated commit.
 
-The emulator gate covers API 26 and API 35. Run the full connected instrumentation task list on both versions, including app, crypto, security, sync, database, documents provider, UI and files. CI results are useful evidence but do not replace the owner's supported-device acceptance. Record which checks ran, the exact revision and any remaining limitations without including private URLs or local machine paths.
+The emulator gate covers API 31 (Android 12, the minimum) and API 35 (Android 15). Run the full connected instrumentation task list on both versions, including app, crypto, security, sync, database, documents provider, UI and files. CI results are useful evidence but do not replace the owner's supported-device acceptance. Record which checks ran, the exact revision and any remaining limitations without including private URLs or local machine paths.
 
 ## Signing on Linux
 
@@ -23,6 +23,11 @@ The engine is an explicitly pinned standalone library; see [ownership, artifact 
 The updater reads this repository's public release list and selects Android releases only. Publish a release with tag `android-v<version>` and exactly one signed universal APK named `raiun-android-<version>.apk`. Do not attach debug, test or unsigned APKs to that release. The APK version name must match the tag suffix. Its version code must increase across all distributed builds, including beta builds, and it must retain the original application ID and release signing identity.
 
 Mark beta tags such as `android-v1.0.1-beta.1` as GitHub prereleases. The Stable channel excludes prereleases; Stable and beta selects the highest eligible semantic version. Changing channels never authorizes a downgrade. Desktop tags and assets are excluded. Legacy `v0.9.3` is recognized only as a migration fallback.
+
+For the first release with the API 31 minimum, put **Requires Android 12 or
+newer** near the top of the release notes and link to Android 1.6.0 for
+Android 8–11 users. The installed 1.6.0 updater can still offer a newer tag
+on older devices. See the [older-device updater behavior](APP-UPDATES.md#android-12-minimum).
 
 GitHub asset metadata supplies a SHA-256 digest for current uploads. Keep SHA256SUMS for independent manual verification as well. The updater streams into a private partial file, checks exact size and any advertised digest, validates APK metadata/signers, and publishes a verified cache file. It repeats the verification immediately before opening Android's installer. A different signing identity must produce a clear rejection; never advise uninstalling the app to make an update install.
 

@@ -25,6 +25,7 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -50,7 +51,12 @@ import java.util.concurrent.atomic.AtomicInteger
 class ScopedTransportReuseTest {
     @get:Rule val temporary = TemporaryFolder()
 
-    @After fun retireTestTransports() = ScopedTransportCache.invalidateAll()
+    @Before fun resetMonitor() = resetWifiServerNetworkMonitor()
+
+    @After fun retireTestTransports() {
+        resetWifiServerNetworkMonitor()
+        ScopedTransportCache.invalidateAll()
+    }
 
     @Test fun `independent clients reuse all TLS parts and preserve cancellation and request policies`() {
         val source = FakeIdentitySource(identity("synthetic-client-cert.pem"))
@@ -75,7 +81,7 @@ class ScopedTransportReuseTest {
     }
 
     @Test
-    @Config(sdk = [28])
+    @Config(sdk = [31])
     fun `composed TLS policy reuses certificate and active local route transports across owners`() {
         val context = RuntimeEnvironment.getApplication()
         configureLocalWifi(context)
@@ -253,7 +259,7 @@ class ScopedTransportReuseTest {
         assertEquals(ScopedTransportCache.MAX_ENTRIES, ScopedTransportCache.size())
     }
 
-    @Suppress("DEPRECATION") // API 28 fixture exercises the supported legacy SSID observation path.
+    @Suppress("DEPRECATION") // Fixture exercises the SSID fallback when capabilities omit WifiInfo.
     private fun configureLocalWifi(context: Application) {
         Shadows.shadowOf(context).grantPermissions(Manifest.permission.ACCESS_FINE_LOCATION)
         val location = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager

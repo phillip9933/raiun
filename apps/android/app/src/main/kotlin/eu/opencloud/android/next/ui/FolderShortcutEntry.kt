@@ -30,7 +30,7 @@ internal fun FolderShortcutEntry(
     requestId: Long?,
     activeAccount: String?,
     restoringSession: Boolean,
-    switchAccount: (String) -> Unit,
+    switchAccount: suspend (String) -> Boolean,
     open: (ResourceEntity) -> Unit,
     onUnavailable: () -> Boolean,
     isCurrent: () -> Boolean,
@@ -49,10 +49,10 @@ internal fun FolderShortcutEntry(
         try {
             val shared = SharedFolderShortcutTarget.parse(uri)
             if (shared != null) {
+                withContext(Dispatchers.IO) { access.resolveShared(shared) }
                 if (activeAccount != shared.request.account) {
                     callbacks.switchTo(shared.request.account)
                 } else {
-                    withContext(Dispatchers.IO) { access.resolveShared(shared) }
                     callbacks.openSharedFolder(shared.request)
                 }
                 return@LaunchedEffect
@@ -84,14 +84,14 @@ internal fun FolderShortcutEntry(
 }
 
 private class FolderShortcutCallbacks(
-    private val switchAccount: (String) -> Unit,
+    private val switchAccount: suspend (String) -> Boolean,
     private val open: (ResourceEntity) -> Unit,
     private val onUnavailable: () -> Boolean,
     private val isCurrent: () -> Boolean,
     private val openShared: (SharedFolderRequest) -> Unit,
 ) {
-    fun switchTo(account: String) {
-        if (isCurrent()) switchAccount(account)
+    suspend fun switchTo(account: String) {
+        if (isCurrent()) check(switchAccount(account))
     }
 
     fun openFolder(resource: ResourceEntity) {

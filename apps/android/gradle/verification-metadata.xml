@@ -6718,5 +6718,197 @@
             <sha256 value="0f0eabe993181062e10ae511e1a1ff531461e54333b0644e991b5e6a294491af" origin="Raiun source-bound native security backport; see third_party/native-security-fixes"/>
          </artifact>
       </component>
+      <component group="io.github.phillip9933" name="android-updater" version="1.0.0">
+         <artifact name="android-updater-1.0.0-sources.jar">
+            <sha256 value="4b81fc8f2bd03275269fff4012a1d0b82e414cfd6849386604a6fd0265e4f7ac" origin="Verified public updater v1.0.0 bundle 13b0fa5df7524091191e063c9b25bdb4d222866053228754d98ea3f1d1e72763"/>
+         </artifact>
+         <artifact name="android-updater-1.0.0.aar">
+            <sha256 value="5be67e6bc30c370347631d5a1f3208f11b6f807f3a1aef84f6a1d615cb414c70" origin="Verified public updater v1.0.0 bundle 13b0fa5df7524091191e063c9b25bdb4d222866053228754d98ea3f1d1e72763"/>
+         </artifact>
+         <artifact name="android-updater-1.0.0.module">
+            <sha256 value="0dfd37ff4da99d1148889dee8a0a2d0b915b5447fcd40e0a54f1c3b71db95426" origin="Verified public updater v1.0.0 bundle 13b0fa5df7524091191e063c9b25bdb4d222866053228754d98ea3f1d1e72763"/>
+         </artifact>
+         <artifact name="android-updater-1.0.0.pom">
+            <sha256 value="803a2f644c359916fcffc4bcb8796cac423439675edf0479222d9232e051330b" origin="Verified public updater v1.0.0 bundle 13b0fa5df7524091191e063c9b25bdb4d222866053228754d98ea3f1d1e72763"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-camera" version="1.0.0">
+         <artifact name="scanner-camera-1.0.0-sources.jar">
+            <sha256 value="0abdb16714d83087022a20fa01f5f80814cd630a1273057b29a7a9cc158e14e6" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-camera-1.0.0.aar">
+            <sha256 value="5f3bd7f199fb12e1036986a978866ef47968f88fe8d737722ff0b0ca5137cef5" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-camera-1.0.0.module">
+            <sha256 value="a374b62337aee7f9b26342ab97d78e8cbd05a8c20fdc4a8e9398141c3fca8ff7" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-camera-1.0.0.pom">
+            <sha256 value="a2b32d7813d4bbf88e8b9a706a491a6e2d90fbb141b76ddd23e63332396ee7e0" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-core" version="1.0.0">
+         <artifact name="scanner-core-1.0.0.jar">
+            <sha256 value="c229b09659361a2606a40a268ba8b864f26281128f1111664849e8e5e797866d" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-core-1.0.0.module">
+            <sha256 value="0e3e261c166bc0cd581bd981ee156f0d622097e994c6d0a506d9f9054a0e895f" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-core-1.0.0.pom">
+            <sha256 value="c9144f69f2feabeac02fe054338a774b9d39b5d38c8d8e52b75c6de3e6630e2e" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-export" version="1.0.0">
+         <artifact name="scanner-export-1.0.0-sources.jar">
+            <sha256 value="c95bd09c51b8f17ddb717332ccbb474c43b178881fa5b393691f05970e963915" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-export-1.0.0.aar">
+            <sha256 value="29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-export-1.0.0.module">
+            <sha256 value="ed0c94930d15c0b7fb7e800b2600fcb9df25ec9205561e18aa6c8aa7d454d003" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-export-1.0.0.pom">
+            <sha256 value="d7b10fa1ac31e77b5d57189fe543e3c79710f2265c8358c9b8480bfbc8fb99c8" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-ocr-tesseract" version="1.0.0">
+         <artifact name="scanner-ocr-tesseract-1.0.0-sources.jar">
+            <sha256 value="5017db10066faf30b5197da54500dc51b34c187cd299fd77d7d51b0495ae81f1" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-ocr-tesseract-1.0.0.aar">
+            <sha256 value="9124977c545c1a8d647279d4630ae57b0ad293c32dcca4460dceda59a67cb31a" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-ocr-tesseract-1.0.0.module">
+            <sha256 value="7b1248a7e3780ba4a5941658af5bc277710d75974d43d6e662ff9270269830d4" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-ocr-tesseract-1.0.0.pom">
+            <sha256 value="43319df88526917ec6dc31234054c043a9f24281fc64c2dedfff5027362850bc" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-processing-opencv" version="1.0.0">
+         <artifact name="scanner-processing-opencv-1.0.0-sources.jar">
+            <sha256 value="d8dc4321a81329b7f90ec78cf0458c42c2cfe2be783f7a23c4b301104782c61e" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-processing-opencv-1.0.0.aar">
+            <sha256 value="5b995c373d3fa53f1e8f88c7638a0bd7b009ce530021a311c6c9287cadc50420" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-processing-opencv-1.0.0.module">
+            <sha256 value="0355541256ac5e859889ff3850954cb9068b6fed5fbee98729e483169178ebbb" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-processing-opencv-1.0.0.pom">
+            <sha256 value="5e99e7e4b931ee3eb47055b2ead7aab4c3b9dc7db8e207c63f2d721d58288437" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-ui-compose" version="1.0.0">
+         <artifact name="scanner-ui-compose-1.0.0-sources.jar">
+            <sha256 value="c27b71758aa69f056ce0241b1e1d624911a3bf49240f50da4d45e260504a9a2c" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-ui-compose-1.0.0.aar">
+            <sha256 value="ff92b0d0da186ede0f219d136d94839a745ea3c72666fc5a7fd1b48d8ccbc008" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-ui-compose-1.0.0.module">
+            <sha256 value="bc17a1256e825060c23b3fae08d794f240163ed36fa6f10adf5a6f993bfaeedc" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+         <artifact name="scanner-ui-compose-1.0.0.pom">
+            <sha256 value="d23e3734ae7ff285c3ceecc971dc0f09357bc1d6df8b932d6ab66db40e04f48e" origin="Verified scanner v1.0.0 archive 0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"/>
+         </artifact>
+      </component>
+      <component group="app.raiun.vendor" name="scanner-processing-opencv" version="1.0.0-raiun-native.1">
+         <artifact name="scanner-processing-opencv-1.0.0-raiun-native.1.aar">
+            <sha256 value="7c0deb1ef4672c3fe67adad25f2bbe25447e88759c9c2592902ff8e19a0e81cb" origin="Raiun scanner 1.0.0 native repackaging; see third_party/native-security-fixes/provenance/scanner-1.0.0-repackaging.json"/>
+         </artifact>
+         <artifact name="scanner-processing-opencv-1.0.0-raiun-native.1.pom">
+            <sha256 value="880bbd12c36f5dc845af90bd1efdac20411368bb8903e0dd42d1db4711e7cb69" origin="Raiun scanner 1.0.0 native repackaging; see third_party/native-security-fixes/provenance/scanner-1.0.0-repackaging.json"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-camera" version="1.1.0">
+         <artifact name="scanner-camera-1.1.0-sources.jar">
+            <sha256 value="dc4e4d351972de2f39d26d36cc332245be26a49f24d3d6216ba70afc9042c2c3" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-camera-1.1.0.aar">
+            <sha256 value="ea9aa72a2789865e02df7c8fad5d0ffdd4e422e74f4fced3f06d00736b32037a" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-camera-1.1.0.module">
+            <sha256 value="a2a7f5ac5ff643195f594791205cc7e78c5d0b083a8904c9912d724ef4518dfe" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-camera-1.1.0.pom">
+            <sha256 value="2da4383f3194587c036fa45afbbb32ac94d8a1675274bc45686246c729df1874" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-core" version="1.1.0">
+         <artifact name="scanner-core-1.1.0.jar">
+            <sha256 value="e12ad5ff2b7bb051a7848d474f53613ab1fd499de7ddb193ff515938760a8978" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-core-1.1.0.module">
+            <sha256 value="6116e8bc5279c6ea1463a9f63a02df82ca75436e21e403014d8f384c372f5d24" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-core-1.1.0.pom">
+            <sha256 value="24f7270d1945ddb8a188d4052cdae22860dd0c8ba52553a20a7337747055d617" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-export" version="1.1.0">
+         <artifact name="scanner-export-1.1.0-sources.jar">
+            <sha256 value="c95bd09c51b8f17ddb717332ccbb474c43b178881fa5b393691f05970e963915" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-export-1.1.0.aar">
+            <sha256 value="29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-export-1.1.0.module">
+            <sha256 value="f0c4d09401031750e596da93d070f5055ef977a12c9e53dfbb8a93d143893310" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-export-1.1.0.pom">
+            <sha256 value="f4d4d9d10cfe7c8135eed6e522116312886b5a5c8ebaf0b73d819e6e8400b4f8" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-ocr-tesseract" version="1.1.0">
+         <artifact name="scanner-ocr-tesseract-1.1.0-sources.jar">
+            <sha256 value="5017db10066faf30b5197da54500dc51b34c187cd299fd77d7d51b0495ae81f1" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-ocr-tesseract-1.1.0.aar">
+            <sha256 value="9124977c545c1a8d647279d4630ae57b0ad293c32dcca4460dceda59a67cb31a" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-ocr-tesseract-1.1.0.module">
+            <sha256 value="be3aafa438efcc2324a7c2545df67e74663eb11f8e8b4fe62a5ff0800e4b17de" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-ocr-tesseract-1.1.0.pom">
+            <sha256 value="4584dbb9a33d16a63a5e8470f01b5476555acdc51e89830e68314e66d1013ab8" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-processing-opencv" version="1.1.0">
+         <artifact name="scanner-processing-opencv-1.1.0-sources.jar">
+            <sha256 value="2fccdd121bc6359a3cf387162d9531835dbc77f627aa8cadf01dae823c81bc3c" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-processing-opencv-1.1.0.aar">
+            <sha256 value="7e7f1e4ca0bef87a5f55d90b4dcb8f98b4e05d0d60de0787fccb33e3cbeaa423" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-processing-opencv-1.1.0.module">
+            <sha256 value="9ce1f063502779cb086c87bb5ede460a9931e482424dcf101dd39cf3429a633d" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-processing-opencv-1.1.0.pom">
+            <sha256 value="ba5acf7a6b071cdf44c4ea6d4e982c770ebc680e3857a8f730c177a0407d51e8" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+      </component>
+      <component group="dev.offlinescan" name="scanner-ui-compose" version="1.1.0">
+         <artifact name="scanner-ui-compose-1.1.0-sources.jar">
+            <sha256 value="b45a7608627bcb5af92154d2c2e0cf38d6c606875874ea96e6112b02835dd86a" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-ui-compose-1.1.0.aar">
+            <sha256 value="dd58afc7a9d7b2c6c96d2f9387e19f84ba237c7269b913a2e86e9371e27714b8" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-ui-compose-1.1.0.module">
+            <sha256 value="d218dc9b9a1d64e980af8b633750c4b49bf7583e36ba61ef6c03012532c631b0" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+         <artifact name="scanner-ui-compose-1.1.0.pom">
+            <sha256 value="0dca009d94ceb8a2641e0e8da9ad6b7d41029e997ec16c9f054296248d2d57e3" origin="Verified scanner v1.1.0 archive caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82"/>
+         </artifact>
+      </component>
+      <component group="app.raiun.vendor" name="scanner-processing-opencv" version="1.1.0-raiun-native.1">
+         <artifact name="scanner-processing-opencv-1.1.0-raiun-native.1.aar">
+            <sha256 value="534c7cb90938e3fe06322d1e8e613b600778158397d81c55b61263981740554f" origin="Raiun scanner1.1.0 native repackaging; third_party/native-security-fixes/provenance/scanner-1.1.0-repackaging.json"/>
+         </artifact>
+         <artifact name="scanner-processing-opencv-1.1.0-raiun-native.1.pom">
+            <sha256 value="93f19daee1511dd5cc9af899949fa4ce107b70255cc911c9d219862855c96107" origin="Raiun scanner1.1.0 native repackaging; third_party/native-security-fixes/provenance/scanner-1.1.0-repackaging.json"/>
+         </artifact>
+      </component>
    </components>
 </verification-metadata>

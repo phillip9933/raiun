@@ -101,7 +101,7 @@ internal fun incomingShareUris(intent: Intent): List<Uri> {
     return (streams + clips).distinct().take(101)
 }
 
-/** API 26–34 cannot establish general startActivity sender provenance; retain their existing flow. */
+/** API 31–34 cannot establish general startActivity sender provenance; retain their existing flow. */
 @Suppress("TooGenericExceptionCaught") // Every failed framework permission check refuses the batch.
 internal fun incomingShareReadAccess(
     sources: List<Uri>,

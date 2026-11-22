@@ -45,12 +45,7 @@ class AppUpdateVerificationAndroidTest {
     @Test
     fun debuggableArchiveIsRejected() {
         withFixture("debuggable.apk") { file, release ->
-            val signingFlags =
-                if (Build.VERSION.SDK_INT >= 28) {
-                    PackageManager.GET_SIGNING_CERTIFICATES
-                } else {
-                    PackageManager.GET_SIGNATURES
-                }
+            val signingFlags = PackageManager.GET_SIGNING_CERTIFICATES
             val archive = archiveInfo(file, signingFlags)
             val broadArchive =
                 archiveInfo(

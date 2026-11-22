@@ -71,7 +71,10 @@ class AppUpdatePlatformAndroidTest {
                 )
             } else {
                 @Suppress("DEPRECATION")
-                packageManager.getPackageInfo(context.packageName, signingFlags() or PackageManager.GET_PERMISSIONS)
+                packageManager.getPackageInfo(
+                    context.packageName,
+                    PackageManager.GET_SIGNING_CERTIFICATES or PackageManager.GET_PERMISSIONS,
+                )
             }
         val archive =
             if (Build.VERSION.SDK_INT >= 33) {
@@ -81,7 +84,10 @@ class AppUpdatePlatformAndroidTest {
                 )
             } else {
                 @Suppress("DEPRECATION")
-                packageManager.getPackageArchiveInfo(installed.applicationInfo!!.sourceDir, signingFlags())
+                packageManager.getPackageArchiveInfo(
+                    installed.applicationInfo!!.sourceDir,
+                    PackageManager.GET_SIGNING_CERTIFICATES,
+                )
             }
         assertNotNull("Android must parse the installed APK as an archive", archive)
         assertEquals(context.packageName, archive!!.packageName)
@@ -93,22 +99,10 @@ class AppUpdatePlatformAndroidTest {
         )
     }
 
-    @Suppress("DEPRECATION")
-    private fun signingFlags(): Int =
-        if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
-
-    @Suppress("DEPRECATION")
     private fun signingBytes(info: android.content.pm.PackageInfo): Set<List<Byte>> =
-        if (Build.VERSION.SDK_INT >= 28) {
-            info.signingInfo
-                ?.apkContentsSigners
-                ?.map { it.toByteArray().toList() }
-                .orEmpty()
-                .toSet()
-        } else {
-            info.signatures
-                ?.map { it.toByteArray().toList() }
-                .orEmpty()
-                .toSet()
-        }
+        info.signingInfo
+            ?.apkContentsSigners
+            ?.map { it.toByteArray().toList() }
+            .orEmpty()
+            .toSet()
 }

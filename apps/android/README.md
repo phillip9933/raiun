@@ -44,7 +44,7 @@ Settings rendered from the Android app with test data.
 
 ## Install
 
-Android 8.0/API 26 or newer is required. Download the Android 1.5.0 APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases/tag/android-v1.5.0) and verify it against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. See the [1.5.0 release notes](docs/RELEASE-NOTES-1.5.0.md). Please report problems through the project issue tracker.
+Android 1.7.0 requires Android 12 (API 31) or newer. Android 8.0–11 users can continue using the published [Android 1.6.0 APK](https://github.com/phillip9933/raiun/releases/tag/android-v1.6.0). Verify downloads against the attached SHA256SUMS file. Install a compatible release over your existing Raiun app to keep its data. Please report problems through the project issue tracker.
 
 ## Build and test
 

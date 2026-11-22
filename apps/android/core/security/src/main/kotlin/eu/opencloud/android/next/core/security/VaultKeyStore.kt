@@ -291,8 +291,7 @@ class VaultKeyStore(
 
     private fun generateVerifiedKey(alias: String): SecretKey {
         val strongBoxAvailable =
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
         if (strongBoxAvailable) {
             val strongBoxKey =
                 try {
@@ -339,17 +338,9 @@ class VaultKeyStore(
                 .setKeySize(KEY_SIZE_BITS)
                 .setUserAuthenticationRequired(true)
                 .setInvalidatedByBiometricEnrollment(true)
+                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            builder.setUserAuthenticationParameters(
-                0,
-                KeyProperties.AUTH_BIOMETRIC_STRONG,
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            builder.setUserAuthenticationValidityDurationSeconds(-1)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && strongBox) {
+        if (strongBox) {
             builder.setIsStrongBoxBacked(true)
         }
 
@@ -364,13 +355,8 @@ class VaultKeyStore(
             val factory = SecretKeyFactory.getInstance(key.algorithm, ANDROID_KEY_STORE)
             val info = factory.getKeySpec(key, KeyInfo::class.java) as KeyInfo
             val secureHardware =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    info.getSecurityLevel() == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT ||
-                        info.getSecurityLevel() == KeyProperties.SECURITY_LEVEL_STRONGBOX
-                } else {
-                    @Suppress("DEPRECATION")
-                    info.isInsideSecureHardware()
-                }
+                info.securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT ||
+                    info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
             info.isUserAuthenticationRequired() &&
                 info.isUserAuthenticationRequirementEnforcedBySecureHardware() &&
                 secureHardware

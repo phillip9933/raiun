@@ -4,10 +4,10 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>app.raiun.vendor</groupId>
   <artifactId>scanner-processing-opencv</artifactId>
-  <version>0.8.0-beta.1-raiun-native.1</version>
+  <version>1.0.0-raiun-native.1</version>
   <packaging>aar</packaging>
   <name>Raiun local OpenCV scanner backport</name>
-  <description>Local Raiun AAR preserving the original scanner API and dependencies with a patched OpenCV core native library.</description>
+  <description>Scanner SDK 1.0.0 Java payloads and dependencies with the reviewed Raiun typed-split native backport.</description>
   <licenses>
     <license>
       <name>Apache License, Version 2.0</name>
@@ -18,7 +18,7 @@
     <dependency>
       <groupId>dev.offlinescan</groupId>
       <artifactId>scanner-core</artifactId>
-      <version>0.8.0-beta.1</version>
+      <version>1.0.0</version>
       <scope>compile</scope>
     </dependency>
     <dependency>

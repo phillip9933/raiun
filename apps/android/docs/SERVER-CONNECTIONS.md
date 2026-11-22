@@ -46,6 +46,10 @@ one-way migration preserves them in backup-excluded private storage before
 removing their legacy preference entries. The store's checksum detects
 accidental corruption; it is not authentication against an attacker who can
 rewrite app-private files. Corrupt or missing migrated policy fails closed.
+If publication was interrupted and only a pending policy file remains, Raiun
+recovers it only when its checksum and format are valid and its full policy
+exactly matches the retained legacy preferences. Recovery publishes those
+verified bytes and checks the durable copy before removing the preferences.
 Legacy pins add a required check alongside the caller's existing pin policy,
 system CA trust and hostname verification. They cannot approve an otherwise
 untrusted certificate. Legacy-pinned WebSocket upgrades are refused because
@@ -61,7 +65,7 @@ identity between requests is not claimed to be detected.
 
 Use synthetic identities and a test deployment. Check selected versus other Wi-Fi, unavailable location permission, VPN, public override, wrong TLS identity, disconnected local endpoint, foreground/background changes, transfers and process recreation. Check certificate selection/cancellation, expiry/replacement/removal, unrelated origins and OIDC discovery/code exchange/refresh. Existing non-mTLS authentication and ordinary/encrypted data must remain usable.
 
-Automated host tests are useful but do not establish Android KeyChain provisioning or a real browser/IdP combination. Record API 26/current Android and physical-phone results separately before release. Never include keys, token values, SSIDs, internal addresses or certificate subject details in public reports.
+Automated host tests are useful but do not establish Android KeyChain provisioning or a real browser/IdP combination. Record API 31/current Android and physical-phone results separately before release. Never include keys, token values, SSIDs, internal addresses or certificate subject details in public reports.
 
 ## Platform and protocol references
 

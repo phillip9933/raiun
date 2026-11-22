@@ -1,7 +1,7 @@
-# Android App Updater 0.2.1
+# Android App Updater 1.0.0
 
-Public stable release: https://github.com/phillip9933/android-app-updater/releases/tag/v0.2.1
-Source revision: 60b8fb82aa14ab0fc115ee9f9f96d3cc2c60f5fc
-Downloaded public bundle SHA-256: cc528b338cb293851ccca3ff964ede320a9e63d0bf2b1c586f92cebb3926a9a6
+Public stable release: https://github.com/phillip9933/android-app-updater/releases/tag/v1.0.0
+Source revision: 0613457c079d675dffcb4b5181e37959628cbbc4
+Downloaded public bundle SHA-256: 13b0fa5df7524091191e063c9b25bdb4d222866053228754d98ea3f1d1e72763
 
-Complete versioned Maven/source/AGPL bundle. Gradle validates SHA256SUMS and the exact Maven file set. See ../../docs/APP-UPDATES.md. The previous 0.2.0 vendor bytes are preserved in Raiun project outputs. No app signing or publication is implied.
+Gradle checks the public bundle payload hashes and exact Maven file inventory. See ../../docs/APP-UPDATES.md for integration and acceptance. The prior 0.2.1 bundle is preserved in project outputs.

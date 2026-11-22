@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.7.0
+
+### Fixes
+
+- Check that an account is still available before switching to it from a folder shortcut, and finish resolving shared-folder shortcuts before opening them.
+- Recover older saved certificate pins only when the pending copy matches the complete legacy pin data, avoiding an incomplete migration that could lose pins.
+- Show an error when Android cannot open the system installer for a verified update.
+
+### Improvements
+
+- Require Android 12 (API 31) or newer. Android 8.0–11 users can continue using [Android 1.6.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.6.0).
+- Avoid repeated local routing checks when no alternative Wi-Fi server address is configured.
+- Improve document scanning with more reliable page borders and crops, and processing tuned to preserve faint writing, pencil marks, highlighter and grid lines.
+- Use the stable app updater 1.0.0 with a verified system-installer destination.
+
 ## 1.6.0
 
 ### Fixes

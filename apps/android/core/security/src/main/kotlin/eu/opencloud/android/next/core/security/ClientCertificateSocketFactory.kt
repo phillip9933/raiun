@@ -31,7 +31,7 @@ internal class ClientCertificatePeerRegistry {
     fun peer(socket: Socket): ClientCertificatePeer? = peers[socket]
 }
 
-/** API 26 can invoke the key manager before SSLSocket.handshakeSession exists. */
+/** Key selection also needs the scoped peer when the TLS handshake session is unavailable. */
 internal class ClientCertificateSocketFactory(
     private val delegate: SSLSocketFactory,
     private val peers: ClientCertificatePeerRegistry,

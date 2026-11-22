@@ -22,7 +22,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35], shadows = [DirectoryAwareLinuxShadow::class])
+@Config(sdk = [31, 35], shadows = [DirectoryAwareLinuxShadow::class])
 class LegacyCertificatePinStoreTest {
     @get:Rule val directoryModel = DirectoryLinuxModelRule()
 
@@ -171,6 +171,37 @@ class LegacyCertificatePinStoreTest {
         assertTrustFailure { store().pinsFor(HOST) }
 
         assertTrue(directory.isDirectory)
+    }
+
+    @Test fun `complete pending policy cannot fill missing legacy entries`() {
+        put(HOST, PIN)
+        put("other.example.test", OTHER_PIN)
+        store().pinsFor(HOST)
+        val complete = target.readBytes()
+        val pending = File(target.path + ".new")
+        assertTrue(target.renameTo(pending))
+        put(HOST, PIN)
+
+        assertTrustFailure { store().pinsFor(HOST) }
+
+        assertFalse(target.exists())
+        assertTrue(pending.readBytes().contentEquals(complete))
+        assertEquals(setOf(PIN), preferences.getStringSet("pins.$HOST", null))
+    }
+
+    @Test fun `complete pending policy cannot replace a corrupt published policy`() {
+        put(HOST, PIN)
+        store().pinsFor(HOST)
+        val complete = target.readBytes()
+        val pending = File(target.path + ".new").apply { writeBytes(complete) }
+        target.writeText("corrupt store")
+        put(HOST, PIN)
+
+        assertTrustFailure { store().pinsFor(HOST) }
+
+        assertEquals("corrupt store", target.readText())
+        assertTrue(pending.readBytes().contentEquals(complete))
+        assertTrue(preferences.contains("pins.$HOST"))
     }
 
     @Test fun `orphan pending and corrupt backup files remain available for recovery`() {

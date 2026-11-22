@@ -285,7 +285,7 @@ class AppUpdatesScreenTest {
     }
 
     @Test
-    @Config(sdk = [26, 35], application = Application::class)
+    @Config(sdk = [31, 35], application = Application::class)
     fun noticeChecksOnResumeAndThrottlesRepeatedResumesUntilDue() {
         val application = ApplicationProvider.getApplicationContext<Application>()
         val calls = AtomicInteger()
@@ -328,7 +328,7 @@ class AppUpdatesScreenTest {
     }
 
     @Test
-    @Config(sdk = [26, 35], application = Application::class)
+    @Config(sdk = [31, 35], application = Application::class)
     fun noticeDoesNotCheckOnResumeWhenAutomaticChecksAreDisabled() {
         val application = ApplicationProvider.getApplicationContext<Application>()
         application
@@ -360,7 +360,7 @@ class AppUpdatesScreenTest {
     }
 
     @Test
-    @Config(sdk = [26, 35], application = Application::class)
+    @Config(sdk = [31, 35], application = Application::class)
     fun dismissedReleaseAndCheckAttemptSurviveManagerRecreation() =
         runBlocking {
             val application = ApplicationProvider.getApplicationContext<Application>()

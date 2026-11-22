@@ -49,8 +49,8 @@ subprojects {
         resolutionStrategy.dependencySubstitution {
             substitute(module("com.goterl:lazysodium-android:5.2.0"))
                 .using(module("app.raiun.vendor:lazysodium-android:5.2.0-raiun-native.1"))
-            substitute(module("dev.offlinescan:scanner-processing-opencv:0.8.0-beta.1"))
-                .using(module("app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1"))
+            substitute(module("dev.offlinescan:scanner-processing-opencv:1.1.0"))
+                .using(module("app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1"))
         }
     }
     apply(plugin = "io.gitlab.arturbosch.detekt")

@@ -19,7 +19,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35], qualifiers = "w360dp-h800dp")
+@Config(sdk = [31, 35], qualifiers = "w360dp-h800dp")
 class IncomingUploadReviewTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 

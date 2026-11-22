@@ -24,7 +24,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35])
+@Config(sdk = [31, 35])
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class VaultPreviewContentTest {
     @Test fun `late streamed preview closes only its own backing and leaves replacement readable`() =

@@ -108,13 +108,8 @@ internal class AndroidVaultDeviceRememberCrypto : VaultDeviceRememberCrypto {
             !info.isUserAuthenticationRequired
 
     private fun hasHardwareBacking(info: KeyInfo): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            info.securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT ||
-                info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
-        } else {
-            @Suppress("DEPRECATION")
-            info.isInsideSecureHardware
-        }
+        info.securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT ||
+            info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX
 
     private fun unlockedRequirementAcceptable(info: KeyInfo): Boolean =
         when (val getter = unlockedRequirementGetter(info)) {

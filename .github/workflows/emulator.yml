@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api: [26, 35]
+        api: [31, 35]
 
     steps:
       - name: Check out source

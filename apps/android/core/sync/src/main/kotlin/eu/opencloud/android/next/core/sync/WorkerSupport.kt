@@ -4,7 +4,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
-import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.work.ForegroundInfo
 import eu.opencloud.android.next.core.database.AccountEntity
@@ -122,14 +121,10 @@ internal object TransferNotifications {
                 .setOnlyAlertOnce(true)
                 .apply { pendingIntent?.let(::setContentIntent) }
                 .build()
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ForegroundInfo(
-                transferId.hashCode(),
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-            )
-        } else {
-            ForegroundInfo(transferId.hashCode(), notification)
-        }
+        return ForegroundInfo(
+            transferId.hashCode(),
+            notification,
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
     }
 }

@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.graphics.pdf.PdfRenderer
-import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.compose.ui.graphics.toArgb
 import eu.opencloud.android.next.core.datastore.PreviewKind
@@ -67,22 +66,10 @@ internal fun readPreview(
             var sample = 1
             while (bounds.outWidth / sample > 2048 || bounds.outHeight / sample > 2048) sample *= 2
             val bitmap =
-                requireNotNull(
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, _, _ ->
-                            decoder.setTargetSampleSize(sample)
-                            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                        }
-                    } else {
-                        BitmapFactory.decodeFile(
-                            file.path,
-                            BitmapFactory.Options().apply {
-                                inSampleSize =
-                                    sample
-                            },
-                        )
-                    },
-                )
+                ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, _, _ ->
+                    decoder.setTargetSampleSize(sample)
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                }
             FilePreviewState(loading = false, bitmap = bitmap)
         }
         PreviewKind.PDF -> readPdf(file, page)

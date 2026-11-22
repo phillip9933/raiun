@@ -1,0 +1,9 @@
+[
+  "@SDK@/cmake/3.22.1/bin/cmake",
+  "--build",
+  "@WORK@/build-x86_64",
+  "--target",
+  "opencv_java",
+  "--parallel",
+  "2"
+]

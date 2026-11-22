@@ -81,22 +81,24 @@ internal fun OpenCloudNextApp(
     val shortcutFolder = folderNavigation?.resource?.takeIf { it.accountId == state.value.activeAccountId }
     val sharedShortcut = folderNavigation?.shared?.takeIf { it.account == state.value.activeAccountId }
     val folderRequest = launchRequest?.takeIf { it.folderShortcut && folderNavigation == null }
+    val isCurrentShortcut = {
+        val auth = viewModel.state.value
+        launchIntents.isPending(folderRequest?.id) &&
+            auth.activeAccountId == launchAccount &&
+            !auth.isRestoringSession
+    }
     FolderShortcutEntry(
         folderRequest?.uri,
         folderRequest?.id,
         state.value.activeAccountId,
         state.value.isRestoringSession,
-        viewModel::switchAccount,
+        { viewModel.switchAccount(it, isCurrentShortcut) },
         {
             launchIntents.openFolder(requireNotNull(folderRequest).id, it)
             destination = AppDestination.Files
         },
         onUnavailable = { folderRequest != null && onConsumeLaunchRequest(folderRequest.id) },
-        isCurrent = {
-            launchIntents.isPending(folderRequest?.id) &&
-                state.value.activeAccountId == launchAccount &&
-                !state.value.isRestoringSession
-        },
+        isCurrent = isCurrentShortcut,
         openShared = {
             launchIntents.openSharedFolder(requireNotNull(folderRequest).id, it)
             destination = AppDestination.Files
@@ -367,8 +369,9 @@ internal fun OpenCloudNextApp(
                             activeAccountId = accountId,
                             onNavigateBack = { destination = AppDestination.Files },
                             onAccountSelect = {
-                                viewModel.switchAccount(it)
-                                destination = AppDestination.Files
+                                scope.launch {
+                                    if (viewModel.switchAccount(it)) destination = AppDestination.Files
+                                }
                             },
                             onAccountRemove = {
                                 viewModel.accountRemoved(it)

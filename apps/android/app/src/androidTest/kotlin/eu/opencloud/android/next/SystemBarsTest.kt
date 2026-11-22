@@ -4,7 +4,6 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.core.view.WindowCompat
-import androidx.test.filters.SdkSuppress
 import androidx.test.platform.app.InstrumentationRegistry
 import eu.opencloud.android.next.core.datastore.Appearance
 import eu.opencloud.android.next.core.datastore.SettingsRepository
@@ -14,11 +13,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-@SdkSuppress(minSdkVersion = 29)
 class SystemBarsTest {
     @Test fun explicitDarkModeControlsSystemBars() =
         runBlocking {
-            org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= 29)
             val instrumentation = InstrumentationRegistry.getInstrumentation()
             val context = instrumentation.targetContext
             val settings = SettingsRepository.create(context)

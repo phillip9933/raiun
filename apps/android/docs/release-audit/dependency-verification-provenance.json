@@ -1,11 +1,11 @@
 {
   "time_utc": "2026-10-25T14:42:53.523419+00:00",
   "candidate": "gradle/verification-metadata.xml",
-  "candidate_sha256": "5c0907e80a79f42526354d7ce0212e657e096972330d56d82012712e9e80cd7b",
-  "components": 899,
-  "artifacts": 1606,
+  "candidate_sha256": "f239516a3c13d344021c537dd838f82adedbc08bcec5c834a387fb399f8ad92b",
+  "components": 0,
+  "artifacts": 0,
   "counts": {
-    "verified": 1606
+    "verified": 1752
   },
   "results": [
     {
@@ -19824,6 +19824,1364 @@
           "bytes": 4303
         }
       ]
+    },
+    {
+      "group": "io.github.phillip9933",
+      "name": "android-updater",
+      "version": "1.0.0",
+      "artifacts": [
+        {
+          "artifact": "android-updater-1.0.0-sources.jar",
+          "expected": "4b81fc8f2bd03275269fff4012a1d0b82e414cfd6849386604a6fd0265e4f7ac",
+          "actual": "4b81fc8f2bd03275269fff4012a1d0b82e414cfd6849386604a6fd0265e4f7ac",
+          "status": "verified",
+          "method": "verified public release bundle payload",
+          "evidence": "https://github.com/phillip9933/android-app-updater/releases/download/v1.0.0/android-app-updater-1.0.0-bundle.zip!maven/io/github/phillip9933/android-updater/1.0.0/android-updater-1.0.0-sources.jar"
+        },
+        {
+          "artifact": "android-updater-1.0.0.aar",
+          "expected": "5be67e6bc30c370347631d5a1f3208f11b6f807f3a1aef84f6a1d615cb414c70",
+          "actual": "5be67e6bc30c370347631d5a1f3208f11b6f807f3a1aef84f6a1d615cb414c70",
+          "status": "verified",
+          "method": "verified public release bundle payload",
+          "evidence": "https://github.com/phillip9933/android-app-updater/releases/download/v1.0.0/android-app-updater-1.0.0-bundle.zip!maven/io/github/phillip9933/android-updater/1.0.0/android-updater-1.0.0.aar"
+        },
+        {
+          "artifact": "android-updater-1.0.0.module",
+          "expected": "0dfd37ff4da99d1148889dee8a0a2d0b915b5447fcd40e0a54f1c3b71db95426",
+          "actual": "0dfd37ff4da99d1148889dee8a0a2d0b915b5447fcd40e0a54f1c3b71db95426",
+          "status": "verified",
+          "method": "verified public release bundle payload",
+          "evidence": "https://github.com/phillip9933/android-app-updater/releases/download/v1.0.0/android-app-updater-1.0.0-bundle.zip!maven/io/github/phillip9933/android-updater/1.0.0/android-updater-1.0.0.module"
+        },
+        {
+          "artifact": "android-updater-1.0.0.pom",
+          "expected": "803a2f644c359916fcffc4bcb8796cac423439675edf0479222d9232e051330b",
+          "actual": "803a2f644c359916fcffc4bcb8796cac423439675edf0479222d9232e051330b",
+          "status": "verified",
+          "method": "verified public release bundle payload",
+          "evidence": "https://github.com/phillip9933/android-app-updater/releases/download/v1.0.0/android-app-updater-1.0.0-bundle.zip!maven/io/github/phillip9933/android-updater/1.0.0/android-updater-1.0.0.pom"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-camera",
+      "version": "1.0.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-camera-1.0.0-sources.jar",
+          "expected": "0abdb16714d83087022a20fa01f5f80814cd630a1273057b29a7a9cc158e14e6",
+          "actual": "0abdb16714d83087022a20fa01f5f80814cd630a1273057b29a7a9cc158e14e6",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0-sources.jar"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0-sources.jar.md5",
+          "expected": "bc006d6174005ec0194473850a34986b976c9846f1add2e0065f1ccb61c86cba",
+          "actual": "bc006d6174005ec0194473850a34986b976c9846f1add2e0065f1ccb61c86cba",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0-sources.jar.md5"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0-sources.jar.sha1",
+          "expected": "f0b1dad2e772b7fc6b6de2bc0c4ca92a7d67e948e3798b74ff18604790c6779d",
+          "actual": "f0b1dad2e772b7fc6b6de2bc0c4ca92a7d67e948e3798b74ff18604790c6779d",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0-sources.jar.sha1"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0-sources.jar.sha256",
+          "expected": "19fb378f1d5a5843d1e5e6172d8f155609592cc1353e837e0b61da8e657fc48c",
+          "actual": "19fb378f1d5a5843d1e5e6172d8f155609592cc1353e837e0b61da8e657fc48c",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0-sources.jar.sha256"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0-sources.jar.sha512",
+          "expected": "944606290a76fa1208d823e407f49ce3188353f03ce43b5690c6520faaf8faf0",
+          "actual": "944606290a76fa1208d823e407f49ce3188353f03ce43b5690c6520faaf8faf0",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0-sources.jar.sha512"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.aar",
+          "expected": "5f3bd7f199fb12e1036986a978866ef47968f88fe8d737722ff0b0ca5137cef5",
+          "actual": "5f3bd7f199fb12e1036986a978866ef47968f88fe8d737722ff0b0ca5137cef5",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.aar"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.aar.md5",
+          "expected": "5c93a93edbad59a9a4296d87a46f3e1b4bea632ae3ae1615971c138caa82f743",
+          "actual": "5c93a93edbad59a9a4296d87a46f3e1b4bea632ae3ae1615971c138caa82f743",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.aar.md5"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.aar.sha1",
+          "expected": "9a4d584e4428f5517cb5b98896f8ab72a62b95390dcac3b22f042009484e79b3",
+          "actual": "9a4d584e4428f5517cb5b98896f8ab72a62b95390dcac3b22f042009484e79b3",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.aar.sha1"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.aar.sha256",
+          "expected": "aa322cfeb8492e81ccec5ca01f70550e9ee900309d1740361ecf8cb6934b88ae",
+          "actual": "aa322cfeb8492e81ccec5ca01f70550e9ee900309d1740361ecf8cb6934b88ae",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.aar.sha256"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.aar.sha512",
+          "expected": "8a4d0d89f89b6b71ddf57d7eb21d4db0581ff215cec39695ff9c260315c6794b",
+          "actual": "8a4d0d89f89b6b71ddf57d7eb21d4db0581ff215cec39695ff9c260315c6794b",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.aar.sha512"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.module",
+          "expected": "a374b62337aee7f9b26342ab97d78e8cbd05a8c20fdc4a8e9398141c3fca8ff7",
+          "actual": "a374b62337aee7f9b26342ab97d78e8cbd05a8c20fdc4a8e9398141c3fca8ff7",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.module"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.module.md5",
+          "expected": "8d72a4511ae6ae66c1b63d21306b8c98bae6c4cbd73ad194ad526cdd2b7cd29d",
+          "actual": "8d72a4511ae6ae66c1b63d21306b8c98bae6c4cbd73ad194ad526cdd2b7cd29d",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.module.md5"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.module.sha1",
+          "expected": "a425aa3ff768d5f428c19df9badf94a266596b4fea4b1f44d6678199a0e7e3a7",
+          "actual": "a425aa3ff768d5f428c19df9badf94a266596b4fea4b1f44d6678199a0e7e3a7",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.module.sha1"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.module.sha256",
+          "expected": "0fa507751c49e52f65b03a32b8905e86005f2e480af06e2cdc8a1228287a1f1c",
+          "actual": "0fa507751c49e52f65b03a32b8905e86005f2e480af06e2cdc8a1228287a1f1c",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.module.sha256"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.module.sha512",
+          "expected": "f9554321a726c4d58f8baf9b2312b021af1fd20a24e350e729c55f2f5f68816b",
+          "actual": "f9554321a726c4d58f8baf9b2312b021af1fd20a24e350e729c55f2f5f68816b",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.module.sha512"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.pom",
+          "expected": "a2b32d7813d4bbf88e8b9a706a491a6e2d90fbb141b76ddd23e63332396ee7e0",
+          "actual": "a2b32d7813d4bbf88e8b9a706a491a6e2d90fbb141b76ddd23e63332396ee7e0",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.pom"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.pom.md5",
+          "expected": "cf21fed7fa0335791c4fb52c8c1c40c9dbb1c69b3ee400464a9364b8612f1f93",
+          "actual": "cf21fed7fa0335791c4fb52c8c1c40c9dbb1c69b3ee400464a9364b8612f1f93",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.pom.md5"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.pom.sha1",
+          "expected": "ed5c1a86d3ffa57f0989bdd1bccb898a5ee8282e3acc7e6b89c2f56e23b8be69",
+          "actual": "ed5c1a86d3ffa57f0989bdd1bccb898a5ee8282e3acc7e6b89c2f56e23b8be69",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.pom.sha1"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.pom.sha256",
+          "expected": "2eea44df6cd940ba9f3e7f05b7bb893d8007af155626129d89c6bb5aec4a75aa",
+          "actual": "2eea44df6cd940ba9f3e7f05b7bb893d8007af155626129d89c6bb5aec4a75aa",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.pom.sha256"
+        },
+        {
+          "artifact": "scanner-camera-1.0.0.pom.sha512",
+          "expected": "d5b7fc352dd6409d91d76b66a342dab5f62d46de0c48271e258e357ba6875b47",
+          "actual": "d5b7fc352dd6409d91d76b66a342dab5f62d46de0c48271e258e357ba6875b47",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-camera/1.0.0/scanner-camera-1.0.0.pom.sha512"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-core",
+      "version": "1.0.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-core-1.0.0.jar",
+          "expected": "c229b09659361a2606a40a268ba8b864f26281128f1111664849e8e5e797866d",
+          "actual": "c229b09659361a2606a40a268ba8b864f26281128f1111664849e8e5e797866d",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.jar"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.jar.md5",
+          "expected": "93373f6bfaba7034619c7e735d372464ed1ae365ec9d35149cdd6583adc995ff",
+          "actual": "93373f6bfaba7034619c7e735d372464ed1ae365ec9d35149cdd6583adc995ff",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.jar.md5"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.jar.sha1",
+          "expected": "ddd5b5e3e4ddc4af4f4460f23fbec13a6cd697e20bb5729220f0c1688b013ba8",
+          "actual": "ddd5b5e3e4ddc4af4f4460f23fbec13a6cd697e20bb5729220f0c1688b013ba8",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.jar.sha1"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.jar.sha256",
+          "expected": "7cbb01784b9123b401b636cbcd4d0679a3846cad225fce0d927c1b90d203ddb4",
+          "actual": "7cbb01784b9123b401b636cbcd4d0679a3846cad225fce0d927c1b90d203ddb4",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.jar.sha256"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.jar.sha512",
+          "expected": "a76a8ccb0487a10dd5186bd7c26d7b425f4e1fc3a25c743ed95a9c843b09ad2c",
+          "actual": "a76a8ccb0487a10dd5186bd7c26d7b425f4e1fc3a25c743ed95a9c843b09ad2c",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.jar.sha512"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.module",
+          "expected": "0e3e261c166bc0cd581bd981ee156f0d622097e994c6d0a506d9f9054a0e895f",
+          "actual": "0e3e261c166bc0cd581bd981ee156f0d622097e994c6d0a506d9f9054a0e895f",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.module"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.module.md5",
+          "expected": "11da0b284e63162c16a11c6a13ea1db2d7c5f4bf8ccf5ca1569b337b33a1bee9",
+          "actual": "11da0b284e63162c16a11c6a13ea1db2d7c5f4bf8ccf5ca1569b337b33a1bee9",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.module.md5"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.module.sha1",
+          "expected": "43af7b1f34eba268a3827f83a32ab90ed0938fbd56d7c48bab128ba46222b25e",
+          "actual": "43af7b1f34eba268a3827f83a32ab90ed0938fbd56d7c48bab128ba46222b25e",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.module.sha1"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.module.sha256",
+          "expected": "73b85df4d1289b013c6a2d8612df219080ff86224bf697d08b807a7638efacff",
+          "actual": "73b85df4d1289b013c6a2d8612df219080ff86224bf697d08b807a7638efacff",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.module.sha256"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.module.sha512",
+          "expected": "cdef5b7ae84cd9996056ba514b61fa68c3621d4fc473306e3056b12794fbb771",
+          "actual": "cdef5b7ae84cd9996056ba514b61fa68c3621d4fc473306e3056b12794fbb771",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.module.sha512"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.pom",
+          "expected": "c9144f69f2feabeac02fe054338a774b9d39b5d38c8d8e52b75c6de3e6630e2e",
+          "actual": "c9144f69f2feabeac02fe054338a774b9d39b5d38c8d8e52b75c6de3e6630e2e",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.pom"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.pom.md5",
+          "expected": "fbf1e89043d267f0c5a8548cc7f1d53fde79e763e558e81bff74c73e2b42e7f5",
+          "actual": "fbf1e89043d267f0c5a8548cc7f1d53fde79e763e558e81bff74c73e2b42e7f5",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.pom.md5"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.pom.sha1",
+          "expected": "0492e5183c54514b3da13a44e0bca1e691514d155edafec9027a280a45111d10",
+          "actual": "0492e5183c54514b3da13a44e0bca1e691514d155edafec9027a280a45111d10",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.pom.sha1"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.pom.sha256",
+          "expected": "5fe4b12163bf3528645b1fbbf61dc603f4696f4bf6a0c5ed32fc64d7bf21ee27",
+          "actual": "5fe4b12163bf3528645b1fbbf61dc603f4696f4bf6a0c5ed32fc64d7bf21ee27",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.pom.sha256"
+        },
+        {
+          "artifact": "scanner-core-1.0.0.pom.sha512",
+          "expected": "a18bffe07e70fd71b4b8e9e72b399a57b862ae2d048a58bcef8819cf18b69d4a",
+          "actual": "a18bffe07e70fd71b4b8e9e72b399a57b862ae2d048a58bcef8819cf18b69d4a",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-core/1.0.0/scanner-core-1.0.0.pom.sha512"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-export",
+      "version": "1.0.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-export-1.0.0-sources.jar",
+          "expected": "c95bd09c51b8f17ddb717332ccbb474c43b178881fa5b393691f05970e963915",
+          "actual": "c95bd09c51b8f17ddb717332ccbb474c43b178881fa5b393691f05970e963915",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0-sources.jar"
+        },
+        {
+          "artifact": "scanner-export-1.0.0-sources.jar.md5",
+          "expected": "9f969538d7e6990c73bd17b715d3e128d525b46f699bc02b6c9fcbf9aa9f9e5a",
+          "actual": "9f969538d7e6990c73bd17b715d3e128d525b46f699bc02b6c9fcbf9aa9f9e5a",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0-sources.jar.md5"
+        },
+        {
+          "artifact": "scanner-export-1.0.0-sources.jar.sha1",
+          "expected": "29f2182bfbc1b7932c678f63aeb91366b66fa1e738e25140a60531c62d567e31",
+          "actual": "29f2182bfbc1b7932c678f63aeb91366b66fa1e738e25140a60531c62d567e31",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0-sources.jar.sha1"
+        },
+        {
+          "artifact": "scanner-export-1.0.0-sources.jar.sha256",
+          "expected": "deed7b1596f0d82bae4ef3de2deed22f1017f45906e97c80af18ea4cbae4a430",
+          "actual": "deed7b1596f0d82bae4ef3de2deed22f1017f45906e97c80af18ea4cbae4a430",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0-sources.jar.sha256"
+        },
+        {
+          "artifact": "scanner-export-1.0.0-sources.jar.sha512",
+          "expected": "8b240f50117fe267d044557fc8e7f2dbbf0dc5a7d90094393dce6a27026ea455",
+          "actual": "8b240f50117fe267d044557fc8e7f2dbbf0dc5a7d90094393dce6a27026ea455",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0-sources.jar.sha512"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.aar",
+          "expected": "29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970",
+          "actual": "29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.aar"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.aar.md5",
+          "expected": "0f8ae2ab22ba9dd47678ce9a952bb615df5009266d0c6564ea0cf840c829b1fd",
+          "actual": "0f8ae2ab22ba9dd47678ce9a952bb615df5009266d0c6564ea0cf840c829b1fd",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.aar.md5"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.aar.sha1",
+          "expected": "a6611ac742ef22a78fc49042f9efae2da7448c1e027763d05e4a8334c1e1d953",
+          "actual": "a6611ac742ef22a78fc49042f9efae2da7448c1e027763d05e4a8334c1e1d953",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.aar.sha1"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.aar.sha256",
+          "expected": "b050a259e9a10a60afef0646a50611bef950a057127588b3f9d2c099b1304b50",
+          "actual": "b050a259e9a10a60afef0646a50611bef950a057127588b3f9d2c099b1304b50",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.aar.sha256"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.aar.sha512",
+          "expected": "a705f009d12d237bf45f84d1d4c63ed6bd04809d9c714d1dd5eb02067bf54c99",
+          "actual": "a705f009d12d237bf45f84d1d4c63ed6bd04809d9c714d1dd5eb02067bf54c99",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.aar.sha512"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.module",
+          "expected": "ed0c94930d15c0b7fb7e800b2600fcb9df25ec9205561e18aa6c8aa7d454d003",
+          "actual": "ed0c94930d15c0b7fb7e800b2600fcb9df25ec9205561e18aa6c8aa7d454d003",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.module"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.module.md5",
+          "expected": "b26ff152f9b31beff3c2d2e55d95107027da0c3799e464ecac8ee66c07d95e36",
+          "actual": "b26ff152f9b31beff3c2d2e55d95107027da0c3799e464ecac8ee66c07d95e36",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.module.md5"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.module.sha1",
+          "expected": "daf550601aceb2ebead0eeedbd0ea43d4f56609a0c9d957e76e045aa763ab147",
+          "actual": "daf550601aceb2ebead0eeedbd0ea43d4f56609a0c9d957e76e045aa763ab147",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.module.sha1"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.module.sha256",
+          "expected": "1e644e3fc20f2ad61abc3f34905a6770b783348530f10e6016dc912db10da5d1",
+          "actual": "1e644e3fc20f2ad61abc3f34905a6770b783348530f10e6016dc912db10da5d1",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.module.sha256"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.module.sha512",
+          "expected": "c8ffb28937157a9fece348f8967cb268427129e32e89ca16ee026cbca591440a",
+          "actual": "c8ffb28937157a9fece348f8967cb268427129e32e89ca16ee026cbca591440a",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.module.sha512"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.pom",
+          "expected": "d7b10fa1ac31e77b5d57189fe543e3c79710f2265c8358c9b8480bfbc8fb99c8",
+          "actual": "d7b10fa1ac31e77b5d57189fe543e3c79710f2265c8358c9b8480bfbc8fb99c8",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.pom"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.pom.md5",
+          "expected": "7ad56a4da88ca034ee30fc4b08aa28d69e3ee059652236e96e060387cdf1d826",
+          "actual": "7ad56a4da88ca034ee30fc4b08aa28d69e3ee059652236e96e060387cdf1d826",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.pom.md5"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.pom.sha1",
+          "expected": "3e7a83e127e48635c4063b19b39be9a0c5fb434f3dd2c7730cb2a37e89b768b7",
+          "actual": "3e7a83e127e48635c4063b19b39be9a0c5fb434f3dd2c7730cb2a37e89b768b7",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.pom.sha1"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.pom.sha256",
+          "expected": "5efd399b4e177106abed01ca4d53878b5e92325ab3ed579aa5f3d59bde9f339e",
+          "actual": "5efd399b4e177106abed01ca4d53878b5e92325ab3ed579aa5f3d59bde9f339e",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.pom.sha256"
+        },
+        {
+          "artifact": "scanner-export-1.0.0.pom.sha512",
+          "expected": "33cf7decae93a80e64d2b5dea15ca13a7285db4012beb7c106f02b60ecdeb6a7",
+          "actual": "33cf7decae93a80e64d2b5dea15ca13a7285db4012beb7c106f02b60ecdeb6a7",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-export/1.0.0/scanner-export-1.0.0.pom.sha512"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-ocr-tesseract",
+      "version": "1.0.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0-sources.jar",
+          "expected": "5017db10066faf30b5197da54500dc51b34c187cd299fd77d7d51b0495ae81f1",
+          "actual": "5017db10066faf30b5197da54500dc51b34c187cd299fd77d7d51b0495ae81f1",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0-sources.jar"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0-sources.jar.md5",
+          "expected": "8910ff8189ecc592e01a528d1fd59ab5aa6e516c7cf20d6bba7dad88a5423f62",
+          "actual": "8910ff8189ecc592e01a528d1fd59ab5aa6e516c7cf20d6bba7dad88a5423f62",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0-sources.jar.md5"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0-sources.jar.sha1",
+          "expected": "9c7011a908d4ec3b244b85f207bc8917effa20c923595906c5422041b6d12ec8",
+          "actual": "9c7011a908d4ec3b244b85f207bc8917effa20c923595906c5422041b6d12ec8",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0-sources.jar.sha1"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0-sources.jar.sha256",
+          "expected": "4db32a4b3df660145773abea191add43d28d3876b1a1f5f123c1b8022e7bc9b7",
+          "actual": "4db32a4b3df660145773abea191add43d28d3876b1a1f5f123c1b8022e7bc9b7",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0-sources.jar.sha256"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0-sources.jar.sha512",
+          "expected": "0aefff84694f3c4eb2ad95e86fba83f5a7b7ba51e26989f0a6bd5f356772b2dc",
+          "actual": "0aefff84694f3c4eb2ad95e86fba83f5a7b7ba51e26989f0a6bd5f356772b2dc",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0-sources.jar.sha512"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.aar",
+          "expected": "9124977c545c1a8d647279d4630ae57b0ad293c32dcca4460dceda59a67cb31a",
+          "actual": "9124977c545c1a8d647279d4630ae57b0ad293c32dcca4460dceda59a67cb31a",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.aar"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.aar.md5",
+          "expected": "729b09ae812b03b6ae3bf04c1d3d1fabcc10b1992a8795adb6b6ebcc184e745c",
+          "actual": "729b09ae812b03b6ae3bf04c1d3d1fabcc10b1992a8795adb6b6ebcc184e745c",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.aar.md5"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.aar.sha1",
+          "expected": "c3782082fbdb18adf7a80403de9eac4a2f5805be433e4d7528eb7a71802d90c4",
+          "actual": "c3782082fbdb18adf7a80403de9eac4a2f5805be433e4d7528eb7a71802d90c4",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.aar.sha1"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.aar.sha256",
+          "expected": "54180433f0ff6732d81fbe3de086c4ff74b17139c17b25f0be7ca4f5a4ea9840",
+          "actual": "54180433f0ff6732d81fbe3de086c4ff74b17139c17b25f0be7ca4f5a4ea9840",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.aar.sha256"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.aar.sha512",
+          "expected": "da567410fdf02cae33aa75e55a1d68bb2912344635c8cca9f43b767f96629092",
+          "actual": "da567410fdf02cae33aa75e55a1d68bb2912344635c8cca9f43b767f96629092",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.aar.sha512"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.module",
+          "expected": "7b1248a7e3780ba4a5941658af5bc277710d75974d43d6e662ff9270269830d4",
+          "actual": "7b1248a7e3780ba4a5941658af5bc277710d75974d43d6e662ff9270269830d4",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.module"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.module.md5",
+          "expected": "bf9888bfb0eb6b1b951d9a6da20377269c2b04563bbb42d4817cfcfbaf6e83e7",
+          "actual": "bf9888bfb0eb6b1b951d9a6da20377269c2b04563bbb42d4817cfcfbaf6e83e7",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.module.md5"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.module.sha1",
+          "expected": "8cc6ee89e447fd5bd28e90c64d67ccd3618e901b2162bfb79e0a34db7e3945e6",
+          "actual": "8cc6ee89e447fd5bd28e90c64d67ccd3618e901b2162bfb79e0a34db7e3945e6",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.module.sha1"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.module.sha256",
+          "expected": "4d4fe61e40852b6a5a4b01803aa0377440ff907eef1063ea0580f2ae63f1dcfa",
+          "actual": "4d4fe61e40852b6a5a4b01803aa0377440ff907eef1063ea0580f2ae63f1dcfa",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.module.sha256"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.module.sha512",
+          "expected": "eb7ff3f9e58c7dc8146c7b5191844cae36ce898480bdba5b0eb94d70825fd537",
+          "actual": "eb7ff3f9e58c7dc8146c7b5191844cae36ce898480bdba5b0eb94d70825fd537",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.module.sha512"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.pom",
+          "expected": "43319df88526917ec6dc31234054c043a9f24281fc64c2dedfff5027362850bc",
+          "actual": "43319df88526917ec6dc31234054c043a9f24281fc64c2dedfff5027362850bc",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.pom"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.pom.md5",
+          "expected": "96bcf6d4ac5b98e252bc4deb4a606ee2b311f92f89318ca47494052a5af022fb",
+          "actual": "96bcf6d4ac5b98e252bc4deb4a606ee2b311f92f89318ca47494052a5af022fb",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.pom.md5"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.pom.sha1",
+          "expected": "e2fdb627d745d92e4bc9b1ea9f5bdf3641dfbc08a0404d80608cb09319e630db",
+          "actual": "e2fdb627d745d92e4bc9b1ea9f5bdf3641dfbc08a0404d80608cb09319e630db",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.pom.sha1"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.pom.sha256",
+          "expected": "c92eb9aae5f7a52f1ceaf95b9ba26cdc0e651f4784477e02020ca077d9946388",
+          "actual": "c92eb9aae5f7a52f1ceaf95b9ba26cdc0e651f4784477e02020ca077d9946388",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.pom.sha256"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.0.0.pom.sha512",
+          "expected": "3013794b2293cd815f1e08bb3c91293523aa941961aa3df199171fac3f631d4b",
+          "actual": "3013794b2293cd815f1e08bb3c91293523aa941961aa3df199171fac3f631d4b",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ocr-tesseract/1.0.0/scanner-ocr-tesseract-1.0.0.pom.sha512"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-processing-opencv",
+      "version": "1.0.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-processing-opencv-1.0.0-sources.jar",
+          "expected": "d8dc4321a81329b7f90ec78cf0458c42c2cfe2be783f7a23c4b301104782c61e",
+          "actual": "d8dc4321a81329b7f90ec78cf0458c42c2cfe2be783f7a23c4b301104782c61e",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0-sources.jar"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0-sources.jar.md5",
+          "expected": "57e5e155f052d9a8f9c1c5d38ad92a813372436c417a25964532d77fe3cf5190",
+          "actual": "57e5e155f052d9a8f9c1c5d38ad92a813372436c417a25964532d77fe3cf5190",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0-sources.jar.md5"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0-sources.jar.sha1",
+          "expected": "6496f0de750e2c5b7c64a9de26e8083f416bbedbfcc9388a853f642cce120b4c",
+          "actual": "6496f0de750e2c5b7c64a9de26e8083f416bbedbfcc9388a853f642cce120b4c",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0-sources.jar.sha1"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0-sources.jar.sha256",
+          "expected": "b8d3bd0c4f0dec072648befe66139f5bfda861d09f9b2126f63b120fc641685b",
+          "actual": "b8d3bd0c4f0dec072648befe66139f5bfda861d09f9b2126f63b120fc641685b",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0-sources.jar.sha256"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0-sources.jar.sha512",
+          "expected": "f94bcce975469336196788ea5103d343542d3d10c9139f9af10a2a1738642063",
+          "actual": "f94bcce975469336196788ea5103d343542d3d10c9139f9af10a2a1738642063",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0-sources.jar.sha512"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.aar",
+          "expected": "5b995c373d3fa53f1e8f88c7638a0bd7b009ce530021a311c6c9287cadc50420",
+          "actual": "5b995c373d3fa53f1e8f88c7638a0bd7b009ce530021a311c6c9287cadc50420",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.aar"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.aar.md5",
+          "expected": "d05bbd94f88856e8f85619f38c87a85670f9f4f0033a57c8be01f9d083e6e9c6",
+          "actual": "d05bbd94f88856e8f85619f38c87a85670f9f4f0033a57c8be01f9d083e6e9c6",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.aar.md5"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.aar.sha1",
+          "expected": "257a9848df75952d96dfb362df8209796be17e480371484d1309e80750190b7c",
+          "actual": "257a9848df75952d96dfb362df8209796be17e480371484d1309e80750190b7c",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.aar.sha1"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.aar.sha256",
+          "expected": "0a9bcbee13a874d87161d486168920664f89224f2887d0435394e6c2c8847032",
+          "actual": "0a9bcbee13a874d87161d486168920664f89224f2887d0435394e6c2c8847032",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.aar.sha256"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.aar.sha512",
+          "expected": "fc9a38b8ab9b8165c0928fc0cf0d77fb696545ca6058eea49d25ef258310f10f",
+          "actual": "fc9a38b8ab9b8165c0928fc0cf0d77fb696545ca6058eea49d25ef258310f10f",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.aar.sha512"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.module",
+          "expected": "0355541256ac5e859889ff3850954cb9068b6fed5fbee98729e483169178ebbb",
+          "actual": "0355541256ac5e859889ff3850954cb9068b6fed5fbee98729e483169178ebbb",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.module"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.module.md5",
+          "expected": "527f3d640968f6e89501f870c78abb713b4ddc37d6bde35a2dd1c31afa3a4e55",
+          "actual": "527f3d640968f6e89501f870c78abb713b4ddc37d6bde35a2dd1c31afa3a4e55",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.module.md5"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.module.sha1",
+          "expected": "9ce6b5771820772fa5fdb57cb52ef35c1f48220d08f0fa1e100e0b874879d277",
+          "actual": "9ce6b5771820772fa5fdb57cb52ef35c1f48220d08f0fa1e100e0b874879d277",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.module.sha1"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.module.sha256",
+          "expected": "23660eb770d96e5be2a9d258227b11b1cd11d873692162397dbc8f809caeb4ba",
+          "actual": "23660eb770d96e5be2a9d258227b11b1cd11d873692162397dbc8f809caeb4ba",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.module.sha256"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.module.sha512",
+          "expected": "651b71e10412063ad6c19286d73218b677eecc7a165d9a3be170d80f5b77316a",
+          "actual": "651b71e10412063ad6c19286d73218b677eecc7a165d9a3be170d80f5b77316a",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.module.sha512"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.pom",
+          "expected": "5e99e7e4b931ee3eb47055b2ead7aab4c3b9dc7db8e207c63f2d721d58288437",
+          "actual": "5e99e7e4b931ee3eb47055b2ead7aab4c3b9dc7db8e207c63f2d721d58288437",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.pom"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.pom.md5",
+          "expected": "a06b734e3a6d390b5ecd4a028b09c77b46a622c6b454ed5efd14596601c77e29",
+          "actual": "a06b734e3a6d390b5ecd4a028b09c77b46a622c6b454ed5efd14596601c77e29",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.pom.md5"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.pom.sha1",
+          "expected": "ea5118be03b55b2a364a66d3304b0dfb12c6a06c738da8e644393787579101ec",
+          "actual": "ea5118be03b55b2a364a66d3304b0dfb12c6a06c738da8e644393787579101ec",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.pom.sha1"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.pom.sha256",
+          "expected": "3c2d9ed1df5ebc92901dca403d648d6c03d18023c6f7bec7f268266a451aaa38",
+          "actual": "3c2d9ed1df5ebc92901dca403d648d6c03d18023c6f7bec7f268266a451aaa38",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.pom.sha256"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0.pom.sha512",
+          "expected": "21a40199a4961be484d76a8401256b04e76776fc81b8266be34b374bdffab466",
+          "actual": "21a40199a4961be484d76a8401256b04e76776fc81b8266be34b374bdffab466",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-processing-opencv/1.0.0/scanner-processing-opencv-1.0.0.pom.sha512"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-ui-compose",
+      "version": "1.0.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-ui-compose-1.0.0-sources.jar",
+          "expected": "c27b71758aa69f056ce0241b1e1d624911a3bf49240f50da4d45e260504a9a2c",
+          "actual": "c27b71758aa69f056ce0241b1e1d624911a3bf49240f50da4d45e260504a9a2c",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0-sources.jar"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0-sources.jar.md5",
+          "expected": "f108b0a1ec45374118634ea1d90c179d641da2dc1c3dbf153de6a392b6347a63",
+          "actual": "f108b0a1ec45374118634ea1d90c179d641da2dc1c3dbf153de6a392b6347a63",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0-sources.jar.md5"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0-sources.jar.sha1",
+          "expected": "cd63cb377b5b8ec13ee8bf04aaaf288f12b49e6dc2fce7c2970af7c76bfb9e54",
+          "actual": "cd63cb377b5b8ec13ee8bf04aaaf288f12b49e6dc2fce7c2970af7c76bfb9e54",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0-sources.jar.sha1"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0-sources.jar.sha256",
+          "expected": "16662343ea29e25ef9d8384fe14e405047c8de3025f6d9773dfe5ea4ae3b1c6a",
+          "actual": "16662343ea29e25ef9d8384fe14e405047c8de3025f6d9773dfe5ea4ae3b1c6a",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0-sources.jar.sha256"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0-sources.jar.sha512",
+          "expected": "c433cfd5c35173126cd5b42fa765cc23208a9feb0be788876ebf8bdbaad4f97b",
+          "actual": "c433cfd5c35173126cd5b42fa765cc23208a9feb0be788876ebf8bdbaad4f97b",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0-sources.jar.sha512"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.aar",
+          "expected": "ff92b0d0da186ede0f219d136d94839a745ea3c72666fc5a7fd1b48d8ccbc008",
+          "actual": "ff92b0d0da186ede0f219d136d94839a745ea3c72666fc5a7fd1b48d8ccbc008",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.aar"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.aar.md5",
+          "expected": "a81e1ad5c4944dc437bbcba0af6c03e8595ca6ca68e5ab99d14189504e0b3e50",
+          "actual": "a81e1ad5c4944dc437bbcba0af6c03e8595ca6ca68e5ab99d14189504e0b3e50",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.aar.md5"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.aar.sha1",
+          "expected": "82a220d85575e98203ef02777149d4ddf6d7efb02b26ee0dd94fbe6d29c5cb2e",
+          "actual": "82a220d85575e98203ef02777149d4ddf6d7efb02b26ee0dd94fbe6d29c5cb2e",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.aar.sha1"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.aar.sha256",
+          "expected": "2885bdf5fc2706d746cdc454946e0cb8e9014517e16a6f25eaea0ff0eb86147e",
+          "actual": "2885bdf5fc2706d746cdc454946e0cb8e9014517e16a6f25eaea0ff0eb86147e",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.aar.sha256"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.aar.sha512",
+          "expected": "2369baa33d43b1abaa3d35a0c623792a0b367db0748858d8f4749fa1302fa647",
+          "actual": "2369baa33d43b1abaa3d35a0c623792a0b367db0748858d8f4749fa1302fa647",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.aar.sha512"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.module",
+          "expected": "bc17a1256e825060c23b3fae08d794f240163ed36fa6f10adf5a6f993bfaeedc",
+          "actual": "bc17a1256e825060c23b3fae08d794f240163ed36fa6f10adf5a6f993bfaeedc",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.module"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.module.md5",
+          "expected": "c619b75a56964c1d77d7c6ffd62c8c23e992327f5b6e2979900830a13a49ba63",
+          "actual": "c619b75a56964c1d77d7c6ffd62c8c23e992327f5b6e2979900830a13a49ba63",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.module.md5"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.module.sha1",
+          "expected": "d09de538988fe486e46c7e80262c57736076cef1072383c22b5a5e6642667143",
+          "actual": "d09de538988fe486e46c7e80262c57736076cef1072383c22b5a5e6642667143",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.module.sha1"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.module.sha256",
+          "expected": "7c7f6a565c0e8e45b8025a1f5f4a1d290c497f20b22d54a0a55699314d06fd96",
+          "actual": "7c7f6a565c0e8e45b8025a1f5f4a1d290c497f20b22d54a0a55699314d06fd96",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.module.sha256"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.module.sha512",
+          "expected": "b55e735a5f5b27027e0e1a743fba6abf42495953f6e10fcd10b616e0e6b5c1f3",
+          "actual": "b55e735a5f5b27027e0e1a743fba6abf42495953f6e10fcd10b616e0e6b5c1f3",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.module.sha512"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.pom",
+          "expected": "d23e3734ae7ff285c3ceecc971dc0f09357bc1d6df8b932d6ab66db40e04f48e",
+          "actual": "d23e3734ae7ff285c3ceecc971dc0f09357bc1d6df8b932d6ab66db40e04f48e",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.pom"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.pom.md5",
+          "expected": "364120cf10e8d0088ffa1fedcb8fc4ab06ea801a08f6d944629dc53794ed7d45",
+          "actual": "364120cf10e8d0088ffa1fedcb8fc4ab06ea801a08f6d944629dc53794ed7d45",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.pom.md5"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.pom.sha1",
+          "expected": "d6ef561e823f2dbe7ab00cd89de001a7a2784a9213e957a157fa5410f988d61e",
+          "actual": "d6ef561e823f2dbe7ab00cd89de001a7a2784a9213e957a157fa5410f988d61e",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.pom.sha1"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.pom.sha256",
+          "expected": "ef3d0ead902fbcb393afefd037a2a541a7fb746ba884670aed7e86f5dedb7dcd",
+          "actual": "ef3d0ead902fbcb393afefd037a2a541a7fb746ba884670aed7e86f5dedb7dcd",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.pom.sha256"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.0.0.pom.sha512",
+          "expected": "435678ee22d9b3c3ea32d5e8d5ea1c1745f524cb0aee12bc09c6732f403b4044",
+          "actual": "435678ee22d9b3c3ea32d5e8d5ea1c1745f524cb0aee12bc09c6732f403b4044",
+          "status": "verified",
+          "method": "verified scanner release bundle payload",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.0.0/open-android-doc-scanner-1.0.0-sdk-maven.zip!maven/dev/offlinescan/scanner-ui-compose/1.0.0/scanner-ui-compose-1.0.0.pom.sha512"
+        }
+      ]
+    },
+    {
+      "group": "app.raiun.vendor",
+      "name": "scanner-processing-opencv",
+      "version": "1.0.0-raiun-native.1",
+      "artifacts": [
+        {
+          "artifact": "scanner-processing-opencv-1.0.0-raiun-native.1.aar",
+          "expected": "7c0deb1ef4672c3fe67adad25f2bbe25447e88759c9c2592902ff8e19a0e81cb",
+          "actual": "7c0deb1ef4672c3fe67adad25f2bbe25447e88759c9c2592902ff8e19a0e81cb",
+          "status": "verified",
+          "method": "new SDK Java payload and exact reviewed native backport entry comparison",
+          "evidence": "third_party/native-security-fixes/provenance/scanner-1.0.0-repackaging.json"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.0.0-raiun-native.1.pom",
+          "expected": "880bbd12c36f5dc845af90bd1efdac20411368bb8903e0dd42d1db4711e7cb69",
+          "actual": "880bbd12c36f5dc845af90bd1efdac20411368bb8903e0dd42d1db4711e7cb69",
+          "status": "verified",
+          "method": "new SDK Java payload and exact reviewed native backport entry comparison",
+          "evidence": "third_party/native-security-fixes/provenance/scanner-1.0.0-repackaging.json"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-camera",
+      "version": "1.1.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-camera-1.1.0-sources.jar",
+          "expected": "dc4e4d351972de2f39d26d36cc332245be26a49f24d3d6216ba70afc9042c2c3",
+          "actual": "dc4e4d351972de2f39d26d36cc332245be26a49f24d3d6216ba70afc9042c2c3",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 13706,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-camera-1.1.0.aar",
+          "expected": "ea9aa72a2789865e02df7c8fad5d0ffdd4e422e74f4fced3f06d00736b32037a",
+          "actual": "ea9aa72a2789865e02df7c8fad5d0ffdd4e422e74f4fced3f06d00736b32037a",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 56637,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-camera-1.1.0.module",
+          "expected": "a2a7f5ac5ff643195f594791205cc7e78c5d0b083a8904c9912d724ef4518dfe",
+          "actual": "a2a7f5ac5ff643195f594791205cc7e78c5d0b083a8904c9912d724ef4518dfe",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 4427,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-camera-1.1.0.pom",
+          "expected": "2da4383f3194587c036fa45afbbb32ac94d8a1675274bc45686246c729df1874",
+          "actual": "2da4383f3194587c036fa45afbbb32ac94d8a1675274bc45686246c729df1874",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 2387,
+          "verified_at": "2026-11-20"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-core",
+      "version": "1.1.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-core-1.1.0.jar",
+          "expected": "e12ad5ff2b7bb051a7848d474f53613ab1fd499de7ddb193ff515938760a8978",
+          "actual": "e12ad5ff2b7bb051a7848d474f53613ab1fd499de7ddb193ff515938760a8978",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 76101,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-core-1.1.0.module",
+          "expected": "6116e8bc5279c6ea1463a9f63a02df82ca75436e21e403014d8f384c372f5d24",
+          "actual": "6116e8bc5279c6ea1463a9f63a02df82ca75436e21e403014d8f384c372f5d24",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 2516,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-core-1.1.0.pom",
+          "expected": "24f7270d1945ddb8a188d4052cdae22860dd0c8ba52553a20a7337747055d617",
+          "actual": "24f7270d1945ddb8a188d4052cdae22860dd0c8ba52553a20a7337747055d617",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 1240,
+          "verified_at": "2026-11-20"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-export",
+      "version": "1.1.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-export-1.1.0-sources.jar",
+          "expected": "c95bd09c51b8f17ddb717332ccbb474c43b178881fa5b393691f05970e963915",
+          "actual": "c95bd09c51b8f17ddb717332ccbb474c43b178881fa5b393691f05970e963915",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 4287,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-export-1.1.0.aar",
+          "expected": "29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970",
+          "actual": "29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 16744,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-export-1.1.0.module",
+          "expected": "f0c4d09401031750e596da93d070f5055ef977a12c9e53dfbb8a93d143893310",
+          "actual": "f0c4d09401031750e596da93d070f5055ef977a12c9e53dfbb8a93d143893310",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 3425,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-export-1.1.0.pom",
+          "expected": "f4d4d9d10cfe7c8135eed6e522116312886b5a5c8ebaf0b73d819e6e8400b4f8",
+          "actual": "f4d4d9d10cfe7c8135eed6e522116312886b5a5c8ebaf0b73d819e6e8400b4f8",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 1457,
+          "verified_at": "2026-11-20"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-ocr-tesseract",
+      "version": "1.1.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-ocr-tesseract-1.1.0-sources.jar",
+          "expected": "5017db10066faf30b5197da54500dc51b34c187cd299fd77d7d51b0495ae81f1",
+          "actual": "5017db10066faf30b5197da54500dc51b34c187cd299fd77d7d51b0495ae81f1",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 59068,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.1.0.aar",
+          "expected": "9124977c545c1a8d647279d4630ae57b0ad293c32dcca4460dceda59a67cb31a",
+          "actual": "9124977c545c1a8d647279d4630ae57b0ad293c32dcca4460dceda59a67cb31a",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 6874958,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.1.0.module",
+          "expected": "be3aafa438efcc2324a7c2545df67e74663eb11f8e8b4fe62a5ff0800e4b17de",
+          "actual": "be3aafa438efcc2324a7c2545df67e74663eb11f8e8b4fe62a5ff0800e4b17de",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 3643,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-ocr-tesseract-1.1.0.pom",
+          "expected": "4584dbb9a33d16a63a5e8470f01b5476555acdc51e89830e68314e66d1013ab8",
+          "actual": "4584dbb9a33d16a63a5e8470f01b5476555acdc51e89830e68314e66d1013ab8",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 1653,
+          "verified_at": "2026-11-20"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-processing-opencv",
+      "version": "1.1.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-processing-opencv-1.1.0-sources.jar",
+          "expected": "2fccdd121bc6359a3cf387162d9531835dbc77f627aa8cadf01dae823c81bc3c",
+          "actual": "2fccdd121bc6359a3cf387162d9531835dbc77f627aa8cadf01dae823c81bc3c",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 22656,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.1.0.aar",
+          "expected": "7e7f1e4ca0bef87a5f55d90b4dcb8f98b4e05d0d60de0787fccb33e3cbeaa423",
+          "actual": "7e7f1e4ca0bef87a5f55d90b4dcb8f98b4e05d0d60de0787fccb33e3cbeaa423",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 20672972,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.1.0.module",
+          "expected": "9ce1f063502779cb086c87bb5ede460a9931e482424dcf101dd39cf3429a633d",
+          "actual": "9ce1f063502779cb086c87bb5ede460a9931e482424dcf101dd39cf3429a633d",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 3859,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.1.0.pom",
+          "expected": "ba5acf7a6b071cdf44c4ea6d4e982c770ebc680e3857a8f730c177a0407d51e8",
+          "actual": "ba5acf7a6b071cdf44c4ea6d4e982c770ebc680e3857a8f730c177a0407d51e8",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 1865,
+          "verified_at": "2026-11-20"
+        }
+      ]
+    },
+    {
+      "group": "dev.offlinescan",
+      "name": "scanner-ui-compose",
+      "version": "1.1.0",
+      "artifacts": [
+        {
+          "artifact": "scanner-ui-compose-1.1.0-sources.jar",
+          "expected": "b45a7608627bcb5af92154d2c2e0cf38d6c606875874ea96e6112b02835dd86a",
+          "actual": "b45a7608627bcb5af92154d2c2e0cf38d6c606875874ea96e6112b02835dd86a",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 29838,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.1.0.aar",
+          "expected": "dd58afc7a9d7b2c6c96d2f9387e19f84ba237c7269b913a2e86e9371e27714b8",
+          "actual": "dd58afc7a9d7b2c6c96d2f9387e19f84ba237c7269b913a2e86e9371e27714b8",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 369969,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.1.0.module",
+          "expected": "d218dc9b9a1d64e980af8b633750c4b49bf7583e36ba61ef6c03012532c631b0",
+          "actual": "d218dc9b9a1d64e980af8b633750c4b49bf7583e36ba61ef6c03012532c631b0",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 5641,
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-ui-compose-1.1.0.pom",
+          "expected": "0dca009d94ceb8a2641e0e8da9ad6b7d41029e997ec16c9f054296248d2d57e3",
+          "actual": "0dca009d94ceb8a2641e0e8da9ad6b7d41029e997ec16c9f054296248d2d57e3",
+          "status": "verified",
+          "method": "Published scanner1.1.0 SHA256-pinned bundle member",
+          "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+          "bundle_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+          "bytes": 3564,
+          "verified_at": "2026-11-20"
+        }
+      ]
+    },
+    {
+      "group": "app.raiun.vendor",
+      "name": "scanner-processing-opencv",
+      "version": "1.1.0-raiun-native.1",
+      "artifacts": [
+        {
+          "artifact": "scanner-processing-opencv-1.1.0-raiun-native.1.aar",
+          "expected": "534c7cb90938e3fe06322d1e8e613b600778158397d81c55b61263981740554f",
+          "actual": "534c7cb90938e3fe06322d1e8e613b600778158397d81c55b61263981740554f",
+          "status": "verified",
+          "method": "Exact source-bundle repackaging retaining reviewed native backport",
+          "evidence": "third_party/native-security-fixes/provenance/scanner-1.1.0-repackaging.json",
+          "verified_at": "2026-11-20"
+        },
+        {
+          "artifact": "scanner-processing-opencv-1.1.0-raiun-native.1.pom",
+          "expected": "93f19daee1511dd5cc9af899949fa4ce107b70255cc911c9d219862855c96107",
+          "actual": "93f19daee1511dd5cc9af899949fa4ce107b70255cc911c9d219862855c96107",
+          "status": "verified",
+          "method": "Exact source-bundle repackaging retaining reviewed native backport",
+          "evidence": "third_party/native-security-fixes/provenance/scanner-1.1.0-repackaging.json",
+          "verified_at": "2026-11-20"
+        }
+      ]
     }
-  ]
+  ],
+  "updater_pin_update": {
+    "date": "2026-11-20",
+    "scope": "Four updater hashes independently checked against public bundle; all earlier entries retained"
+  },
+  "scanner_pin_update": {
+    "date": "2026-11-20",
+    "scope": "New scanner release payloads and derived processing AAR only; earlier entries retained"
+  },
+  "scanner_1_1_0_bundle": {
+    "source_commit": "e955add9eb6c24df588952245366b43ce521590c",
+    "archive_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+    "public_digest_and_sha256sums_checked": true,
+    "verification_date": "2026-11-20"
+  }
 }

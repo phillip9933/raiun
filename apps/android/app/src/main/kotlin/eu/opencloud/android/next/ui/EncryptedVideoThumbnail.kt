@@ -3,7 +3,6 @@ package eu.opencloud.android.next.ui
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
-import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.ParcelFileDescriptor
@@ -18,7 +17,6 @@ internal suspend fun loadEncryptedVideoThumbnail(
     backing: EncryptedPreviewBacking,
 ): Bitmap? =
     withContext(Dispatchers.IO) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return@withContext null
         val callbackThread = HandlerThread("encrypted-video-thumbnail").apply { start() }
         val retriever = MediaMetadataRetriever()
         var proxy: ParcelFileDescriptor? = null

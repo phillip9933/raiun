@@ -45,7 +45,7 @@ import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [26, 35], qualifiers = "w360dp-h800dp", application = Application::class)
+@Config(sdk = [31, 35], qualifiers = "w360dp-h800dp", application = Application::class)
 class AccountIdentityStyleTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 

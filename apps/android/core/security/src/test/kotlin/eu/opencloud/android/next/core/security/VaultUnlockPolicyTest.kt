@@ -19,7 +19,7 @@ import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35])
+@Config(sdk = [31, 35])
 class VaultUnlockPolicyTest {
     @get:Rule val temporaryFolder = TemporaryFolder()
     private val context: Context get() = RuntimeEnvironment.getApplication()

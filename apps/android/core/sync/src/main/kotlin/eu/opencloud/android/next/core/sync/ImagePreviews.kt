@@ -4,7 +4,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
-import android.os.Build
 import android.util.LruCache
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
@@ -140,9 +139,8 @@ object ImagePreviews {
         return BitmapFactory.decodeFile(path, options)
     }
 
-    /** API 27+ can request a scaled frame without materializing the source frame at full resolution. */
+    /** Request a scaled frame without materializing the source frame at full resolution. */
     private fun loadLocalVideoFrame(path: String): Bitmap? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return null
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(path)

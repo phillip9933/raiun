@@ -1109,40 +1109,50 @@
     },
     {
       "coordinate": "dev.offlinescan:scanner-camera",
-      "version": "0.7.0",
+      "version": "1.1.0",
       "status": "maintainer-bundle-pin",
-      "sha256": "96d9fcbecd3fdff394e7807c822767440fc340bf15b9036d20a3e41e94240772"
+      "sha256": "ea9aa72a2789865e02df7c8fad5d0ffdd4e422e74f4fced3f06d00736b32037a",
+      "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+      "verified_at": "2026-11-20"
     },
     {
       "coordinate": "dev.offlinescan:scanner-core",
-      "version": "0.7.0",
+      "version": "1.1.0",
       "status": "maintainer-bundle-pin",
-      "sha256": "355b2ebb56775fc1ac74d7ac6a3ab7e1604a36a5b8630ea4a94b0b9c912f9ce1"
+      "sha256": "e12ad5ff2b7bb051a7848d474f53613ab1fd499de7ddb193ff515938760a8978",
+      "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+      "verified_at": "2026-11-20"
     },
     {
       "coordinate": "dev.offlinescan:scanner-export",
-      "version": "0.7.0",
+      "version": "1.1.0",
       "status": "maintainer-bundle-pin",
-      "sha256": "29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970"
+      "sha256": "29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970",
+      "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+      "verified_at": "2026-11-20"
     },
     {
       "coordinate": "dev.offlinescan:scanner-processing-opencv",
-      "version": "0.7.0",
+      "version": "1.1.0",
       "status": "maintainer-bundle-pin",
-      "sha256": "390c873ce6db66c1cadb7134d1ce55c62bb9200ae93718bb25eec393b0d09d89"
+      "sha256": "7e7f1e4ca0bef87a5f55d90b4dcb8f98b4e05d0d60de0787fccb33e3cbeaa423",
+      "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+      "verified_at": "2026-11-20"
     },
     {
       "coordinate": "dev.offlinescan:scanner-ui-compose",
-      "version": "0.7.0",
+      "version": "1.1.0",
       "status": "maintainer-bundle-pin",
-      "sha256": "8fe9f1e7591e806e9319a3745faaa1bb78dc2678f3adb907460c4571b0d55edc"
+      "sha256": "dd58afc7a9d7b2c6c96d2f9387e19f84ba237c7269b913a2e86e9371e27714b8",
+      "evidence": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v1.1.0/open-android-doc-scanner-1.1.0-sdk-maven.zip",
+      "verified_at": "2026-11-20"
     },
     {
       "coordinate": "io.github.phillip9933:android-updater",
-      "version": "0.2.0",
+      "version": "1.0.0",
       "status": "maintainer-bundle-pin",
-      "sha256": "ede8c4b3660654918b15004b17d0633bc8c7e1989c1548786671b98be9ea4854",
-      "evidence": "https://github.com/phillip9933/android-app-updater/releases/download/v0.2.0/android-app-updater-0.2.0-bundle.zip"
+      "sha256": "5be67e6bc30c370347631d5a1f3208f11b6f807f3a1aef84f6a1d615cb414c70",
+      "evidence": "https://github.com/phillip9933/android-app-updater/releases/download/v1.0.0/android-app-updater-1.0.0-bundle.zip"
     },
     {
       "coordinate": "net.java.dev.jna:jna",
@@ -1285,5 +1295,22 @@
       "status": "verified",
       "evidence": "https://repo.maven.apache.org/maven2/org/jspecify/jspecify/1.0.0/jspecify-1.0.0.jar.sha256"
     }
-  ]
+  ],
+  "updater_pin_update": {
+    "date": "2026-11-20",
+    "scope": "Updater entry only; other records retain their original provenance date",
+    "bundle_sha256": "13b0fa5df7524091191e063c9b25bdb4d222866053228754d98ea3f1d1e72763"
+  },
+  "scanner_pin_update": {
+    "date": "2026-11-20",
+    "scope": "Scanner entries only; prior entries retain their original provenance date",
+    "bundle_sha256": "0675b8cc1b7fd552bf342bd17066d510c857c528f1ceefb7ce4bf8e186bfba10"
+  },
+  "scanner_1_1_0_pin_update": {
+    "verified_at": "2026-11-20",
+    "version": "1.1.0",
+    "source_commit": "e955add9eb6c24df588952245366b43ce521590c",
+    "archive_sha256": "caa07accbd07328f0e4066d3d9c5fce85b479a4da97fd7f246f1f2426ab2ad82",
+    "scope": "Only scanner publisher entries refreshed; earlier unrelated provenance timestamps retained"
+  }
 }

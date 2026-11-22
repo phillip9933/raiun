@@ -13,7 +13,7 @@ import org.robolectric.shadow.api.Shadow
 
 /** Verifies the host descriptor model only; native migration probes cover real durability. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35], shadows = [DirectoryAwareLinuxShadow::class])
+@Config(sdk = [31, 35], shadows = [DirectoryAwareLinuxShadow::class])
 class DirectoryAwareLinuxShadowTest {
     @get:Rule val directoryModel = DirectoryLinuxModelRule()
 

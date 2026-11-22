@@ -21,7 +21,7 @@ import org.robolectric.annotation.Config
 import java.util.concurrent.CopyOnWriteArrayList
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [28], application = Application::class)
+@Config(sdk = [31], application = Application::class)
 class BrowserBackupCommandsTest {
     @Test fun `creation reads metadata on Main then saves captured account once across account roundtrip`() =
         runBlocking {

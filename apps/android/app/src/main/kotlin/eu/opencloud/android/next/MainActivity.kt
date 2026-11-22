@@ -71,7 +71,7 @@ class MainActivity : AppCompatActivity() {
                         SystemBarStyle.light(OpenCloudColor.Transparent.toArgb(), OpenCloudColor.Transparent.toArgb())
                     }
                 enableEdgeToEdge(statusBarStyle = barStyle, navigationBarStyle = barStyle)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
+                window.isNavigationBarContrastEnforced = false
                 WindowCompat.getInsetsController(window, window.decorView).apply {
                     isAppearanceLightStatusBars = !dark
                     isAppearanceLightNavigationBars = !dark

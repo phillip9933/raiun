@@ -19,7 +19,7 @@ python3 scripts/check_native_dependencies.py \
   --pins gradle/runtime-artifact-pins.sha256 \
   --apk app/build/outputs/apk/release/app-release-unsigned.apk \
   --artifact-root "$HOME/.gradle/caches/modules-2/files-2.1" \
-  --artifact-root .gradle/open-android-doc-scanner-0.8.0-beta.1/maven \
+  --artifact-root .gradle/open-android-doc-scanner-1.1.0/maven \
   --artifact-root third_party/native-security-fixes/maven \
   --scan --output build/native-review.json
 ```
@@ -92,7 +92,7 @@ artifact builds. Published source tags alone cannot express these backports.
 
 ## Remaining coverage and future maintenance
 
-- OpenCV source: [4.12.0 archive](https://github.com/opencv/opencv/archive/refs/tags/4.12.0.zip), SHA256 `fa3faf7581f1fa943c9e670cf57dd6ba1c5b4178f363a188a2c8bff1eb28b7e4`, plus the bundled typed-dispatch patch. Only core/imgproc/Java are built; static transitive coverage is not exhaustive.
+- OpenCV source: [4.12.0 archive](https://github.com/opencv/opencv/archive/refs/tags/4.12.0.zip), SHA256 `fa3faf7581f1fa943c9e670cf57dd6ba1c5b4178f363a188a2c8bff1eb28b7e4`, plus the bundled typed-dispatch patch. The [two-ABI rebuild recipe](../third_party/native-security-fixes/provenance/opencv-rebuild/README.md) replays the pinned core, imgproc and Java bindings build. Static transitive coverage is incomplete.
 - libsodium source: [1.0.20 release tarball](https://github.com/jedisct1/libsodium/releases/download/1.0.20-RELEASE/libsodium-1.0.20.tar.gz), SHA256 `ebb65ef6ca439333c2bb41a0c1990587288da07f6c7fd07cb3a18cc18d30ce19`, plus the exact upstream patch. Source-tree admission rejects extra/missing/changed files and symlinks before compilation. Wrapper Java remains Lazysodium 5.2.0.
 - NDK libc++: original scanner runtime retained, publisher evidence declares NDK 28.2.13676358. No verified OSV identity mapping; an NDK revision is not a libc++ upstream version.
 - JNA 5.17.0/libffi: source declares vendored libffi 3.4.4, but its patch-level/binary attestation remains incomplete. Do not pretend this is the exact unmodified upstream tag.
@@ -107,3 +107,7 @@ Retire the local forks only after an independently verified upstream replacement
 and the relevant crypto/scanner regressions. Never regenerate native hashes or
 resolution records merely to pass a mismatch. OCR remains disabled; no
 Tesseract/Leptonica libraries occur in the expected APK set.
+
+## Scanner 1.1.0 repackaging — 20 November 2026
+
+The active scanner coordinate is `app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1`. Upstream 1.1.0 changes the processing classes and retains the OpenCV native binaries, Java wrapper, model, notices and libc++ from upstream 1.0.0. The local AAR uses the upstream 1.1.0 payloads with the two reviewed OpenCV libraries copied byte-for-byte from the prior local 1.0.0 AAR. The native inventory binds the four OpenCV resolutions to this AAR through the [1.1.0 repackaging audit](../third_party/native-security-fixes/provenance/scanner-1.1.0-repackaging.json). The source sanitizer and x86_64 native results above apply to the preserved libraries. Scanner 1.1.0 app integration requires its own checks.

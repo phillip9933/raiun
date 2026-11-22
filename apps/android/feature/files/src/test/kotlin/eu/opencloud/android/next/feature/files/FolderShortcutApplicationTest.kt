@@ -18,7 +18,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35])
+@Config(sdk = [31, 35])
 class FolderShortcutApplicationTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 

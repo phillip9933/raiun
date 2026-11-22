@@ -14,6 +14,6 @@ The scanner installer checks the version and checksum in `scripts/offline-scanne
 
 The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Unsigned release output is `app/build/outputs/apk/release/app-release-unsigned.apk`. Debug signing is separate from the production identity; an ordinary debug APK cannot update a production-signed installation.
 
-See [Testing](TESTING.md) for formatting, static analysis, host tests, screenshot verification and the API 26/API 35 emulator matrix. See [Releasing](RELEASING.md) for production signing and update-compatibility checks. Do not use the historical Windows DPAPI password backup as a Linux credential format.
+See [Testing](TESTING.md) for formatting, static analysis, host tests, screenshot verification and the API 31/API 35 emulator matrix. See [Releasing](RELEASING.md) for production signing and update-compatibility checks. Do not use the historical Windows DPAPI password backup as a Linux credential format.
 
 This guide describes the moved project setup. Actual migration validation is recorded separately; installed tools and older test results alone do not establish release readiness.

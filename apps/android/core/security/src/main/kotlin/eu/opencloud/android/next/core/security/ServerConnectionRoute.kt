@@ -9,7 +9,6 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
-import android.os.Build
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.TransportPolicyException
 import okhttp3.ConnectionPool
@@ -52,30 +51,17 @@ class WifiServerNetworkMonitor private constructor(
     private var registered = false
     private var lastEligible: Boolean? = null
     private val callback: ConnectivityManager.NetworkCallback =
-        if (Build.VERSION.SDK_INT >= 31) {
-            object : ConnectivityManager.NetworkCallback(
-                ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO,
-            ) {
-                override fun onAvailable(network: Network) = recordAvailable(network)
+        object : ConnectivityManager.NetworkCallback(
+            ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO,
+        ) {
+            override fun onAvailable(network: Network) = recordAvailable(network)
 
-                override fun onCapabilitiesChanged(
-                    network: Network,
-                    capabilities: NetworkCapabilities,
-                ) = recordCapabilities(network, capabilities)
+            override fun onCapabilitiesChanged(
+                network: Network,
+                capabilities: NetworkCapabilities,
+            ) = recordCapabilities(network, capabilities)
 
-                override fun onLost(network: Network) = forget(network)
-            }
-        } else {
-            object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) = recordAvailable(network)
-
-                override fun onCapabilitiesChanged(
-                    network: Network,
-                    capabilities: NetworkCapabilities,
-                ) = recordCapabilities(network, capabilities)
-
-                override fun onLost(network: Network) = forget(network)
-            }
+            override fun onLost(network: Network) = forget(network)
         }
 
     private fun recordAvailable(network: Network) {
@@ -93,12 +79,7 @@ class WifiServerNetworkMonitor private constructor(
         network: Network,
         capabilities: NetworkCapabilities,
     ) {
-        val ssid =
-            if (Build.VERSION.SDK_INT >= 29) {
-                (capabilities.transportInfo as? WifiInfo)?.ssid?.let(::usableSsid)
-            } else {
-                null
-            }
+        val ssid = (capabilities.transportInfo as? WifiInfo)?.ssid?.let(::usableSsid)
         val observation =
             WifiRouteObservation(
                 true,
@@ -149,14 +130,7 @@ class WifiServerNetworkMonitor private constructor(
     private fun readCurrent(): Pair<Network?, WifiRouteObservation> {
         val permission =
             app.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val locationEnabled =
-            if (Build.VERSION.SDK_INT >= 28) {
-                location.isLocationEnabled
-            } else {
-                location.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
-                    location.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
-            }
-        val available = permission && locationEnabled
+        val available = permission && location.isLocationEnabled
         ensureRegistration(available)
         val network = connectivity.activeNetwork
         val capabilities = network?.let(connectivity::getNetworkCapabilities)
@@ -165,14 +139,9 @@ class WifiServerNetworkMonitor private constructor(
         val ssid =
             if (!available || !isWifi || isVpn) {
                 null
-            } else if (Build.VERSION.SDK_INT >= 31) {
+            } else {
                 network?.let(callbackObservations::get)?.ssid
                     ?: (capabilities?.transportInfo as? WifiInfo)?.ssid?.let(::usableSsid)
-                    ?: legacySsid()
-            } else {
-                (if (Build.VERSION.SDK_INT >= 29) capabilities?.transportInfo as? WifiInfo else null)
-                    ?.ssid
-                    ?.let(::usableSsid)
                     ?: legacySsid()
             }
         return network to WifiRouteObservation(available, isWifi, isVpn, ssid)
@@ -235,45 +204,14 @@ class ServerConnectionRoute(
     fun createSnapshot(canonicalServerUrl: String): ServerConnectionSnapshot {
         val captured =
             try {
-                val previous = store.find(canonicalServerUrl)
-                val observed =
-                    if (previous?.enabled == true &&
-                        previous.mode != WifiRouteMode.PUBLIC
-                    ) {
-                        monitor.capture()
-                    } else {
-                        null
+                val public =
+                    store.withRoute(canonicalServerUrl) { route ->
+                        if (route.requiresWifiObservation()) null else admitSnapshot(canonicalServerUrl, route, null)
                     }
-                store.withRoute(canonicalServerUrl) { persisted ->
-                    val route = persisted?.let(WifiServerRoutePolicy::validate)
-                    val snapshot =
-                        if (route == null || !route.enabled || route.mode == WifiRouteMode.PUBLIC) {
-                            ServerConnectionSnapshot(route, WifiRouteStatus.DISABLED, null, canonicalServerUrl)
-                        } else {
-                            val (capturedNetwork, revision) =
-                                observed
-                                    ?: ((null to WifiRouteObservation(false, false, false, null)) to 0L)
-                            val (network, observation) = capturedNetwork
-                            val status = WifiServerRoutePolicy.status(route, observation)
-                            ServerConnectionSnapshot(
-                                route,
-                                status,
-                                network.takeIf {
-                                    status == WifiRouteStatus.ACTIVE
-                                },
-                                canonicalServerUrl,
-                                revision,
-                            )
-                        }
-                    val scope = store.transportScope(canonicalServerUrl)
-                    val admission =
-                        if (snapshot.networkRevision == null) {
-                            ScopedTransportCache.guardDeferred(scope, snapshot.routeState())
-                        } else {
-                            monitor.admit(snapshot.networkRevision, scope, snapshot.routeState())
-                                ?: throw TransportPolicyException(OpenCloudError.NetworkRouteChanged)
-                        }
-                    snapshot to admission
+                public ?: run {
+                    // Capture outside the route lock, then reread policy before admitting local routing.
+                    val observed = monitor.capture()
+                    store.withRoute(canonicalServerUrl) { route -> admitSnapshot(canonicalServerUrl, route, observed) }
                 }
             } catch (_: Exception) {
                 ScopedTransportCache.revoke(store.transportScope(canonicalServerUrl))
@@ -281,6 +219,38 @@ class ServerConnectionRoute(
             }
         captured.second.retire()
         return captured.first.also { it.transportGuard = captured.second.guard }
+    }
+
+    private fun WifiServerRoute?.requiresWifiObservation(): Boolean =
+        this?.enabled == true && mode != WifiRouteMode.PUBLIC
+
+    private fun admitSnapshot(
+        canonicalServerUrl: String,
+        persisted: WifiServerRoute?,
+        observed: Pair<Pair<Network?, WifiRouteObservation>, Long>?,
+    ): Pair<ServerConnectionSnapshot, TransportAdmission> {
+        val route = persisted?.let(WifiServerRoutePolicy::validate)
+        val scope = store.transportScope(canonicalServerUrl)
+        if (!persisted.requiresWifiObservation()) {
+            val snapshot = ServerConnectionSnapshot(route, WifiRouteStatus.DISABLED, null, canonicalServerUrl)
+            return snapshot to ScopedTransportCache.guardDeferred(scope, snapshot.routeState())
+        }
+
+        val (capturedNetwork, revision) = requireNotNull(observed)
+        val (network, observation) = capturedNetwork
+        val status = WifiServerRoutePolicy.status(requireNotNull(route), observation)
+        val snapshot =
+            ServerConnectionSnapshot(
+                route,
+                status,
+                network.takeIf { status == WifiRouteStatus.ACTIVE },
+                canonicalServerUrl,
+                revision,
+            )
+        val admission =
+            monitor.admit(revision, scope, snapshot.routeState())
+                ?: throw TransportPolicyException(OpenCloudError.NetworkRouteChanged)
+        return snapshot to admission
     }
 
     /** A changed network fails every call before sending it. Only the canonical host gets local DNS. */

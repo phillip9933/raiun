@@ -49,12 +49,12 @@ import java.util.concurrent.atomic.AtomicInteger
 @GraphicsMode(GraphicsMode.Mode.LEGACY)
 @SQLiteMode(SQLiteMode.Mode.LEGACY)
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 35])
+@Config(sdk = [31, 35])
 class LaunchIntentEntryTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Before fun grantDeclaredLegacyReceiverPermission() {
-        if (Build.VERSION.SDK_INT == 26) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             Shadows.shadowOf(ApplicationProvider.getApplicationContext<Application>()).grantPermissions(
                 "${compose.activity.packageName}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
             )
@@ -169,7 +169,7 @@ class LaunchIntentEntryTest {
                     requestId = pending?.id,
                     activeAccount = activeAccount,
                     restoringSession = restoring,
-                    switchAccount = { switches += it },
+                    switchAccount = { switches.add(it) },
                     open = { owner.openFolder(requireNotNull(pending).id, it) },
                     onUnavailable = {
                         unavailable.incrementAndGet()
@@ -235,7 +235,7 @@ class LaunchIntentEntryTest {
                 requestId = pending?.id,
                 activeAccount = "new-account",
                 restoringSession = false,
-                switchAccount = { switches += it },
+                switchAccount = { switches.add(it) },
                 open = { owner.openFolder(requireNotNull(pending).id, it) },
                 onUnavailable = {
                     unavailable.incrementAndGet()
@@ -266,7 +266,7 @@ class LaunchIntentEntryTest {
         }
     }
 
-    @Test fun sharedShortcutValidatesAfterAccountSwitchAndKeepsMatchingAckForNewerSameUri() {
+    @Test fun sharedShortcutValidatesBeforeAccountSwitchAndKeepsMatchingAckForNewerSameUri() {
         val scenarioIntent = Intent(compose.activity.intent)
         val owner = ViewModelProvider(compose.activity)[LaunchIntentViewModel::class.java]
         val expected = SharedFolderRequest("target", "share", "scope", "remote", "/folder")
@@ -301,7 +301,7 @@ class LaunchIntentEntryTest {
                     requestId = pending?.id,
                     activeAccount = activeAccount,
                     restoringSession = false,
-                    switchAccount = { switches += it },
+                    switchAccount = { switches.add(it) },
                     open = { error("Expected a shared handoff") },
                     onUnavailable = {
                         unavailable.incrementAndGet()
@@ -315,29 +315,29 @@ class LaunchIntentEntryTest {
         }
         try {
             compose.waitForIdle()
+            compose.waitUntil { resolutions.get() == 1 || unavailable.get() > 0 }
+            compose.runOnIdle {
+                assertEquals("Unexpected shared shortcut rejection", 0, unavailable.get())
+                assertTrue(switches.isEmpty())
+                assertNull(owner.folderNavigation)
+                validation.complete(Unit)
+            }
             compose.waitUntil { switches.size == 1 || unavailable.get() > 0 }
             compose.runOnIdle {
                 assertEquals("Unexpected shared shortcut rejection", 0, unavailable.get())
                 assertEquals(listOf("target"), switches)
-                assertEquals(0, resolutions.get())
+                assertEquals(1, resolutions.get())
                 assertNull(owner.folderNavigation)
                 assertTrue(owner.isPending(first.id))
                 activeAccount = "target"
             }
             compose.waitForIdle()
-            compose.waitUntil { resolutions.get() == 1 || unavailable.get() > 0 }
-            compose.runOnIdle {
-                assertEquals("Unexpected shared shortcut rejection", 0, unavailable.get())
-                assertNull(owner.folderNavigation)
-                assertTrue(owner.isPending(first.id))
-                validation.complete(Unit)
-            }
-            compose.waitForIdle()
-            compose.waitUntil { owner.folderNavigation?.shared == expected }
+            compose.waitUntil { owner.folderNavigation?.shared == expected || unavailable.get() > 0 }
             compose.runOnIdle { unlocked = false }
             compose.runOnIdle { unlocked = true }
             compose.runOnIdle {
-                assertEquals(1, resolutions.get())
+                assertEquals("Unexpected shared shortcut rejection", 0, unavailable.get())
+                assertEquals(2, resolutions.get())
                 assertTrue(owner.isPending(first.id))
                 assertEquals(first.id, owner.folderNavigation?.id)
                 // A genuine second delivery uses the same URI but needs a new validation/handoff.
@@ -346,7 +346,7 @@ class LaunchIntentEntryTest {
                 compose.activity.intent = newer
             }
             compose.waitForIdle()
-            compose.waitUntil { (resolutions.get() == 2 && owner.folderNavigation != null) || unavailable.get() > 0 }
+            compose.waitUntil { (resolutions.get() == 3 && owner.folderNavigation != null) || unavailable.get() > 0 }
             compose.runOnIdle {
                 assertEquals("Unexpected replacement shared shortcut rejection", 0, unavailable.get())
                 val second = requireNotNull(owner.pending)

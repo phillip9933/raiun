@@ -3,7 +3,6 @@ package eu.opencloud.android.next.ui
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
-import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.ParcelFileDescriptor
@@ -11,7 +10,6 @@ import android.os.ProxyFileDescriptorCallback
 import android.os.storage.StorageManager
 import android.system.ErrnoException
 import android.system.OsConstants
-import androidx.annotation.RequiresApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -193,7 +191,6 @@ internal data class EncryptedPdfPage(
 )
 
 /** Seekable in-memory backing for PdfRenderer. Plaintext is wiped after both owners release it. */
-@RequiresApi(Build.VERSION_CODES.O)
 internal class EncryptedPdfDocument private constructor(
     private val context: Context,
     private var backing: ByteArray,
@@ -389,7 +386,6 @@ internal class EncryptedPdfDocument private constructor(
             context: Context,
             pdfBytes: ByteArray,
         ): EncryptedPdfDocument {
-            require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             require(pdfBytes.size >= 6)
             require(
                 pdfBytes[0] == '%'.code.toByte() &&

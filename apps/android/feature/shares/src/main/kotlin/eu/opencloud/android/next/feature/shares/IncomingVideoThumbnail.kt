@@ -3,7 +3,6 @@ package eu.opencloud.android.next.feature.shares
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
-import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.ParcelFileDescriptor
@@ -34,7 +33,6 @@ internal suspend fun loadIncomingVideoThumbnail(
                 null
             }
         if (serverPreview != null || !hasLocalCopy) return@withContext serverPreview
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return@withContext null
         val session = SharedLocalReader.open(context, request)
         val callbackThread = HandlerThread("shared-video-thumbnail").apply { start() }
         val proxy =

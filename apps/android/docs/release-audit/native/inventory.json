@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "baseline": {
-    "description": "Local native-only security backport candidate; exact generated APK recorded by integrity checker. Prior signed phone build60 preserved unchanged."
+    "description": "Scanner SDK 1.1.0 processing classes with byte-identical November 6 OpenCV and libsodium backports. The historical execution evidence covers the preserved native libraries. The APK and scanner integration have separate acceptance checks."
   },
   "evidence_files": {
     "scanner-native-build-manifest.json": "112002dce280f738bb4bb369d3f374d73d09a4ffa9ec38a245cbbf4adc951749",
-    "security-backports.json": "62e260123cc19c1206f17f14d18894bb4d7864f48ab2fef4cf91704104c127b2"
+    "security-backports.json": "617db13c4b0436c7b2cd599f2b990534c2992093694f018d59054ea5578d02b5"
   },
   "artifacts": {
     "androidx.graphics:graphics-path:1.0.1": {
@@ -26,15 +26,15 @@
     "app.raiun.vendor:lazysodium-android:5.2.0-raiun-native.1": {
       "sha256": "83326921726084e014289bffed0407bfeaa496622b9e01c862d684b32b56e6bc"
     },
-    "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": {
-      "sha256": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+    "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1": {
+      "sha256": "534c7cb90938e3fe06322d1e8e613b600778158397d81c55b61263981740554f"
     }
   },
   "components": {
     "opencv": {
       "version": "4.12.0",
       "artifacts": [
-        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1"
+        "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1"
       ],
       "evidence": [
         "https://github.com/phillip9933/open-android-doc-scanner/blob/8d9a451c27ed87d20110d25dcedb81001e0f521f/evidence/native-build-manifest.json",
@@ -54,7 +54,7 @@
     "ndk-libcxx": {
       "version": "28.2.13676358",
       "artifacts": [
-        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1"
+        "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1"
       ],
       "evidence": [
         "https://github.com/phillip9933/open-android-doc-scanner/blob/8d9a451c27ed87d20110d25dcedb81001e0f521f/evidence/native-build-manifest.json",
@@ -184,7 +184,7 @@
       "apk_entry": "lib/arm64-v8a/libc++_shared.so",
       "source_entry": "jni/arm64-v8a/libc++_shared.so",
       "sha256": "cd61762848882a16c8244c964a6f396c0caa0b440588a210ce9cc4ab0e6d9f0c",
-      "artifact": "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1",
+      "artifact": "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1",
       "components": [
         "ndk-libcxx"
       ]
@@ -240,7 +240,7 @@
       "apk_entry": "lib/arm64-v8a/libopencv_java4.so",
       "source_entry": "jni/arm64-v8a/libopencv_java4.so",
       "sha256": "34d7f4d34908b9c8f78586c6908517258cf1b89cdaa5a28e333d4b3eb78c71d9",
-      "artifact": "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1",
+      "artifact": "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1",
       "components": [
         "opencv"
       ]
@@ -276,7 +276,7 @@
       "apk_entry": "lib/x86_64/libc++_shared.so",
       "source_entry": "jni/x86_64/libc++_shared.so",
       "sha256": "2e855857f80819737d25a663109fedf816a5e996a85423166806014a06593256",
-      "artifact": "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1",
+      "artifact": "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1",
       "components": [
         "ndk-libcxx"
       ]
@@ -332,7 +332,7 @@
       "apk_entry": "lib/x86_64/libopencv_java4.so",
       "source_entry": "jni/x86_64/libopencv_java4.so",
       "sha256": "ba27a05353d919f26bd91364095f68ade8975ce009f00d07cf28ab125457507a",
-      "artifact": "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1",
+      "artifact": "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1",
       "components": [
         "opencv"
       ]
@@ -377,12 +377,12 @@
       "status": "fixed",
       "justification": "source_patch_applied",
       "artifacts": {
-        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+        "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1": "534c7cb90938e3fe06322d1e8e613b600778158397d81c55b61263981740554f"
       },
       "evidence_files": [
         "security-backports.json"
       ],
-      "rationale": "Typed wrappers remove wrong function-pointer calls without T** aliasing; real-core host UBSan fails before and passes672 cases after; Android output compatibility passes both APIs."
+      "rationale": "Typed wrappers remove wrong function-pointer calls without T** aliasing; real-core host UBSan fails before and passes672 cases after; Android output compatibility passes both APIs. Scanner 1.1.0 retains those exact OpenCV libraries and upstream 1.1.0 processing classes. The 1.1.0 OpenCV wrapper, model, notices and libc++ match upstream 1.0.0."
     },
     {
       "component": "opencv",
@@ -390,12 +390,12 @@
       "status": "not_affected",
       "justification": "component_not_present",
       "artifacts": {
-        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+        "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1": "534c7cb90938e3fe06322d1e8e613b600778158397d81c55b61263981740554f"
       },
       "evidence_files": [
         "security-backports.json"
       ],
-      "rationale": "Exact scanner configuration/built archive set/Java+ELF inventories exclude imgcodecs and its JPEG2K/PNG decoders on both supported ABIs."
+      "rationale": "Exact scanner configuration/built archive set/Java+ELF inventories exclude imgcodecs and its JPEG2K/PNG decoders on both supported ABIs. Scanner 1.1.0 retains those exact OpenCV libraries and upstream 1.1.0 processing classes. The 1.1.0 OpenCV wrapper, model, notices and libc++ match upstream 1.0.0."
     },
     {
       "component": "opencv",
@@ -403,12 +403,12 @@
       "status": "not_affected",
       "justification": "component_not_present",
       "artifacts": {
-        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+        "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1": "534c7cb90938e3fe06322d1e8e613b600778158397d81c55b61263981740554f"
       },
       "evidence_files": [
         "security-backports.json"
       ],
-      "rationale": "Exact scanner configuration/built archive set/Java+ELF inventories exclude imgcodecs and its JPEG2K/PNG decoders on both supported ABIs."
+      "rationale": "Exact scanner configuration/built archive set/Java+ELF inventories exclude imgcodecs and its JPEG2K/PNG decoders on both supported ABIs. Scanner 1.1.0 retains those exact OpenCV libraries and upstream 1.1.0 processing classes. The 1.1.0 OpenCV wrapper, model, notices and libc++ match upstream 1.0.0."
     },
     {
       "component": "opencv",
@@ -416,12 +416,12 @@
       "status": "not_affected",
       "justification": "component_not_present",
       "artifacts": {
-        "app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1": "638b17b27b38d510796407f38cb1fc5a6162afeea175681be1484fdb1eec4b66"
+        "app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1": "534c7cb90938e3fe06322d1e8e613b600778158397d81c55b61263981740554f"
       },
       "evidence_files": [
         "security-backports.json"
       ],
-      "rationale": "Exact scanner configuration/built archive set/Java+ELF inventories exclude imgcodecs and its JPEG2K/PNG decoders on both supported ABIs."
+      "rationale": "Exact scanner configuration/built archive set/Java+ELF inventories exclude imgcodecs and its JPEG2K/PNG decoders on both supported ABIs. Scanner 1.1.0 retains those exact OpenCV libraries and upstream 1.1.0 processing classes. The 1.1.0 OpenCV wrapper, model, notices and libc++ match upstream 1.0.0."
     },
     {
       "component": "libsodium",

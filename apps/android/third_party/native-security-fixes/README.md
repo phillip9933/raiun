@@ -2,12 +2,12 @@
 
 These are local, checksum-pinned Maven AARs for the Raiun Android candidate. They are not publisher releases. The Maven repository is under `maven/`. Each coordinate has a matching POM and AAR only; no Gradle module metadata or generated Maven sidecar checksums are supplied. The unchanged dependency declarations remain in the original POM-derived files.
 
-## Coordinates
+## Active coordinates
 
 - `app.raiun.vendor:lazysodium-android:5.2.0-raiun-native.1`
-- `app.raiun.vendor:scanner-processing-opencv:0.8.0-beta.1-raiun-native.1`
+- `app.raiun.vendor:scanner-processing-opencv:1.1.0-raiun-native.1`
 
-The original public origins are Lazysodium Android tag [`d8b1885cff127a47b5a3bd9bcf0a53d36c372855`](https://github.com/terl/lazysodium-android/tree/d8b1885cff127a47b5a3bd9bcf0a53d36c372855), original AAR SHA-256 `b5378c1d9db2573d61b304e89cf83db187a05c3e4ff081d9b2ef3d0bb00ca314`, and scanner source commit [`8d9a451c27ed87d20110d25dcedb81001e0f521f`](https://github.com/phillip9933/open-android-doc-scanner/tree/8d9a451c27ed87d20110d25dcedb81001e0f521f), original AAR SHA-256 `6de7e504bda98f1f4a8d9c2451196061e0662ee1848f3278ab14c03cc3539375`.
+The public origins are Lazysodium Android tag [`d8b1885cff127a47b5a3bd9bcf0a53d36c372855`](https://github.com/terl/lazysodium-android/tree/d8b1885cff127a47b5a3bd9bcf0a53d36c372855), original AAR SHA-256 `b5378c1d9db2573d61b304e89cf83db187a05c3e4ff081d9b2ef3d0bb00ca314`, and scanner 1.1.0 source commit [`e955add9eb6c24df588952245366b43ce521590c`](https://github.com/phillip9933/open-android-doc-scanner/tree/e955add9eb6c24df588952245366b43ce521590c), original AAR SHA-256 `7e7f1e4ca0bef87a5f55d90b4dcb8f98b4e05d0d60de0787fccb33e3cbeaa423`.
 
 The Sodium native source is official libsodium `1.0.20-RELEASE`, [source archive](https://github.com/jedisct1/libsodium/releases/download/1.0.20-RELEASE/libsodium-1.0.20.tar.gz), SHA-256 `ebb65ef6ca439333c2bb41a0c1990587288da07f6c7fd07cb3a18cc18d30ce19`, with the upstream security backport [`ad3004ec8731730e93fcfbbc824e67eadc1c1bae`](https://github.com/jedisct1/libsodium/commit/ad3004ec8731730e93fcfbbc824e67eadc1c1bae). Its downloaded release source signature and trusted comment were verified before the recorded build.
 
@@ -19,6 +19,14 @@ For each AAR, only the native library members identified by its build provenance
 
 The Sodium wrapper keeps its original Mozilla Public License 2.0 attribution. Scanner/OpenCV attribution and all original scanner notice payloads remain unchanged inside its AAR, including Apache-2.0 project attribution and the OpenCV license/third-party notices. The upstream patch files are included under `sources/`; sanitized build records are under `provenance/`.
 
-To rebuild libsodium, follow `provenance/libsodium-source-recipe.md`; its exact flags and per-ABI `configure` options are recorded in `provenance/libsodium-build.json`. That document is a recipe, not an executable build driver. The task-local fail-closed driver is outside this bundle at `outputs/android-native-findings-20261106/libsodium/build-native-backport.py`. No OpenCV source archive or build driver is vendored; its public URL, source and patch digests, NDK/API/compiler, modules, and output hashes are recorded in `provenance/opencv-build.json`.
+To rebuild libsodium, follow `provenance/libsodium-source-recipe.md`; its exact flags and per-ABI `configure` options are recorded in `provenance/libsodium-build.json`. That document is a recipe, not an executable build driver. The task-local fail-closed driver is outside this bundle at `outputs/android-native-findings-20261106/libsodium/build-native-backport.py`. To rebuild the two OpenCV libraries from the public source archive, follow the [OpenCV rebuild recipe](provenance/opencv-rebuild/README.md). The source and patch digests and expected output hashes are recorded in [the build provenance](provenance/opencv-build.json).
 
-`SHA256SUMS` covers every bundle file except itself. The listed Maven repository files are exactly the two AARs and their two POMs under `maven/`.
+`SHA256SUMS` covers every bundle file except itself. The Maven repository contains one AAR and one POM for each active coordinate and for the preserved scanner 1.0.0 backport.
+
+## Scanner SDK 1.1.0 repackaging — 20 November 2026
+
+The upstream 1.1.0 processing AAR changes only `classes.jar` compared with upstream 1.0.0. The local 1.1.0 AAR retains those new classes and copies the two reviewed OpenCV shared libraries from the prior local 1.0.0 AAR. The local POM retains the 1.1.0 dependencies, including scanner-core 1.1.0, and license declarations. The [1.1.0 repackaging audit](provenance/scanner-1.1.0-repackaging.json) records the release and build provenance, every AAR entry hash and the scope of the historical native checks.
+
+## Scanner SDK 1.0.0 repackaging — 20 November 2026
+
+The 1.0.0 upstream processing AAR retains the original unpatched native bytes. The local 1.0.0 coordinate preserves every upstream 1.0.0 entry except the two OpenCV shared libraries, which are byte-identical to the reviewed November 6 backport. In particular, the new 1.0.0 processing classes are retained. External dependency declarations, Java wrappers, model, notices and libc++ are unchanged. See `provenance/scanner-1.0.0-repackaging.json` for the origin, exact per-entry audit and historical validation scope. The existing OpenCV rebuild recipe and original build provenance remain unchanged.

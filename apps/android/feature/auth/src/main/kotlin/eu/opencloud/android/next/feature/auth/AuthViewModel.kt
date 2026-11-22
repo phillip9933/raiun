@@ -187,12 +187,19 @@ class AuthViewModel(
             }
         }
 
-    fun switchAccount(accountId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            settings.setActiveAccountId(accountId)
-            mutableState.value = mutableState.value.copy(activeAccountId = accountId, session = null)
+    suspend fun switchAccount(
+        accountId: String,
+        isCurrent: () -> Boolean = { true },
+    ): Boolean =
+        AccountRemovalAdmission.withLock {
+            val account = fileStore.account(accountId)
+            if (account == null || account.removalPending || !isCurrent()) return@withLock false
+            withContext(NonCancellable) {
+                settings.setActiveAccountId(accountId)
+                mutableState.value = mutableState.value.copy(activeAccountId = accountId, session = null)
+            }
+            true
         }
-    }
 
     fun accountRemoved(nextAccountId: String?) {
         mutableState.value = mutableState.value.copy(activeAccountId = nextAccountId, session = null)

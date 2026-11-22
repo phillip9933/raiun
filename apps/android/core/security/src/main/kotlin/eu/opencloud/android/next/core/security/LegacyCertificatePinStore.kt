@@ -16,6 +16,7 @@ import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
+import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.Locale
@@ -96,7 +97,7 @@ internal class LegacyCertificatePinStore internal constructor(
     private fun loadAndMigrate(): Map<String, Set<String>> {
         val entries = legacy.all.filterKeys { it.startsWith(PREFIX) }
         val imported = decodeLegacy(entries)
-        val stored = read()
+        val stored = read() ?: recoverPending(imported)
         val policy =
             if (stored == null) {
                 // A directory left by a failed first write may be retried only with intact legacy data.
@@ -145,11 +146,25 @@ internal class LegacyCertificatePinStore internal constructor(
         val target = File(directory, STORE_NAME)
         val backup = File(target.path + ".bak")
         val source = if (backup.exists()) backup else target
-        if (!source.exists()) {
-            // An orphan pending file is recovery evidence, never evidence of an unpinned install.
-            check(!File(target.path + ".new").exists())
-            return null
-        }
+        return if (source.exists()) readPolicy(source) else null
+    }
+
+    private fun recoverPending(imported: Map<String, Set<String>>): Map<String, Set<String>>? {
+        val target = File(directory, STORE_NAME)
+        val pending = File(target.path + ".new")
+        if (!pending.exists()) return null
+        // Both sources must independently provide the same complete policy. A partial file
+        // cannot rule out missing pins, even when the remaining preferences decode correctly.
+        check(imported.isNotEmpty() && readPolicy(pending) == imported)
+        pending.inputStream().use { it.fd.sync() }
+        // The files share a directory. Publish the verified bytes by rename without replacing a target.
+        check(!File(target.path + ".bak").exists())
+        Files.move(pending.toPath(), target.toPath())
+        check(read() == imported)
+        return imported
+    }
+
+    private fun readPolicy(source: File): Map<String, Set<String>> {
         // Read the recovery source without AtomicFile.openRead deleting/renaming any recovery files.
         val bytes =
             source.inputStream().use { input ->

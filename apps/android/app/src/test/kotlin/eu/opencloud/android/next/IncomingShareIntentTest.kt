@@ -109,9 +109,9 @@ class IncomingShareIntentTest {
         assertFalse(incomingShareReadAccess(incomingShareUris(restored), 35) { PackageManager.PERMISSION_DENIED })
     }
 
-    @Test fun `API26 through34 preserve readable backup shares without claiming sender proof`() {
+    @Test fun `API31 through34 preserve readable backup shares without claiming sender proof`() {
         val uri = Uri.parse("content://backup-readable/export.dbf")
-        (26..34).forEach { api ->
+        (31..34).forEach { api ->
             assertTrue(incomingShareReadAccess(listOf(uri), api) { error("No caller API exists on this version") })
         }
     }

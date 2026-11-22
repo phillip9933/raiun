@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -51,20 +50,13 @@ internal fun MetadataPermissionSettings() {
         askForLocationPermission = preferences.askForLocationPermission
         revision++
     }
-    val needed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
     val granted =
         remember(revision) {
-            !needed ||
-                context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) ==
+            context.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) ==
                 PackageManager.PERMISSION_GRANTED
         }
     PhotoVideoMetadataSettings(
-        permissionStatus =
-            when {
-                !needed -> PhotoPermissionStatus.NOT_NEEDED
-                granted -> PhotoPermissionStatus.ALLOWED
-                else -> PhotoPermissionStatus.DENIED
-            },
+        permissionStatus = if (granted) PhotoPermissionStatus.ALLOWED else PhotoPermissionStatus.DENIED,
         askForLocationPermission = askForLocationPermission,
         onAskForLocationPermissionChange = {
             preferences.askForLocationPermission = it
@@ -98,10 +90,6 @@ internal fun PhotoVideoMetadataSettings(
             supportingContent = {
                 Text(
                     when (permissionStatus) {
-                        PhotoPermissionStatus.NOT_NEEDED ->
-                            stringResource(
-                                R.string.settings_photo_video_metadata_not_needed,
-                            )
                         PhotoPermissionStatus.ALLOWED -> stringResource(R.string.settings_photo_video_metadata_allowed)
                         PhotoPermissionStatus.DENIED ->
                             stringResource(
@@ -147,4 +135,4 @@ internal fun PhotoVideoMetadataSettings(
     }
 }
 
-internal enum class PhotoPermissionStatus { NOT_NEEDED, ALLOWED, DENIED }
+internal enum class PhotoPermissionStatus { ALLOWED, DENIED }

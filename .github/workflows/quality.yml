@@ -82,7 +82,7 @@ jobs:
           --pins gradle/runtime-artifact-pins.sha256
           --apk app/build/outputs/apk/release/app-release-unsigned.apk
           --artifact-root "${GRADLE_USER_HOME:-$HOME/.gradle}/caches/modules-2/files-2.1"
-          --artifact-root .gradle/open-android-doc-scanner-0.8.0-beta.1/maven
+          --artifact-root .gradle/open-android-doc-scanner-1.1.0/maven
           --artifact-root third_party/native-security-fixes/maven
           --output build/native-integrity-results.json
 
