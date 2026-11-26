@@ -145,7 +145,9 @@ android {
         sourceSets.getByName("r8Validation").manifest.srcFile("src/r8Instrumentation/AndroidManifest.xml")
     }
 
-    if (!playBuild) {
+    if (playBuild) {
+        sourceSets.getByName("test").kotlin.srcDir("src/playTest/kotlin")
+    } else {
         sourceSets.getByName("test").kotlin.srcDir("src/directTest/kotlin")
         sourceSets.getByName("androidTest").kotlin.srcDir("src/directAndroidTest/kotlin")
         sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("generated/updater-test-assets"))
