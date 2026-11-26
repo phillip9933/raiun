@@ -5032,7 +5032,7 @@
         },
         {
           "archive_entry": "org/bouncycastle/LICENSE.class",
-          "path": "embedded/org_bouncycastle_bcprov-jdk18on/org/bouncycastle/LICENSE.class",
+          "path": "embedded/org_bouncycastle_bcprov-jdk18on/org/bouncycastle/LICENSE.class.bin",
           "sha256": "f9e6b01128a66b9887432db0397034793bcb1667770990c27fd4fd04ffc0c12a",
           "size_bytes": 2001
         }
