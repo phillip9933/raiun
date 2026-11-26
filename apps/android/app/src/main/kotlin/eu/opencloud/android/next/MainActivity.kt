@@ -41,9 +41,7 @@ class MainActivity : AppCompatActivity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
         }
-        eu.opencloud.android.next.feature.settings.RaiunUpdates
-            .get(this)
-            .initialize()
+        eu.opencloud.android.next.feature.settings.initializeAppUpdates(this)
         launchIntents.acceptInitial(intent, savedInstanceState)
 
         setContent {
@@ -87,8 +85,7 @@ class MainActivity : AppCompatActivity() {
                         launchIntents = launchIntents,
                         onConsumeLaunchRequest = { consumeLaunchRequest(launchIntents, it) },
                     )
-                    eu.opencloud.android.next.feature.settings
-                        .AppUpdateNotice()
+                    eu.opencloud.android.next.feature.settings.AppUpdateChannelNotice()
                 }
             }
         }

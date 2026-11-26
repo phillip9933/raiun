@@ -177,10 +177,13 @@ internal fun OpenCloudNextApp(
                                             settingsOpenUpdates = false
                                             destination = AppDestination.Settings
                                         },
-                                        onOpenAppUpdates = {
-                                            settingsOpenUpdates = true
-                                            destination = AppDestination.Settings
-                                        },
+                                        onOpenAppUpdates =
+                                            ({
+                                                settingsOpenUpdates = true
+                                                destination = AppDestination.Settings
+                                            }).takeIf {
+                                                eu.opencloud.android.next.feature.settings.appUpdatesAvailable
+                                            },
                                         onOpenAccount = { destination = AppDestination.Account },
                                         onOpenEncryptedOffline = { destination = AppDestination.Vaults },
                                         onOpenEncryptedLocation = { location ->

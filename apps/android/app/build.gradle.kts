@@ -25,6 +25,11 @@ plugins {
 }
 
 val appVersionCode = 65
+val playBuild = providers.gradleProperty("raiun.playBuild").map { it.toBooleanStrict() }.getOrElse(false)
+val playVersionCode = providers.gradleProperty("raiun.playVersionCode").map { it.toInt() }.orNull
+check(playVersionCode == null || (playBuild && playVersionCode > appVersionCode)) {
+    "Play release code must exceed the direct release code; pass the confirmed unused Console code"
+}
 // Deliberately absent from ordinary builds: this candidate is for disposable native validation.
 val r8ValidationEnabled = providers.gradleProperty("raiun.r8Validation").map { it.toBooleanStrict() }.getOrElse(false)
 val r8InstrumentationEnabled =
@@ -33,6 +38,7 @@ val r8InstrumentationEnabled =
         .map {
             it.toBooleanStrict()
         }.getOrElse(false)
+check(!playBuild || !r8ValidationEnabled) { "Run existing direct-build R8 qualification separately" }
 check(!r8InstrumentationEnabled || r8ValidationEnabled) { "R8 instrumentation requires raiun.r8Validation=true" }
 val r8TestAbiRules = providers.gradleProperty("raiun.r8TestAbiRules").orNull
 check(r8TestAbiRules == null || r8InstrumentationEnabled) {
@@ -65,7 +71,8 @@ android {
                 .toInt()
         // The scanner SDK ships native processing for 64-bit Android only.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
-        versionCode = r8UpgradeVersionCode ?: appVersionCode
+        versionCode = playVersionCode ?: r8UpgradeVersionCode ?: appVersionCode
+        buildConfigField("boolean", "PLAY_BUILD", playBuild.toString())
         versionName = "1.7.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -138,7 +145,11 @@ android {
         sourceSets.getByName("r8Validation").manifest.srcFile("src/r8Instrumentation/AndroidManifest.xml")
     }
 
-    sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("generated/updater-test-assets"))
+    if (!playBuild) {
+        sourceSets.getByName("test").kotlin.srcDir("src/directTest/kotlin")
+        sourceSets.getByName("androidTest").kotlin.srcDir("src/directAndroidTest/kotlin")
+        sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("generated/updater-test-assets"))
+    }
     sourceSets
         .getByName(
             "androidTest",
@@ -239,7 +250,8 @@ val generateShareProvenanceFixtureApk =
         )
     }
 tasks.matching { it.name in setOf("mergeDebugAndroidTestAssets", "mergeR8ValidationAndroidTestAssets") }.configureEach {
-    dependsOn(generateUpdaterTestApks, generateShareProvenanceFixtureApk)
+    if (!playBuild) dependsOn(generateUpdaterTestApks)
+    dependsOn(generateShareProvenanceFixtureApk)
 }
 
 tasks.withType<Test>().configureEach {
@@ -329,6 +341,9 @@ val verifyReleaseRuntimeArtifacts =
             artifacts.forEach { artifact ->
                 val component = artifact.id.componentIdentifier as ModuleComponentIdentifier
                 val coordinate = "${component.group}:${component.module}:${component.version}"
+                check(!playBuild || !coordinate.startsWith("io.github.phillip9933:android-updater:")) {
+                    "The Play runtime must not include the GitHub updater"
+                }
                 val expected = pins[coordinate] ?: error("Unpinned release runtime dependency: $coordinate")
                 val digest = MessageDigest.getInstance("SHA-256")
                 artifact.file.inputStream().use { input ->
