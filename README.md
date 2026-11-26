@@ -4,7 +4,7 @@ Independent OpenCloud apps for Android and desktop, built around the same produc
 
 <a href="https://github.com/phillip9933/raiun/releases/tag/android-v1.7.0"><img src="docs/badges/github-releases.svg" alt="Download Raiun Android 1.7.0 from GitHub Releases" height="40"></a>
 
-[Android 8–11: 1.6.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.6.0) · [Linux and Windows: 0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5)
+[Android 8–11: 1.6.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.6.0) · [Linux: 0.8.0 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.8.0) · [Windows: 0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5)
 
 **Support:** [Buy me a coffee](https://buymeacoffee.com/phillip9933) · [GitHub Sponsors](https://github.com/sponsors/phillip9933)
 
@@ -15,10 +15,10 @@ I build projects to solve problems I run into in my own life. I share them becau
 | Platform | Source and setup | Release status |
 | --- | --- | --- |
 | Android | [apps/android](apps/android/README.md) | [1.7.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.7.0) |
-| Linux Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5) |
+| Linux Desktop | [apps/desktop](apps/desktop/README.md) | [0.8.0 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.8.0) |
 | Windows Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5) |
 
-Android and desktop have independent versions and release pages. Android 1.7.0 requires Android 12 or later. Use 1.6.0 on Android 8–11. Desktop 0.7.5 is the current numeric Beta release for Linux and Windows. The older Windows beta.2 and beta.3 downloads remain withdrawn. The 0.7.4 reconnect fixes passed owner-reported checks with both the Default and a newly added Windows account. macOS is not released.
+Android and desktop have independent versions and release pages. Android 1.7.0 requires Android 12 or later. Use 1.6.0 on Android 8–11. Linux Desktop 0.8.0 Beta includes AppImage and headless CLI downloads for x86-64. Windows Desktop remains on 0.7.5 Beta. The older Windows beta.2 and beta.3 downloads remain withdrawn. The 0.7.4 reconnect fixes passed owner-reported checks with both the Default and a newly added Windows account. macOS is not released.
 
 ## Features
 
