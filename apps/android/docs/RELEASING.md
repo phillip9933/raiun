@@ -16,6 +16,23 @@ Use the locally installed Android SDK build tools to sign the release APK and ve
 
 The historical PowerShell packaging helper uses a PKCS#12 keystore and a password file protected by Windows DPAPI for the creating user and machine. DPAPI-protected material is not a Linux credential format or portable backup. On Windows, keep the signing directory outside the repository, protect the keystore backup offline, and store recovery information in a password manager. Never publish the private key or password. Losing the original signing identity prevents compatible updates.
 
+## Google Play verification bundle
+
+The default APK build keeps the direct update feature. Set `-Praiun.playBuild=true` to build a bundle for Google Play. The Play build does not include the APK updater. Google Play supplies app updates for this build.
+
+Use JDK 21 and Android platform 36 with Build Tools 35.0.0. Run these commands from `apps/android`:
+
+```bash
+python3 scripts/install_offline_scanner_sdk.py
+./gradlew -Praiun.playBuild=true ktlintCheck :app:testDebugUnitTest --tests '*FileExportTest' --tests '*PlayPrivacyPolicyTest'
+./gradlew -Praiun.playBuild=true :app:bundleRelease
+python3 scripts/check_play_bundle.py --bundle app/build/outputs/bundle/release/app-release.aab --bundletool "$BUNDLETOOL_JAR"
+```
+
+Set `BUNDLETOOL_JAR` to the path of the verified JAR in the [Android Play bundle checks workflow](../../../.github/workflows/android-play-candidate.yml). The checks verify the unsigned bundle, not APKs that Google Play generates.
+
+Do not upload this verification bundle. Before a Play release, select an unused version code higher than the codes in Play Console and the codes already distributed. Set `-Praiun.playVersionCode` to that code. Use the registered upload key to sign a release bundle only after approval. Compare the Play app-signing certificate with the current APK certificate before testing an app update between the channels.
+
 ## In-app Android updates
 
 The engine is an explicitly pinned standalone library; see [ownership, artifact pins and library upgrade procedure](APP-UPDATES.md). Release rules below are Raiun’s configuration, not library-wide branding.
