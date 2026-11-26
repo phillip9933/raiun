@@ -39,10 +39,15 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@07d1f8453baaff67fb503883367f8b13e6158a54 # v6
 
-      - name: Install scanner and Android build packages
-        run: |
-          python3 scripts/install_offline_scanner_sdk.py
-          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+      - name: Set up Android SDK tools
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          cmdline-tools-version: "13114758"
+          log-accepted-android-sdk-licenses: false
+          packages: "platform-tools platforms;android-36 build-tools;35.0.0"
+
+      - name: Install pinned offline scanner SDK
+        run: python3 scripts/install_offline_scanner_sdk.py
 
       - name: Check Play source and regression tests
         run: >-
