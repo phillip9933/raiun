@@ -10,12 +10,12 @@ OpenCloud/
     Team space/
 ```
 
-**Desktop 0.7.4 Beta for Linux and Windows x86_64.** Source is in the Raiun monorepo at `apps/desktop`, alongside Android at `apps/android`; each app has its own version and build. Linux and Windows share the Desktop version. Download the AppImage or Windows setup installer from the [Desktop 0.7.4 Beta page](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4). macOS is not released.
+**Desktop 0.8.0 Beta for Linux x86_64.** Download the GUI AppImage or standalone CLI archive from the [Linux beta release page](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.8.0). Windows remains on [0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5); this Linux release does not contain a Windows update. macOS is not released. Desktop and Android keep independent versions in this monorepo.
 
-The 0.7.4 numeric version remains on the Beta update channel. Compatible installed clients can check for releases and explicitly download/install verified updates; see [Desktop updates](docs/DESKTOP-UPDATES.md) for channels and trust.
+The numeric 0.8.0 release stays on the Beta update channel. Compatible installed Linux clients can explicitly download/install verified updates; see [Desktop updates](docs/DESKTOP-UPDATES.md) for channels and trust. Upgrade GUI, Agent and CLI together. Keep existing account, settings and recovery directories; older Agents cannot open upgraded caches.
 
 See [authentication and compatibility](docs/AUTHENTICATION.md) for GUI and
-headless CLI authentication and the unpublished validation candidate.
+headless CLI authentication and validation limits.
 
 The app provides an OpenCloud drive, folder sync, offline caching, encrypted file access, account controls, transfers and recovery. The Sync Folders workspace presents ordinary sync folders and upload-only media folders together; Sync Folders supports two-way and one-way directions, Photos/Videos filters and editable exclusions. Settings include Light/Dark/System themes, per-account colors, account rename/removal/restore and grouped storage, network and security controls. Windows uses an in-place installer upgrade by default. Media import runs remain bounded by documented stability, file-size and conflict rules; source files stay in place and older cloud versions are not automatically retained. See the [beta changelog](CHANGELOG.md), [Sync Folders guide](docs/SYNC-FOLDERS.md) and [acceptance records](docs/MVP-ACCEPTANCE.md).
 
@@ -27,12 +27,12 @@ Browser layout previews of the Desktop interface; no account connected. These sh
 | --- | --- |
 | <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/desktop-light.png" alt="Desktop light interface" width="420"> | <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/desktop-dark.png" alt="Desktop dark interface" width="420"> |
 
-## Headless CLI candidate
+## Headless CLI
 
-The unpublished **0.7.5 source candidate** now keeps GUI and headless CLI code in
-one Desktop checkout and Cargo workspace. The earlier CLI checkout is a frozen
-reference, not a second active implementation. This consolidation does not publish
-a new release or change the GUI's saved sign-in, account storage or startup defaults.
+Linux 0.8.0 includes a separate CLI/Agent archive. GUI and CLI share one Desktop
+checkout and upload implementation while retaining separate account/state and
+credential policies. Installing this release does not change saved sign-in or
+enable startup services.
 
 `raiun drive` controls a separate mount-only agent with isolated state and account
 routing. Its package contains only the Rust CLI and agent; see [Linux setup](docs/HEADLESS.md),
@@ -49,11 +49,7 @@ Remembered headless credentials use private plaintext files on Linux and isolate
 current-user DPAPI on Windows. Startup registration is a separate explicit action.
 See [privacy](PRIVACY.md#headless-cli-candidate) before enabling persistence.
 
-The imported setup/test guides retain their original source versions and scoped
-acceptance records. Those records do not certify this combined candidate's native
-GUI/CLI behavior, boot startup or complete Windows file-operation parity. In
-particular, automatic namespace writes remain gated on the shared save/rename
-capture guard and the later connected-owner integration.
+The setup guides retain scoped acceptance records. Linux publication reuses the completed preserving upgrade/startup and ordinary GUI/CLI file-workflow checks; it does not claim exhaustive boot startup, confirmed-discard execution or Windows acceptance.
 
 ## Components
 
@@ -114,7 +110,7 @@ Commit plus dirty status is not a reproducible identity for uncommitted source.
 
 ## AppImage
 
-An x86_64 AppImage is provided with the [Desktop 0.7.4 Beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4). It targets Ubuntu 24.04-era systems (glibc 2.39 or newer), bundles the interface and background agent, and uses the same existing account/settings locations. Cloud-drive mounting still needs system FUSE 3; persistent sign-in needs a desktop keyring. See [AppImage setup](docs/APPIMAGE.md) for launch, startup and integration details.
+An x86_64 AppImage is provided with the [Linux 0.8.0 Beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.8.0). It targets Ubuntu 24.04-era systems (glibc 2.39 or newer), bundles the interface and background agent, and uses the same existing account/settings locations. Cloud-drive mounting still needs system FUSE 3; persistent sign-in needs a desktop keyring. See [AppImage setup](docs/APPIMAGE.md) for launch, startup and integration details.
 
 ## Development operation
 
@@ -137,16 +133,8 @@ See the [desktop feature roadmap](docs/DESKTOP-FEATURE-ROADMAP.md),
 [encryption interoperability limits](docs/ENCRYPTION-INTEROP.md) for planned work.
 
 
-### Desktop 0.7.4 Beta
+### Linux 0.8.0 Beta
 
-This numeric `0.7.4` release is a Beta for Linux and Windows. The release includes
-Windows in-place upgrades, dedicated Offline files and Encrypted files
-workspaces, one combined Sync Folders workspace, account-scoped appearance and
-controls, and the reconnect fixes verified with Default and newly added Windows
-accounts. The older beta.2/beta.3 Windows downloads remain withdrawn.
+This Linux GUI and CLI beta includes shared parallel ordinary uploads, fewer redundant successful-upload readbacks, clearer Transfers tabs and review actions, and compact Settings. Normal file-manager operations remain the common workflow; dedicated folder-upload and whole-folder deletion controls are deferred.
 
-Account removal preserves local files and recovery copies while revoking saved
-sign-in and remembered vault-password access; the profile can be restored and
-must be signed in again. Permanent deletion of Raiun-managed local copies is not
-included. Native workflow gaps and broader advanced encrypted/offline acceptance
-remain documented in [MVP acceptance](docs/MVP-ACCEPTANCE.md).
+Account removal preserves local files and recovery copies while revoking saved sign-in and remembered vault-password access. Eligible stopped ordinary uploads offer a separate confirmed local-copy discard action after unmounting; it never deletes the cloud file. Other retained, active or unsupported recovery records are refused. See the [changelog](CHANGELOG.md) and [implementation status](docs/IMPLEMENTATION.md) for scope and limits.

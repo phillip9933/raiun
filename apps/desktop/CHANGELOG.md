@@ -1,6 +1,15 @@
 # Raiun Desktop changelog
 
-## 0.7.5 Beta — unreleased
+## 0.8.0 Beta — 2026-11-26
+
+- Faster ordinary uploads in both Linux clients, with shared background upload workers and fewer redundant cloud reads after a successful upload.
+- More reliable recovery of saved uploads during startup.
+- Simpler Settings rows and a steadier Transfers screen that preserves its layout during refresh.
+- Separate Activity, Saved files and Encrypted tabs to reduce clutter, with clearer activity filters.
+- Dismiss and restore resolved activity warnings. Stopped saved uploads offer an explicit, confirmed Discard local copy action when the drive is unmounted. Discard removes that recovery copy, not the cloud file.
+
+
+## 0.7.5 Beta — 2026-11-04
 
 - Windows can explicitly continue an interrupted new-file upload as a protected conditional edit, preserving the original recovery body and completing the same local file only after verification.
 

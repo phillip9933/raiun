@@ -1,9 +1,9 @@
 # Raiun headless CLI candidate
 
-Local development candidate, 28 October 2026, based on published Desktop 0.7.4.
-This is not a new public release. The first package targets Linux and reuses
-Desktop's Rust agent, OpenCloud protocol client and FUSE adapter. Windows has a separate [Cloud Files headless test candidate](HEADLESS-WINDOWS.md)
-with native acceptance tracked independently. macOS remains follow-up work.
+Linux CLI 0.8.0 Beta is published with Desktop's Linux GUI release. Its separate
+archive contains the Rust CLI and Agent, using the shared OpenCloud client and
+FUSE adapter. Windows stays on its separate existing release, with native
+acceptance tracked independently. macOS remains follow-up work.
 
 One on-demand filesystem root per account contains `Personal/` and `Spaces/`,
 including accessible project/shared Spaces discovered by the existing engine.
@@ -49,8 +49,7 @@ The installer checks binary checksums and installs to a new directory, normally
 `~/.local/lib/raiun-headless`. Existing installations are preserved; choose a new
 prefix for replacements. It does not change PATH, register a service or start
 anything. Keep both executables together. These unsigned checksums detect
-corruption; they do not authenticate a publisher. The version string remains
-the workspace's 0.7.4; no app version was bumped.
+corruption; they do not authenticate a publisher. The release also provides a signed archive and SHA256SUMS. This package reports 0.8.0. Keep GUI, Agent and CLI components on the same release; older Agents refuse upgraded caches.
 
 ## Sign in and mount
 

@@ -77,6 +77,7 @@ jobs:
       - name: Build AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
+          RAIUN_DESKTOP_UPDATER_ARTIFACTS: "1"
         run: scripts/build-appimage.sh
       - name: Upload AppImage and provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
