@@ -35,11 +35,7 @@ android {
 }
 
 dependencies {
-    if (playBuild) {
-        implementation(libs.androidx.work.runtime)
-    } else {
-        api(libs.android.app.updater)
-    }
+    if (!playBuild) api(libs.android.app.updater)
     implementation(libs.androidx.core)
     implementation(libs.androidx.appcompat)
     implementation(project(":core:security"))

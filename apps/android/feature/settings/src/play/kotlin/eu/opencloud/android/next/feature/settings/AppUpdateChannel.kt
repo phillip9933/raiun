@@ -15,15 +15,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.work.WorkManager
+import eu.opencloud.android.next.core.sync.retireDirectApkUpdateWork
 
 const val APP_UPDATES_AVAILABLE = false
 
 /** Retire the direct channel's persisted jobs on an in-place upgrade. */
 fun initializeAppUpdates(context: Context) {
-    val work = WorkManager.getInstance(context.applicationContext)
-    work.cancelUniqueWork("android-public-release-check")
-    work.cancelUniqueWork("android-public-release-wifi-download")
+    retireDirectApkUpdateWork(context)
 }
 
 @Composable
