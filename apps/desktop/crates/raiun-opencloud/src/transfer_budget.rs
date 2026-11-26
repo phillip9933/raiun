@@ -213,62 +213,80 @@ impl TransferBudget {
         if requested == 0 {
             return Ok(Reservation::unmetered(0));
         }
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("transfer budget is unavailable"))?;
         loop {
+            // Callers may inspect this same budget in their callback. Never
+            // invoke arbitrary cancellation code while holding its state lock.
             if is_cancelled() {
                 return Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
                     "content transfer was cancelled",
                 ));
             }
-            if state.paused {
+            let reservation = {
+                let mut state = self
+                    .inner
+                    .state
+                    .lock()
+                    .map_err(|_| io::Error::other("transfer budget is unavailable"))?;
+                if state.paused {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "content transfer was paused",
+                    ));
+                }
+
+                let rate = match direction {
+                    TransferDirection::Upload => state.limits.upload_bytes_per_second,
+                    TransferDirection::Download => state.limits.download_bytes_per_second,
+                };
+                let bucket = match direction {
+                    TransferDirection::Upload => &mut state.upload,
+                    TransferDirection::Download => &mut state.download,
+                };
+                if let Some(rate) = rate {
+                    let now = Instant::now();
+                    bucket.refill(rate, now);
+                    let available =
+                        (bucket.subunits / SUBUNITS_PER_BYTE).min(usize::MAX as u128) as usize;
+                    if available == 0 {
+                        let fractional = bucket.subunits % SUBUNITS_PER_BYTE;
+                        let remaining = SUBUNITS_PER_BYTE.saturating_sub(fractional);
+                        let wait_nanos = remaining.div_ceil(rate.get() as u128).max(1);
+                        let wait =
+                            Duration::from_nanos(wait_nanos.min(WAKE_INTERVAL.as_nanos()) as u64);
+                        // Keep the state guard through the condition-variable
+                        // wait so a state change cannot be lost before sleep.
+                        let (next_state, _) = self
+                            .inner
+                            .changed
+                            .wait_timeout(state, wait)
+                            .map_err(|_| io::Error::other("transfer budget is unavailable"))?;
+                        drop(next_state);
+                        continue;
+                    }
+                    let granted = requested.min(available);
+                    bucket.subunits = bucket
+                        .subunits
+                        .saturating_sub((granted as u128) * SUBUNITS_PER_BYTE);
+                    Reservation {
+                        owner: Some(Arc::downgrade(&self.inner)),
+                        direction,
+                        granted,
+                        settled: false,
+                    }
+                } else {
+                    Reservation::unmetered(requested)
+                }
+            };
+            if is_cancelled() {
+                // Refund only after releasing state; refund takes that lock.
+                drop(reservation);
                 return Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
-                    "content transfer was paused",
+                    "content transfer was cancelled",
                 ));
             }
-
-            let rate = match direction {
-                TransferDirection::Upload => state.limits.upload_bytes_per_second,
-                TransferDirection::Download => state.limits.download_bytes_per_second,
-            };
-            let bucket = match direction {
-                TransferDirection::Upload => &mut state.upload,
-                TransferDirection::Download => &mut state.download,
-            };
-            let Some(rate) = rate else {
-                return Ok(Reservation::unmetered(requested));
-            };
-            let now = Instant::now();
-            bucket.refill(rate, now);
-            let available = (bucket.subunits / SUBUNITS_PER_BYTE).min(usize::MAX as u128) as usize;
-            if available > 0 {
-                let granted = requested.min(available);
-                bucket.subunits = bucket
-                    .subunits
-                    .saturating_sub((granted as u128) * SUBUNITS_PER_BYTE);
-                return Ok(Reservation {
-                    owner: Some(Arc::downgrade(&self.inner)),
-                    direction,
-                    granted,
-                    settled: false,
-                });
-            }
-
-            let fractional = bucket.subunits % SUBUNITS_PER_BYTE;
-            let remaining = SUBUNITS_PER_BYTE.saturating_sub(fractional);
-            let wait_nanos = remaining.div_ceil(rate.get() as u128).max(1);
-            let wait = Duration::from_nanos(wait_nanos.min(WAKE_INTERVAL.as_nanos()) as u64);
-            let (next_state, _) = self
-                .inner
-                .changed
-                .wait_timeout(state, wait)
-                .map_err(|_| io::Error::other("transfer budget is unavailable"))?;
-            state = next_state;
+            return Ok(reservation);
         }
     }
 
@@ -289,18 +307,18 @@ impl TransferBudget {
             return Ok(Reservation::unmetered(0));
         }
         loop {
-            let wait = {
+            if is_cancelled() {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "content transfer was cancelled",
+                ));
+            }
+            let attempt = {
                 let mut state = self
                     .inner
                     .state
                     .lock()
                     .map_err(|_| io::Error::other("transfer budget is unavailable"))?;
-                if is_cancelled() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::ConnectionAborted,
-                        "content transfer was cancelled",
-                    ));
-                }
                 if state.paused {
                     return Err(io::Error::new(
                         io::ErrorKind::ConnectionAborted,
@@ -316,32 +334,46 @@ impl TransferBudget {
                     TransferDirection::Upload => &mut state.upload,
                     TransferDirection::Download => &mut state.download,
                 };
-                let Some(rate) = rate else {
-                    return Ok(Reservation::unmetered(requested));
-                };
-                let now = Instant::now();
-                bucket.refill(rate, now);
-                let available =
-                    (bucket.subunits / SUBUNITS_PER_BYTE).min(usize::MAX as u128) as usize;
-                if available > 0 {
-                    let granted = requested.min(available);
-                    bucket.subunits = bucket
-                        .subunits
-                        .saturating_sub((granted as u128) * SUBUNITS_PER_BYTE);
-                    return Ok(Reservation {
-                        owner: Some(Arc::downgrade(&self.inner)),
-                        direction,
-                        granted,
-                        settled: false,
-                    });
+                if let Some(rate) = rate {
+                    let now = Instant::now();
+                    bucket.refill(rate, now);
+                    let available =
+                        (bucket.subunits / SUBUNITS_PER_BYTE).min(usize::MAX as u128) as usize;
+                    if available > 0 {
+                        let granted = requested.min(available);
+                        bucket.subunits = bucket
+                            .subunits
+                            .saturating_sub((granted as u128) * SUBUNITS_PER_BYTE);
+                        Ok(Reservation {
+                            owner: Some(Arc::downgrade(&self.inner)),
+                            direction,
+                            granted,
+                            settled: false,
+                        })
+                    } else {
+                        let fractional = bucket.subunits % SUBUNITS_PER_BYTE;
+                        let remaining = SUBUNITS_PER_BYTE.saturating_sub(fractional);
+                        let wait_nanos = remaining.div_ceil(rate.get() as u128).max(1);
+                        Err(Duration::from_nanos(
+                            wait_nanos.min(WAKE_INTERVAL.as_nanos()) as u64,
+                        ))
+                    }
+                } else {
+                    Ok(Reservation::unmetered(requested))
                 }
-
-                let fractional = bucket.subunits % SUBUNITS_PER_BYTE;
-                let remaining = SUBUNITS_PER_BYTE.saturating_sub(fractional);
-                let wait_nanos = remaining.div_ceil(rate.get() as u128).max(1);
-                Duration::from_nanos(wait_nanos.min(WAKE_INTERVAL.as_nanos()) as u64)
             };
-            tokio::time::sleep(wait).await;
+            // The state guard is gone before either callback, refund or await.
+            if is_cancelled() {
+                drop(attempt);
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "content transfer was cancelled",
+                ));
+            }
+            match attempt {
+                Ok(reservation) => return Ok(reservation),
+                Err(wait) => tokio::time::sleep(wait).await,
+            }
         }
     }
 }

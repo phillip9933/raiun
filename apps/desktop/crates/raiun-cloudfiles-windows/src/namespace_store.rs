@@ -31,6 +31,46 @@ pub struct StoredDirectoryIntent {
     pub progress: NamespaceProgressSnapshot,
     pub commitment: [u8; 32],
 }
+
+/// Static authenticated pending-history histogram only. No identifier, path,
+/// historical report or recovery/mutation capability is retained or exposed.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+pub struct PendingDirectoryCreateClassification {
+    pub phase: &'static str,
+    pub sequence: u64,
+    pub attention: &'static str,
+    pub local_completed: bool,
+    pub continued: bool,
+    pub source_removal: Option<&'static str>,
+    pub recorded_complete: bool,
+    pub count: usize,
+}
+impl PendingDirectoryCreateClassification {
+    fn from_progress(progress: NamespaceProgressSnapshot) -> Self {
+        fn phase(value: NamespacePhase) -> &'static str {
+            match value {
+                NamespacePhase::Pending => "pending",
+                NamespacePhase::Submitted => "submitted",
+                NamespacePhase::Verified => "verified",
+            }
+        }
+        Self {
+            phase: phase(progress.remote),
+            sequence: progress.sequence,
+            attention: match progress.attention {
+                None => "none",
+                Some(NamespaceAttention::Conflict) => "conflict",
+                Some(NamespaceAttention::Deferred) => "deferred",
+                Some(NamespaceAttention::Uncertain) => "uncertain",
+            },
+            local_completed: progress.local_completed,
+            continued: progress.continued,
+            source_removal: progress.source_removal.map(phase),
+            recorded_complete: progress.recorded_complete,
+            count: 0,
+        }
+    }
+}
 pub struct PublishedDirectoryIntent {
     pub record: StoredDirectoryIntent,
     pub created: bool,
@@ -51,6 +91,7 @@ struct Envelope {
 struct Loaded {
     record: StoredDirectoryIntent,
     progress: NamespaceIntentProgress,
+    remote_verified_child_id: Option<String>,
 }
 impl DirectoryIntentStore {
     /// Local metadata storage at the current user's admitted recovery root.
@@ -104,6 +145,25 @@ impl DirectoryIntentStore {
             base: SnapshotStore::create_or_open_admitted(state, scope, protector, policy)?,
             admission,
         }))
+    }
+    /// Bind only an existing verified v2 root. No quota, catalog, scope or
+    /// journal entries are created; absence is distinct from unsafe evidence.
+    #[cfg(windows)]
+    pub(crate) fn open_existing_admitted(
+        state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        scope: EditJournalScope,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+    ) -> Result<Option<Arc<Self>>, StoreError> {
+        validate_scope(&scope)?;
+        policy.validate()?;
+        let Some(root) = windows::existing_root(Arc::clone(&state), V2_STORE_ROOT)? else {
+            return Ok(None);
+        };
+        let base = SnapshotStore::from_directory(root, scope, Arc::clone(&protector), policy)?;
+        let admission =
+            crate::recovery_admission::RecoveryAdmission::new_admitted(state, protector, policy)?;
+        Ok(Some(Arc::new(Self { base, admission })))
     }
     fn reserve(&self, bytes: u64, entries: usize) -> Result<Box<dyn Send>, StoreError> {
         #[cfg(windows)]
@@ -176,12 +236,56 @@ impl DirectoryIntentStore {
     /// admission or change any captured authorization.
     pub fn publish_intent(
         self: &Arc<Self>,
-        mut intent: NamespaceIntent,
+        intent: NamespaceIntent,
     ) -> Result<PublishedDirectoryIntent, StoreError> {
         self.check_intent(&intent)?;
         let _quota = self.reserve((META_LIMIT as u64) * 2, 6)?;
         let directory = self.directory(true)?;
+        self.publish_intent_while_reserved(intent, directory)
+    }
+
+    /// Admit only this new publication and its dispatch-lock entry together.
+    /// A duplicate remains retained history and never gains a dispatch lease.
+    #[cfg(windows)]
+    pub(crate) fn publish_intent_for_dispatch(
+        self: &Arc<Self>,
+        intent: NamespaceIntent,
+    ) -> Result<(PublishedDirectoryIntent, Option<DirectoryIntentLease>), StoreError> {
+        self.check_intent(&intent)?;
+        let quota = self.reserve((META_LIMIT as u64) * 2, 7)?;
+        let directory = self.directory(true)?;
+        let published = self.publish_intent_while_reserved(intent, Arc::clone(&directory))?;
+        if !published.created {
+            return Ok((published, None));
+        }
+        let lease =
+            self.acquire_dispatch_while_reserved(&published.record.key, directory, quota)?;
+        Ok((published, Some(lease)))
+    }
+
+    /// The caller retains the full publication quota lease for this body.
+    fn publish_intent_while_reserved(
+        self: &Arc<Self>,
+        mut intent: NamespaceIntent,
+        directory: Arc<dyn Directory>,
+    ) -> Result<PublishedDirectoryIntent, StoreError> {
         for loaded in self.load_all(&*directory)? {
+            // A renamed or reparented unfinished native directory still owns
+            // its original recovery record; a new spelling cannot republish it.
+            if !loaded.record.progress.recorded_complete
+                && matches!(
+                    (&intent.operation, &loaded.record.intent.operation),
+                    (
+                        NamespaceOperation::CreateDirectory { destination: incoming },
+                        NamespaceOperation::CreateDirectory { destination: prior },
+                    ) if incoming.local_file == prior.local_file
+                )
+            {
+                return Ok(PublishedDirectoryIntent {
+                    record: recovered(loaded.record),
+                    created: false,
+                });
+            }
             if same_entry(&loaded.record.intent, &intent) {
                 return Ok(PublishedDirectoryIntent {
                     record: recovered(loaded.record),
@@ -465,6 +569,16 @@ impl DirectoryIntentStore {
                 }
             }
         };
+        self.acquire_dispatch_while_reserved(key, directory, quota)
+    }
+
+    /// The caller has admitted this dispatch-lock entry under the quota lease.
+    fn acquire_dispatch_while_reserved(
+        self: &Arc<Self>,
+        key: &DirectoryIntentKey,
+        directory: Arc<dyn Directory>,
+        quota: Box<dyn Send>,
+    ) -> Result<DirectoryIntentLease, StoreError> {
         let name = format!("{}.dispatch.lock", key.id);
         if let Ok((file, _)) = directory.create(&name) {
             file.sync()?;
@@ -676,6 +790,7 @@ impl DirectoryHistoryDecoder<'_> {
         let mut commitment = commitment(&[0; 32], &plain);
         let mut progress = NamespaceIntentProgress::new(intent.clone())
             .map_err(|_| StoreError::CorruptEvidence)?;
+        let mut remote_verified_child_id = None;
         let mut events = Vec::new();
         for name in names {
             if let Some(suffix) = name.strip_prefix(&format!("{id}.")) {
@@ -704,6 +819,9 @@ impl DirectoryHistoryDecoder<'_> {
             progress
                 .record(&event)
                 .map_err(|_| StoreError::CorruptEvidence)?;
+            if let NamespaceEventKind::RemoteVerified { report } = &event.event {
+                remote_verified_child_id = Some(report.remote.resource_id.clone());
+            }
             commitment = commitment_fn(&commitment, &plain);
         }
         let snapshot = progress.snapshot();
@@ -715,6 +833,7 @@ impl DirectoryHistoryDecoder<'_> {
                 commitment,
             },
             progress,
+            remote_verified_child_id,
         })
     }
 }
@@ -731,6 +850,85 @@ pub(super) fn history_counts_existing(
     budget: &mut Budget,
     remaining: usize,
 ) -> Result<(usize, usize), StoreError> {
+    history_counts_existing_with_classifications(
+        directory, protector, scope, provider, physical, budget, remaining, None,
+    )
+}
+
+/// Explicit diagnostics may aggregate static progress inline from the exact
+/// rows already authenticated by the existing count scan. None is the normal
+/// health path, with no additional classification or IO.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn history_counts_existing_with_classifications(
+    directory: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    scope: &EditJournalScope,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+    classifications: Option<
+        &mut std::collections::BTreeMap<PendingDirectoryCreateClassification, usize>,
+    >,
+) -> Result<(usize, usize), StoreError> {
+    let (records, unresolved, _) = history_counts_existing_inner(
+        directory,
+        protector,
+        scope,
+        provider,
+        physical,
+        budget,
+        remaining,
+        classifications,
+        None,
+    )?;
+    Ok((records, unresolved))
+}
+
+/// Classify only an independently admitted new target under the caller's
+/// existing lock. Retained history remains unresolved and grants no authority.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn history_counts_for_fresh_create_existing(
+    directory: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    scope: &EditJournalScope,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+    candidate_scope: &EditJournalScope,
+    candidate_target: Option<&crate::fresh_create_target::FreshCreateTarget>,
+) -> Result<(usize, usize, usize), StoreError> {
+    history_counts_existing_inner(
+        directory,
+        protector,
+        scope,
+        provider,
+        physical,
+        budget,
+        remaining,
+        None,
+        candidate_target.map(|target| (candidate_scope, target)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_counts_existing_inner(
+    directory: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    scope: &EditJournalScope,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+    mut classifications: Option<
+        &mut std::collections::BTreeMap<PendingDirectoryCreateClassification, usize>,
+    >,
+    fresh_create: Option<(
+        &EditJournalScope,
+        &crate::fresh_create_target::FreshCreateTarget,
+    )>,
+) -> Result<(usize, usize, usize), StoreError> {
     validate_scope(scope)?;
     directory.verify()?;
     let decoder = DirectoryHistoryDecoder { protector };
@@ -742,18 +940,67 @@ pub(super) fn history_counts_existing(
         && scope.root_file_index == physical.file_index;
     if !selected {
         directory.verify()?;
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     }
     if ids.len() > remaining {
         return Err(StoreError::ScanLimit);
     }
     let mut unresolved = 0;
+    let mut independent = 0;
     for id in &ids {
         let row = decoder.load_scoped(directory, id, budget, scope, &names)?;
         unresolved += usize::from(!row.record.progress.recorded_complete);
+        let progress = row.record.progress;
+        let closed_submitted = progress.remote == NamespacePhase::Submitted
+            && progress.sequence == 1
+            && row.remote_verified_child_id.is_none();
+        let closed_verified = progress.remote == NamespacePhase::Verified
+            && progress.sequence == 2
+            && row.remote_verified_child_id.is_some();
+        if (closed_submitted || closed_verified)
+            && progress.attention.is_none()
+            && !progress.local_completed
+            && !progress.continued
+            && progress.source_removal.is_none()
+            && !progress.recorded_complete
+            && let Some((candidate_scope, target)) = fresh_create
+            && scope == candidate_scope
+            && let NamespaceOperation::CreateDirectory { destination } =
+                &row.record.intent.operation
+            && target.permits_additive_beside_directory(
+                &destination.parent.local_components,
+                &destination.parent.remote.resource_id,
+                &destination.name,
+                destination.local_file,
+                &scope.root_resource_id,
+            )
+            && (closed_submitted
+                || row
+                    .remote_verified_child_id
+                    .as_deref()
+                    .is_some_and(|child_id| {
+                        target.definitely_disjoint_from_verified_directory(
+                            &destination.parent.local_components,
+                            &destination.parent.remote.resource_id,
+                            &destination.name,
+                            child_id,
+                            &scope.root_resource_id,
+                        )
+                    }))
+        {
+            independent += 1;
+        }
+        if !row.record.progress.recorded_complete
+            && let Some(classifications) = classifications.as_deref_mut()
+        {
+            let classification =
+                PendingDirectoryCreateClassification::from_progress(row.record.progress);
+            let count = classifications.entry(classification).or_insert(0usize);
+            *count = count.checked_add(1).ok_or(StoreError::ScanLimit)?;
+        }
     }
     directory.verify()?;
-    Ok((ids.len(), unresolved))
+    Ok((ids.len(), unresolved, independent))
 }
 
 #[cfg(all(test, unix))]
@@ -1385,8 +1632,8 @@ pub(super) fn accounted_usage(
                 .entries
                 .checked_add(children.len())
                 .ok_or(StoreError::ScanLimit)?;
-            for child in children {
-                result.add(directory.open(&child)?.len()?)?;
+            for length in metadata_sizes_checked(&*directory, &children)? {
+                result.add(length)?;
             }
             directory.verify()?;
         } else {

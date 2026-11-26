@@ -210,8 +210,8 @@ impl WindowsAgent {
             destination_path: request.destination_path,
             destination_parent_resource_id: request.destination_parent_resource_id,
             destination_parent_etag: request.destination_parent_etag,
-            source_auth_generation: client.token_generation(),
-            destination_auth_generation: client.token_generation(),
+            source_auth_generation: client.provider_context_generation(),
+            destination_auth_generation: client.provider_context_generation(),
         };
         self.check_windows_vault_authority(
             &context.session,

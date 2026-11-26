@@ -397,6 +397,213 @@ fn limits(
     Ok(())
 }
 impl Cache {
+    /// Record the caller's durable receipt acceptance, not cloud completion.
+    /// FUSE must first fsync its exact receipt manifest and retain its original
+    /// spool on failure. Neither dispatch nor retention state is reset here.
+    pub fn acknowledge_ordinary_create_handoff(
+        &self,
+        scope: &CacheScope,
+        receipt: &OrdinaryCreateReceipt,
+    ) -> Result<OrdinaryCreateReceipt, CacheError> {
+        let found = {
+            let db = self.lock_db()?;
+            current(&db, scope, receipt)?
+        };
+        if found.body_evicted {
+            if found.state != OrdinaryCreateState::Verified
+                || found.write.state != WriteState::Verified
+                || !found.local_handoff_acknowledged
+                || found.remote.is_none()
+            {
+                return Err(CacheError::Conflict);
+            }
+            return Ok(found);
+        }
+        if !found.local_handoff_acknowledged
+            && !matches!(
+                found.state,
+                OrdinaryCreateState::Ready
+                    | OrdinaryCreateState::Claimed
+                    | OrdinaryCreateState::Uncertain
+                    | OrdinaryCreateState::Verified
+            )
+        {
+            return Err(CacheError::Conflict);
+        }
+        // Every live-body acknowledgement proves the entire indexed immutable
+        // copy, including retries. Callers may prepare a durable manifest from
+        // metadata alone; only this verification grants local custody success.
+        // Keep the verified reader pinned until the transaction commits.
+        let _reader = self.open_content(scope, &found.write.content)?;
+        let db = self.lock_db()?;
+        let tx =
+            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
+        let found = current(&tx, scope, receipt)?;
+        if found.local_handoff_acknowledged {
+            return Ok(found);
+        }
+        if !matches!(
+            found.state,
+            OrdinaryCreateState::Ready
+                | OrdinaryCreateState::Claimed
+                | OrdinaryCreateState::Uncertain
+                | OrdinaryCreateState::Verified
+        ) {
+            return Err(CacheError::Conflict);
+        }
+        let n=tx.execute("UPDATE ordinary_create_handoffs SET local_handoff_ack=1,updated_at=?3 WHERE scope_key=?1 AND write_id=?2 AND local_handoff_ack=0 AND body_state=0",params![scope.key,found.write.id,now_unix()]).map_err(db_error)?;
+        if n != 1 {
+            return Err(CacheError::Conflict);
+        }
+        let out = load(&tx, scope, found.write.id)?.ok_or(CacheError::Corrupt)?;
+        tx.commit().map_err(db_error)?;
+        Ok(out)
+    }
+
+    /// Copy one exact Ready body into the caller's new private disposable file.
+    /// Success means the complete copy matched the immutable receipt; partial
+    /// output on any error must be discarded. This grants no dispatch authority.
+    /// The original durable body/journal remain custody, so the copy is not synced.
+    /// Unix only: Windows callers must retain protected-storage streaming instead
+    /// of exporting its bytes through an ordinary plaintext temporary path.
+    #[cfg(unix)]
+    pub fn copy_ready_ordinary_create_snapshot_cancellable(
+        &self,
+        scope: &CacheScope,
+        receipt: &OrdinaryCreateReceipt,
+        output: &mut File,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), CacheError> {
+        use std::os::unix::fs::MetadataExt;
+        if cancelled() {
+            return Err(CacheError::Cancelled);
+        }
+        plain(scope)?;
+        // Pin indexed source lifetime against cache deletion while copying.
+        // Neither the DB guard nor a global mutation lock spans body IO.
+        let _lease = self.lock_content_publication()?;
+        let key = content_key(scope, &receipt.write.content);
+        let validate = |db: &Connection| -> Result<(), CacheError> {
+            let found = current(db, scope, receipt)?;
+            if found.state != OrdinaryCreateState::Ready || found.body_evicted {
+                return Err(CacheError::Conflict);
+            }
+            let (retention, policy): (i64, i64) = db
+                .query_row(
+                    "SELECT c.retention,COALESCE(p.policy,0) FROM contents c LEFT JOIN policies p ON p.scope_key=c.scope_key AND p.resource_id=c.resource_id WHERE c.content_key=?1 AND c.scope_key=?2",
+                    params![key, scope.key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(db_error)?
+                .ok_or(CacheError::NotFound)?;
+            if retention == Retention::Recent as i64
+                && (policy == AvailabilityPolicy::CloudOnly as i64
+                    || folder_policy::inherited_cloud_only(
+                        db,
+                        scope,
+                        &receipt.write.content.resource_id,
+                    )?)
+            {
+                return Err(CacheError::PolicyConflict);
+            }
+            Ok(())
+        };
+        {
+            let db = self.lock_db()?;
+            validate(&db)?;
+        }
+        let directory = File::from(
+            rustix::fs::open(
+                &self.inner.content_dir,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|error| io_error(error.into()))?,
+        );
+        let mut source = File::from(
+            rustix::fs::openat(
+                &directory,
+                format!("{key}.blob"),
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::NONBLOCK
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|error| io_error(error.into()))?,
+        );
+        let directory_metadata = directory.metadata().map_err(io_error)?;
+        if directory_metadata.mode() & 0o077 != 0 {
+            return Err(CacheError::UnsafeDirectory);
+        }
+        let owner = directory_metadata.uid();
+        let source_metadata = source.metadata().map_err(io_error)?;
+        let output_metadata = output.metadata().map_err(io_error)?;
+        for metadata in [&source_metadata, &output_metadata] {
+            if !metadata.is_file()
+                || metadata.nlink() != 1
+                || metadata.uid() != owner
+                || metadata.mode() & 0o077 != 0
+            {
+                return Err(CacheError::UnsafeDirectory);
+            }
+        }
+        if source_metadata.len() != receipt.byte_len
+            || output_metadata.len() != 0
+            || (source_metadata.dev(), source_metadata.ino())
+                == (output_metadata.dev(), output_metadata.ino())
+        {
+            return Err(CacheError::Conflict);
+        }
+        output.rewind().map_err(io_error)?;
+        let mut hasher = Sha256::new();
+        let mut length = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            if cancelled() {
+                return Err(CacheError::Cancelled);
+            }
+            let count = source.read(&mut buffer).map_err(io_error)?;
+            if cancelled() {
+                return Err(CacheError::Cancelled);
+            }
+            if count == 0 {
+                break;
+            }
+            length = length
+                .checked_add(count as u64)
+                .filter(|length| *length <= receipt.byte_len)
+                .ok_or(CacheError::Corrupt)?;
+            output.write_all(&buffer[..count]).map_err(io_error)?;
+            hasher.update(&buffer[..count]);
+        }
+        if length != receipt.byte_len
+            || format!("{:x}", hasher.finalize()) != receipt.sha256
+            || output.metadata().map_err(io_error)?.len() != receipt.byte_len
+        {
+            return Err(CacheError::Corrupt);
+        }
+        if cancelled() {
+            return Err(CacheError::Cancelled);
+        }
+        let db = self.lock_db()?;
+        validate(&db)?;
+        db.execute(
+            "UPDATE contents SET last_accessed=?2 WHERE content_key=?1",
+            params![key, now_unix()],
+        )
+        .map_err(db_error)?;
+        drop(db);
+        if cancelled() {
+            return Err(CacheError::Cancelled);
+        }
+        Ok(())
+    }
+
     /// Persist immutable bytes only. This does not prove target absence or admit HTTP.
     pub fn stage_ordinary_create<R: Read>(
         &self,
@@ -540,6 +747,59 @@ impl Cache {
         validate_registered_scope(&db, scope)?;
         load(&db, scope, write_id)
     }
+
+    /// Find the retained body for one exact remotely verified file version.
+    /// This is a lookup only: it never adopts an unreferenced blob or grants
+    /// dispatch authority. A missing or evicted body is an ordinary cache miss.
+    pub fn verified_ordinary_create_for_remote(
+        &self,
+        scope: &CacheScope,
+        logical_path: &str,
+        remote_resource_id: &str,
+        remote_etag: &str,
+    ) -> Result<Option<OrdinaryCreateReceipt>, CacheError> {
+        plain(scope)?;
+        validate_path(logical_path)?;
+        validate_id(remote_resource_id)?;
+        if !strong_etag(remote_etag) {
+            return Err(CacheError::InvalidEntry);
+        }
+        let db = self.lock_db()?;
+        validate_registered_scope(&db, scope)?;
+        let mut statement = db
+            .prepare("SELECT write_id FROM ordinary_create_handoffs WHERE scope_key=?1 AND path=?2 AND remote_id=?3 AND remote_etag=?4 ORDER BY write_id DESC LIMIT 2")
+            .map_err(db_error)?;
+        let ids = statement
+            .query_map(
+                params![scope.key, logical_path, remote_resource_id, remote_etag],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        if ids.len() > 1 {
+            return Err(CacheError::Corrupt);
+        }
+        let Some(id) = ids.first() else {
+            return Ok(None);
+        };
+        let receipt = load(&db, scope, *id)?.ok_or(CacheError::Corrupt)?;
+        let remote_matches = receipt.remote.as_ref().is_some_and(|remote| {
+            remote.resource_id == remote_resource_id
+                && remote.etag == remote_etag
+                && remote.protection == ContentProtection::Plaintext
+        });
+        if receipt.state != OrdinaryCreateState::Verified
+            || receipt.write.logical_path != logical_path
+            || !remote_matches
+        {
+            return Err(CacheError::Corrupt);
+        }
+        if receipt.body_evicted {
+            return Ok(None);
+        }
+        Ok(Some(receipt))
+    }
     pub fn admit_ordinary_create(
         &self,
         scope: &CacheScope,
@@ -648,6 +908,51 @@ impl Cache {
             return Err(CacheError::Conflict);
         }
         self.finish_create(scope, claim, Some(verified))
+    }
+    /// Complete a stopped create only after the engine independently reads
+    /// and hashes its exact current cloud revision. This never grants send
+    /// authority, resets an attempt, acknowledges custody or removes a body.
+    pub fn confirm_ordinary_create_readback(
+        &self,
+        scope: &CacheScope,
+        receipt: &OrdinaryCreateReceipt,
+        verified: &RemoteEntry,
+        verified_sha256: &str,
+    ) -> Result<OrdinaryCreateReceipt, CacheError> {
+        validate_entry(verified)?;
+        if !matches!(
+            receipt.state,
+            OrdinaryCreateState::Uncertain | OrdinaryCreateState::Conflict
+        ) || verified.directory
+            || verified.encrypted
+            || !verified.writable
+            || verified.path != receipt.write.logical_path
+            || verified.size != receipt.byte_len
+            || verified_sha256 != receipt.sha256
+            || !strong_etag(&verified.etag)
+            || verified.id == receipt.write.content.resource_id
+        {
+            return Err(CacheError::Conflict);
+        }
+        let db = self.lock_db()?;
+        let tx =
+            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
+        let found = current(&tx, scope, receipt)?;
+        if found.state != receipt.state || found.body_evicted {
+            return Err(CacheError::Conflict);
+        }
+        transition(&tx, scope, found.write.id, found.state as i64, 5, "", None)?;
+        let n = tx.execute(
+            "UPDATE ordinary_create_handoffs SET remote_id=?3,remote_etag=?4 WHERE scope_key=?1 AND write_id=?2 AND state=5",
+            params![scope.key, found.write.id, verified.id, verified.etag],
+        ).map_err(db_error)?;
+        if n != 1 {
+            return Err(CacheError::Corrupt);
+        }
+        write_state(&tx, scope, found.write.id, WriteState::Verified)?;
+        let out = load(&tx, scope, found.write.id)?.ok_or(CacheError::Corrupt)?;
+        tx.commit().map_err(db_error)?;
+        Ok(out)
     }
     fn finish_create(
         &self,
@@ -798,9 +1103,26 @@ impl Cache {
         scope: &CacheScope,
         limit: usize,
     ) -> Result<Vec<OrdinaryCreateReceipt>, CacheError> {
+        self.ready_ordinary_create_discovery(scope, limit, &[])
+            .map(|(_, receipts)| receipts)
+    }
+
+    /// Return the original bounded Ready ID window and hydrate only candidates
+    /// not already owned by this scope's in-process preparation workers. IDs
+    /// are discovery hints only; callers still need fresh receipt validation
+    /// and the durable one-use claim before sending anything.
+    pub fn ready_ordinary_create_discovery(
+        &self,
+        scope: &CacheScope,
+        limit: usize,
+        preparing_write_ids: &[i64],
+    ) -> Result<(Vec<i64>, Vec<OrdinaryCreateReceipt>), CacheError> {
         plain(scope)?;
-        if !(1..=64).contains(&limit) {
+        if !(1..=64).contains(&limit) || preparing_write_ids.len() > 4 {
             return Err(CacheError::LimitExceeded);
+        }
+        if preparing_write_ids.iter().any(|id| *id <= 0) {
+            return Err(CacheError::InvalidEntry);
         }
         let db = self.lock_db()?;
         validate_registered_scope(&db, scope)?;
@@ -810,9 +1132,15 @@ impl Cache {
             .map_err(db_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_error)?;
-        ids.into_iter()
-            .map(|id| load(&db, scope, id)?.ok_or(CacheError::Corrupt))
-            .collect()
+        let mut receipts = Vec::with_capacity(ids.len());
+        for id in &ids {
+            if !preparing_write_ids.contains(id) {
+                receipts.push(load(&db, scope, *id)?.ok_or(CacheError::Corrupt)?);
+            }
+        }
+        // Do not refill the window after filtering: workers use all observed
+        // IDs to retain the same bounded deferral/retry bookkeeping.
+        Ok((ids, receipts))
     }
 }
 fn ids(db: &Connection, scope: &CacheScope, sql: &str, max: usize) -> Result<Vec<i64>, CacheError> {

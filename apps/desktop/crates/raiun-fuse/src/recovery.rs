@@ -60,6 +60,7 @@ pub enum RecoveryWarning {
     LocalPathUnavailable,
     LegacyUnscopedManifest,
     EditableCreateWorkingCopy,
+    CancelledCreateWorkingCopy,
     RetainedCreateHandoff,
 }
 
@@ -256,6 +257,7 @@ fn read_spool_item(key: &str, files: &SpoolFiles) -> RecoveryItem {
         warnings: Vec::new(),
     };
 
+    let mut data_identity = None;
     if let Some(data) = files.data.as_deref() {
         match fs::symlink_metadata(data) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -278,6 +280,9 @@ fn read_spool_item(key: &str, files: &SpoolFiles) -> RecoveryItem {
                         item.warnings.push(RecoveryWarning::UnsafeData);
                     }
                 }
+                if !item.warnings.contains(&RecoveryWarning::UnsafeData) {
+                    data_identity = metadata_file_identity(&metadata);
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 item.warnings.push(RecoveryWarning::MissingData);
@@ -294,6 +299,7 @@ fn read_spool_item(key: &str, files: &SpoolFiles) -> RecoveryItem {
     };
     match read_bounded_manifest(manifest) {
         Ok(manifest) => {
+            let mut cancelled_working_candidate = false;
             let (space, remote, condition, etag, legacy) = match manifest {
                 ProviderManifest::Legacy(fields) => (
                     fields[0].clone(),
@@ -304,17 +310,28 @@ fn read_spool_item(key: &str, files: &SpoolFiles) -> RecoveryItem {
                 ),
                 ProviderManifest::Scoped(fields) => {
                     if fields.version == 4 {
-                        item.warnings.push(
-                            if fields
-                                .working
-                                .as_ref()
-                                .is_some_and(|working| !working.closing)
-                            {
-                                RecoveryWarning::EditableCreateWorkingCopy
-                            } else {
-                                RecoveryWarning::RetainedCreateHandoff
-                            },
-                        );
+                        let working = fields.working.as_deref();
+                        cancelled_working_candidate = working.is_some_and(|working| {
+                            working.valid()
+                                && working.cancelled
+                                && working.closing
+                                && data_identity == Some((working.device, working.inode))
+                                && item.bytes.is_some()
+                                && item.local_data_path.is_some()
+                                && fields.origin.len() > 0
+                                && !fields.origin.chars().any(char::is_control)
+                                && !fields.account_id.chars().any(char::is_control)
+                                && !fields.root_resource_id.chars().any(char::is_control)
+                        });
+                        if !cancelled_working_candidate {
+                            item.warnings.push(
+                                if working.is_some_and(|working| !working.closing) {
+                                    RecoveryWarning::EditableCreateWorkingCopy
+                                } else {
+                                    RecoveryWarning::RetainedCreateHandoff
+                                },
+                            );
+                        }
                     } else if fields.version == 3 {
                         item.warnings.push(RecoveryWarning::RetainedCreateHandoff);
                     }
@@ -343,6 +360,10 @@ fn read_spool_item(key: &str, files: &SpoolFiles) -> RecoveryItem {
                 item.warnings.push(RecoveryWarning::ManifestNameMismatch);
                 return item;
             }
+            if cancelled_working_candidate {
+                item.warnings
+                    .push(RecoveryWarning::CancelledCreateWorkingCopy);
+            }
             item.space_id = Some(space);
             item.remote_path = Some(remote);
             item.condition = Some(if condition == "absent" {
@@ -362,6 +383,17 @@ fn read_spool_item(key: &str, files: &SpoolFiles) -> RecoveryItem {
         }
     }
     item
+}
+
+#[cfg(unix)]
+fn metadata_file_identity(metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn metadata_file_identity(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 #[derive(Debug)]

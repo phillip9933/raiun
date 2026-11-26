@@ -310,8 +310,14 @@ fn crash_after_retirement_retries_exact_body_and_keeps_byte_charge() {
             .unwrap()
             .body_evicted
     );
-    assert_eq!(gc(&cache, &s).removed_bytes, 4);
-    assert_eq!(cache.usage().unwrap().protected_bytes, 0);
+    let retained = clean(&cache, &s, 2);
+    let recovered = cache
+        .evict_acknowledged_ordinary_create_bodies(&s, 1024 * 1024, 64)
+        .unwrap();
+    assert_eq!(recovered.removed_bytes, 4);
+    assert_eq!(recovered.used_bytes, 4);
+    assert_eq!(read(&cache, &s, &retained), b"body");
+    assert_eq!(cache.usage().unwrap().protected_bytes, retained.byte_len);
 }
 #[test]
 fn crash_after_unlink_is_expected_clean_miss_until_finalization() {

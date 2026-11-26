@@ -75,7 +75,7 @@ enum DriveCommand {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Inspect or explicitly retry Windows ordinary saved edits; folder sync stays disabled.
+    /// Inspect, check cloud bytes or explicitly retry Windows ordinary saved edits.
     Edits {
         #[command(subcommand)]
         command: EditCommand,
@@ -136,6 +136,15 @@ enum EditCommand {
         /// Opaque next_after value from the previous page; pass it unchanged.
         #[arg(long, value_name = "OPAQUE")]
         after: Option<String>,
+    },
+    /// Compare one retained snapshot with current cloud bytes without saving or completing it.
+    /// A match is informational; the original local snapshot stays retained.
+    Check {
+        #[arg(long, value_name = "HEX")]
+        id: String,
+        /// Immutable record generation from edits list (not auth_generation).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        generation: u64,
     },
     /// Explicitly approve retry of one immutable saved edit and its selected local file.
     /// No automatic replay, overwrite bypass, folder sync or vault retry is enabled.
@@ -393,6 +402,18 @@ pub(crate) fn run(mut args: DriveArgs, config_arg: Option<PathBuf>) -> Result<()
             eprintln!("This agent keeps login in memory; sign in again after agent restart.");
         }
     } else {
+        if !args.json
+            && matches!(
+                args.command,
+                DriveCommand::Edits {
+                    command: EditCommand::Check { .. }
+                }
+            )
+        {
+            eprintln!(
+                "Cloud checks are informational: a match verifies remote bytes only. The original local snapshot is retained and local completion stays unchanged."
+            );
+        }
         return write_drive_result(
             &data,
             args.json,
@@ -430,6 +451,24 @@ fn write_drive_result(
 }
 
 fn edit_retry_exit_status(response: &Value) -> Result<(), String> {
+    if response["continued_create"] == true
+        && response["original_snapshot_retained"] == true
+        && response["retained"] == true
+        && response["state"] == "review_required"
+        && response["remote_verified"] == false
+        && response["local_completion"] == "unavailable"
+    {
+        return Err("This saved file was acknowledged earlier. Its recovery history needs review; nothing was uploaded.".into());
+    }
+    if response["continued_create"] == true
+        && response["original_snapshot_retained"] == true
+        && response["retained"] == true
+        && response["state"] == "historical_link_completed"
+        && response["remote_verified"] == false
+        && response["local_completion"] == "unavailable"
+    {
+        return Err("Recovery history reconciled. The saved copy is retained; this did not upload or freshly verify the file.".into());
+    }
     if response["remote_verified"] == true && response["local_completion"] == "completed" {
         Ok(())
     } else {
@@ -656,6 +695,11 @@ fn validate_edit_inputs(command: &EditCommand, windows: bool) -> Result<(), Stri
                 );
             }
         }
+        EditCommand::Check { id, generation } => {
+            if !valid_edit_id(id) || *generation == 0 {
+                return Err("edits check requires the hexadecimal --id and positive immutable --generation from edits list".into());
+            }
+        }
         EditCommand::Retry {
             id,
             generation,
@@ -737,6 +781,14 @@ fn execute_edits(
                 rpc["after"] = json!(after);
             }
         }
+        EditCommand::Check { id, generation } => {
+            if status["windows_recovery_cloud_check_supported"] != true {
+                return Err("This Windows agent does not support read-only saved-edit cloud checks; update the agent before using edits check".into());
+            }
+            rpc["action"] = json!("windows_recovery_check_cloud");
+            rpc["record_id"] = json!(id);
+            rpc["generation"] = json!(generation);
+        }
         EditCommand::Retry {
             id,
             generation,
@@ -748,7 +800,7 @@ fn execute_edits(
             rpc["local_components"] = json!(local_edit_components(local_relative_path)?);
         }
     }
-    // Exactly one user-approved request. A stale context/error is surfaced;
+    // Exactly one explicit request. A stale context/error is surfaced;
     // credentials or edits are never automatically replayed against newer state.
     let response = request(&rpc)?;
     validate_edit_response(command, &response, profile, generation, &scope)?;
@@ -796,7 +848,83 @@ fn validate_edit_response(
                 _ => return Err(invalid()),
             }
         }
+        EditCommand::Check {
+            id,
+            generation: record_generation,
+        } => {
+            const KEYS: [&str; 11] = [
+                "profile_id",
+                "auth_generation",
+                "recovery_scope_token",
+                "record_id",
+                "generation",
+                "result",
+                "bytes",
+                "read_only",
+                "cloud_mutated",
+                "local_completion",
+                "original_snapshot_retained",
+            ];
+            let object = response.as_object().ok_or_else(invalid)?;
+            if object.len() != KEYS.len()
+                || !KEYS.iter().all(|key| object.contains_key(*key))
+                || response["profile_id"] != profile
+                || response["auth_generation"].as_u64() != Some(generation)
+                || response["recovery_scope_token"] != scope
+                || response["record_id"].as_str() != Some(id.as_str())
+                || response["generation"].as_u64() != Some(*record_generation)
+                || response["read_only"] != true
+                || response["cloud_mutated"] != false
+                || response["local_completion"] != "unchanged"
+                || response["original_snapshot_retained"] != true
+            {
+                return Err(invalid());
+            }
+            match response["result"].as_str() {
+                Some("matched") if response["bytes"].as_u64().is_some() => {}
+                Some("missing" | "different" | "unavailable") if response["bytes"].is_null() => {}
+                _ => return Err(invalid()),
+            }
+        }
         EditCommand::Retry { .. } => {
+            if response.get("continued_create").is_some()
+                || response.get("original_snapshot_retained").is_some()
+            {
+                const KEYS: [&str; 9] = [
+                    "profile_id",
+                    "auth_generation",
+                    "recovery_scope_token",
+                    "state",
+                    "retained",
+                    "remote_verified",
+                    "local_completion",
+                    "continued_create",
+                    "original_snapshot_retained",
+                ];
+                let object = response.as_object().ok_or_else(invalid)?;
+                let freshly_completed = response["state"] == "verified_applied"
+                    && response["remote_verified"] == true
+                    && response["local_completion"] == "completed";
+                let historically_linked = response["state"] == "historical_link_completed"
+                    && response["remote_verified"] == false
+                    && response["local_completion"] == "unavailable";
+                let review_required = response["state"] == "review_required"
+                    && response["remote_verified"] == false
+                    && response["local_completion"] == "unavailable";
+                if object.len() != KEYS.len()
+                    || !KEYS.iter().all(|key| object.contains_key(*key))
+                    || response["profile_id"] != profile
+                    || response["auth_generation"].as_u64() != Some(generation)
+                    || response["recovery_scope_token"] != scope
+                    || response["retained"] != true
+                    || response["continued_create"] != true
+                    || response["original_snapshot_retained"] != true
+                    || !(freshly_completed || historically_linked || review_required)
+                {
+                    return Err(invalid());
+                }
+                return Ok(());
+            }
             let state = response
                 .get("state")
                 .and_then(Value::as_str)
@@ -1028,6 +1156,10 @@ fn request_agent(executable: &Path, state: &Path, request: &Value) -> Result<Val
     let timeout = match request["action"].as_str() {
         Some("auth_begin") => Duration::from_secs(75),
         Some("shutdown") => Duration::from_secs(310),
+        // Full conditional readback can use the configured recovery job's
+        // maximum 24-hour allowance. Only this read-only action gets that
+        // deadline plus bounded relay overhead; mutation timeouts stay intact.
+        Some("windows_recovery_check_cloud") => Duration::from_secs(86_400 + 60),
         _ => Duration::from_secs(40),
     };
     request_agent_until(executable, state, request, Instant::now() + timeout)

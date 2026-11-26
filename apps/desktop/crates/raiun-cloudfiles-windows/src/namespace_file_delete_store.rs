@@ -894,10 +894,17 @@ pub(super) fn accounted_usage(
             .entries
             .checked_add(names.len())
             .ok_or(StoreError::ScanLimit)?;
-        for name in names {
-            let file = directory.open(&name)?;
-            inventory.add(file.len()?)?;
-            file.verify()?;
+        if directory.immutable_metadata_reads() {
+            for length in metadata_sizes_checked(&*directory, &names)? {
+                inventory.add(length)?;
+            }
+        } else {
+            // Preserve this adapter's original explicit verification.
+            for name in names {
+                let file = directory.open(&name)?;
+                inventory.add(file.len()?)?;
+                file.verify()?;
+            }
         }
         directory.verify()?;
     }

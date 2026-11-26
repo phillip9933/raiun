@@ -213,7 +213,9 @@ impl VaultBackend {
                         parent_binding: None,
                         expected_token_generation: Some(request.expected_token_generation),
                         external_token_generation: Some((
-                            Arc::clone(&request.provider_generation),
+                            crate::provider_credentials::ContextGenerationFence::strict(
+                                Arc::clone(&request.provider_generation),
+                            ),
                             request.expected_provider_generation,
                         )),
                         caller_cancelled: Some(&cancelled),

@@ -6,7 +6,7 @@
   },
   "gaps": [],
   "lock_sha256": {
-    "Cargo.lock": "eab7cb009b29e9bc205001b4c3eb964b5a5e59cfa19a1eb4aabd939ad5b811d8"
+    "Cargo.lock": "feb0ebf58e7fc376a573a76c537d1a063e8080b16961077413168e62fd33f53a"
   },
   "roots": [
     "raiun-agent",
@@ -1080,7 +1080,8 @@
       "repository": "https://github.com/indexmap-rs/equivalent",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "targets": [
-        "x86_64-unknown-linux-gnu"
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-gnullvm"
       ],
       "version": "1.0.2"
     },
@@ -1583,6 +1584,26 @@
       "version": "0.4.3"
     },
     {
+      "declared_license": "MIT",
+      "ecosystem": "cargo",
+      "name": "h2",
+      "notice_files": [
+        {
+          "bytes": 1054,
+          "path": "legal/rust/h2-0.4.20/LICENSE",
+          "sha256": "b21623012e6c453d944b0342c515b631cfcbf30704c2621b291526b69c10724d"
+        }
+      ],
+      "registry_crate_sha256": "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118",
+      "repository": "https://github.com/hyperium/h2",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "targets": [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-gnullvm"
+      ],
+      "version": "0.4.20"
+    },
+    {
       "declared_license": "MIT OR Apache-2.0",
       "ecosystem": "cargo",
       "name": "hashbrown",
@@ -1627,7 +1648,8 @@
       "repository": "https://github.com/rust-lang/hashbrown",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "targets": [
-        "x86_64-unknown-linux-gnu"
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-gnullvm"
       ],
       "version": "0.17.1"
     },
@@ -2076,7 +2098,8 @@
       "repository": "https://github.com/indexmap-rs/indexmap",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "targets": [
-        "x86_64-unknown-linux-gnu"
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-gnullvm"
       ],
       "version": "2.14.2"
     },

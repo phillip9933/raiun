@@ -57,10 +57,16 @@ pub(crate) struct NamespaceHistorySummary {
     pub(crate) directory_evidence: bool,
     pub(crate) directory_records: usize,
     pub(crate) directory_unresolved: usize,
+    pub(crate) directory_fresh_create_additive: usize,
+    pub(crate) directory_pending_classifications:
+        Vec<namespace_store::PendingDirectoryCreateClassification>,
     pub(crate) other_namespace_evidence: bool,
     pub(crate) file_evidence: bool,
     pub(crate) file_records: usize,
     pub(crate) file_unresolved: usize,
+    pub(crate) file_acknowledged_join_gaps: usize,
+    pub(crate) file_pending_classifications:
+        Vec<namespace_file_store::PendingFileCreateClassification>,
     pub(crate) delete_evidence: bool,
     pub(crate) delete_records: usize,
     pub(crate) delete_unresolved: usize,
@@ -88,6 +94,33 @@ pub(crate) fn history_unresolved(
         || summary.delete_unresolved != 0)
 }
 
+/// Validate summary bounds while preserving generic pending observations. The
+/// joint existing-lock scanner separately checks exact-target independence;
+/// these counts alone never authorize a new or retained operation.
+pub(crate) fn history_unresolved_for_fresh_create(
+    summary: &NamespaceHistorySummary,
+    configured: bool,
+) -> Result<bool, crate::BackendError> {
+    // Preserve every unknown-format and unconfigured-history refusal.
+    let _ = history_unresolved(summary, configured)?;
+    if summary.unresolved > summary.records
+        || summary.directory_unresolved > summary.directory_records
+        || summary.directory_fresh_create_additive > summary.directory_unresolved
+        || summary.file_unresolved > summary.file_records
+        || summary.delete_unresolved > summary.delete_records
+    {
+        return Err(crate::BackendError::Unavailable);
+    }
+    let remaining_files = summary
+        .file_unresolved
+        .checked_sub(summary.file_acknowledged_join_gaps)
+        .ok_or(crate::BackendError::Unavailable)?;
+    Ok(summary.unresolved != 0
+        || summary.directory_unresolved != 0
+        || remaining_files != 0
+        || summary.delete_unresolved != 0)
+}
+
 /// One existing quota lease and one budget cover catalogs and selected prefixes.
 /// Real authenticated scope catalogs supply Space/root IDs, never caller guesses.
 pub(super) fn history_summary_existing(
@@ -96,6 +129,29 @@ pub(super) fn history_summary_existing(
     policy: StorePolicy,
     provider: &crate::ProviderScope,
     physical_root: crate::ConfiguredRootIdentity,
+) -> Result<NamespaceHistorySummary, StoreError> {
+    history_summary_existing_inner(root, protector, policy, provider, physical_root, false)
+}
+
+/// Explicit diagnostics only; regular health/admission scans retain their
+/// existing cost and do not inspect additional original snapshot histories.
+pub(super) fn history_summary_diagnostic_existing(
+    root: Option<Arc<dyn Directory>>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+) -> Result<NamespaceHistorySummary, StoreError> {
+    history_summary_existing_inner(root, protector, policy, provider, physical_root, true)
+}
+
+fn history_summary_existing_inner(
+    root: Option<Arc<dyn Directory>>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+    include_details: bool,
 ) -> Result<NamespaceHistorySummary, StoreError> {
     let mut budget = scan_budget(policy)?;
     if physical_root.file_index == 0
@@ -129,11 +185,74 @@ pub(super) fn history_summary_existing(
     }
     lock.lock_exclusive()?;
     lock.verify()?;
+    // Only this explicit support query reuses byte-identical decoded metadata.
+    // The adapter and every local decoder drop under this same quota lease;
+    // file reads, budgets and all validation remain unchanged.
+    #[cfg(windows)]
+    let protector = if include_details {
+        super::metadata_memo::MetadataOpenMemo::scoped(protector)
+    } else {
+        protector
+    };
+    let (result, _) = history_summary_existing_locked(
+        Arc::clone(&root),
+        protector,
+        policy,
+        provider,
+        physical_root,
+        &mut budget,
+        include_details,
+        None,
+        None,
+    )?;
+    lock.verify()?;
+    Ok(result)
+}
+
+/// The caller retains the exact root's quota lease and cumulative budget
+/// through namespace, snapshot and legacy classification. No nested lock.
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn history_summary_for_fresh_create_space_existing_locked(
+    root: Arc<dyn Directory>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+    candidate_scope: &EditJournalScope,
+    candidate_target: Option<&crate::fresh_create_target::FreshCreateTarget>,
+    budget: &mut Budget,
+) -> Result<(NamespaceHistorySummary, Vec<StreamedRecordKey>), StoreError> {
+    history_summary_existing_locked(
+        root,
+        protector,
+        policy,
+        provider,
+        physical_root,
+        budget,
+        false,
+        Some(candidate_scope),
+        candidate_target,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_summary_existing_locked(
+    root: Arc<dyn Directory>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    include_details: bool,
+    candidate_scope: Option<&EditJournalScope>,
+    candidate_target: Option<&crate::fresh_create_target::FreshCreateTarget>,
+) -> Result<(NamespaceHistorySummary, Vec<StreamedRecordKey>), StoreError> {
     // Re-enumerate only after locking; charge both bounded observations to the
     // same allowance rather than resetting it per catalog or remote scope.
     let names = root.entries(budget.remaining_entries())?;
     budget.entries(names.len())?;
-    let catalogs = validate_root_catalog_scope_union(&*root, &*protector, &names, &mut budget)?;
+    let catalogs = validate_root_catalog_scope_union(&*root, &*protector, &names, budget)?;
     let mut result = NamespaceHistorySummary {
         directory_evidence: names.iter().any(|name| name == namespace_store::ROOT),
         file_evidence: names.iter().any(|name| name == namespace_file_store::ROOT),
@@ -142,11 +261,12 @@ pub(super) fn history_summary_existing(
             .any(|name| name == namespace_file_delete_store::ROOT),
         ..NamespaceHistorySummary::default()
     };
+    let mut space_exemptions = Vec::new();
     if names.iter().any(|name| name == ROOT) {
         let rename = root.child(ROOT, false)?;
         for scope in catalogs.rename {
             let directory = rename.child(&scope_key(&scope)?, false)?;
-            let names = record_names(&*directory, &mut budget)?;
+            let names = record_names(&*directory, budget)?;
             if scope.profile_id == provider.profile_id()
                 && scope.server_origin == provider.server_origin()
                 && scope.account_subject == provider.account_id()
@@ -172,8 +292,7 @@ pub(super) fn history_summary_existing(
                             .ok_or(StoreError::ScanLimit)?,
                     )
                     .ok_or(StoreError::ScanLimit)?;
-                let rows =
-                    decoder.load_records(&*directory, &scope, &names, &mut budget, remaining)?;
+                let rows = decoder.load_records(&*directory, &scope, &names, budget, remaining)?;
                 result.records += rows.len();
                 result.unresolved += rows
                     .iter()
@@ -186,6 +305,7 @@ pub(super) fn history_summary_existing(
     }
     if result.directory_evidence {
         let directories = root.child(namespace_store::ROOT, false)?;
+        let mut classifications = include_details.then(std::collections::BTreeMap::new);
         for scope in catalogs.directories {
             let directory = directories.child(&scope_key(&scope)?, false)?;
             let remaining = MAX_RECORDS
@@ -201,20 +321,58 @@ pub(super) fn history_summary_existing(
             // Borrowed metadata decoder only. The outer quota lock and this
             // same remaining budget cover both formats; no writer, admission,
             // body access or second independently observed snapshot is made.
-            let (records, unresolved) = namespace_store::history_counts_existing(
-                &*directory,
-                &*protector,
-                &scope,
-                provider,
-                physical_root,
-                &mut budget,
-                remaining,
-            )?;
+            let (records, unresolved, independent) = if let Some(candidate) = candidate_scope {
+                namespace_store::history_counts_for_fresh_create_existing(
+                    &*directory,
+                    &*protector,
+                    &scope,
+                    provider,
+                    physical_root,
+                    budget,
+                    remaining,
+                    candidate,
+                    candidate_target,
+                )?
+            } else if let Some(classifications) = classifications.as_mut() {
+                let (records, unresolved) =
+                    namespace_store::history_counts_existing_with_classifications(
+                        &*directory,
+                        &*protector,
+                        &scope,
+                        provider,
+                        physical_root,
+                        budget,
+                        remaining,
+                        Some(classifications),
+                    )?;
+                (records, unresolved, 0)
+            } else {
+                let (records, unresolved) = namespace_store::history_counts_existing(
+                    &*directory,
+                    &*protector,
+                    &scope,
+                    provider,
+                    physical_root,
+                    budget,
+                    remaining,
+                )?;
+                (records, unresolved, 0)
+            };
             result.directory_records += records;
             result.directory_unresolved += unresolved;
+            result.directory_fresh_create_additive += independent;
             directory.verify()?;
         }
         directories.verify()?;
+        if let Some(classifications) = classifications {
+            result.directory_pending_classifications = classifications
+                .into_iter()
+                .map(|(mut row, count)| {
+                    row.count = count;
+                    row
+                })
+                .collect();
+        }
     }
     if result.file_evidence {
         let remaining = MAX_RECORDS
@@ -227,17 +385,49 @@ pub(super) fn history_summary_existing(
                     .ok_or(StoreError::ScanLimit)?,
             )
             .ok_or(StoreError::ScanLimit)?;
-        let (records, unresolved) = namespace_file_store::history_counts_existing(
-            Arc::clone(&root),
-            Arc::clone(&protector),
-            policy,
-            provider,
-            physical_root,
-            &mut budget,
-            remaining,
-        )?;
+        let (records, unresolved, acknowledged_join_gaps, classifications) =
+            if let Some(candidate) = candidate_scope {
+                let (records, unresolved, gaps, keys) =
+                    namespace_file_store::history_counts_for_fresh_create_space_existing(
+                        Arc::clone(&root),
+                        Arc::clone(&protector),
+                        policy,
+                        provider,
+                        physical_root,
+                        budget,
+                        remaining,
+                        candidate,
+                        candidate_target,
+                    )?;
+                space_exemptions = keys;
+                (records, unresolved, gaps, Vec::new())
+            } else if include_details {
+                namespace_file_store::history_counts_detailed_existing(
+                    Arc::clone(&root),
+                    Arc::clone(&protector),
+                    policy,
+                    provider,
+                    physical_root,
+                    budget,
+                    remaining,
+                )?
+            } else {
+                let (records, unresolved, gaps) =
+                    namespace_file_store::history_counts_with_acknowledged_gaps_existing(
+                        Arc::clone(&root),
+                        Arc::clone(&protector),
+                        policy,
+                        provider,
+                        physical_root,
+                        budget,
+                        remaining,
+                    )?;
+                (records, unresolved, gaps, Vec::new())
+            };
         result.file_records += records;
         result.file_unresolved += unresolved;
+        result.file_acknowledged_join_gaps += acknowledged_join_gaps;
+        result.file_pending_classifications = classifications;
     }
     if result.delete_evidence {
         let remaining = MAX_RECORDS
@@ -256,15 +446,14 @@ pub(super) fn history_summary_existing(
             &catalogs.delete,
             provider,
             physical_root,
-            &mut budget,
+            budget,
             remaining,
         )?;
         result.delete_records += records;
         result.delete_unresolved += unresolved;
     }
     root.verify()?;
-    lock.verify()?;
-    Ok(result)
+    Ok((result, space_exemptions))
 }
 
 /// A verified record returned by read-only discovery. It is not a publication
@@ -333,6 +522,24 @@ impl FileRenameStore {
         base.policy.validate()?;
         base.root.verify()?;
         Ok(Arc::new(Self { base }))
+    }
+
+    /// Bind only an existing v2 root without creating a quota lock, catalog,
+    /// scope or journal entry. The caller still needs full fresh health checks.
+    #[cfg(windows)]
+    pub(crate) fn open_existing_admitted(
+        state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        scope: EditJournalScope,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+    ) -> Result<Option<Arc<Self>>, StoreError> {
+        validate_scope(&scope)?;
+        policy.validate()?;
+        let Some(root) = windows::existing_root(state, V2_STORE_ROOT)? else {
+            return Ok(None);
+        };
+        let base = SnapshotStore::from_directory(root, scope, protector, policy)?;
+        Self::new(base).map(Some)
     }
 
     /// Publish a new intent under the existing v2 quota lock. Only the exact
@@ -1295,10 +1502,17 @@ pub(super) fn accounted_usage(
                 .entries
                 .checked_add(children.len())
                 .ok_or(StoreError::ScanLimit)?;
-            for child in children {
-                let file = directory.open(&child)?;
-                inventory.add(file.len()?)?;
-                file.verify()?;
+            if directory.immutable_metadata_reads() {
+                for length in metadata_sizes_checked(&*directory, &children)? {
+                    inventory.add(length)?;
+                }
+            } else {
+                // Preserve this adapter's original explicit verification.
+                for child in children {
+                    let file = directory.open(&child)?;
+                    inventory.add(file.len()?)?;
+                    file.verify()?;
+                }
             }
             directory.verify()?;
         } else {

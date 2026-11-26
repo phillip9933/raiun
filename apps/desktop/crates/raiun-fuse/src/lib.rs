@@ -55,10 +55,12 @@ use raiun_core::{
 };
 use raiun_engine::{
     CreateUploadHandle, CreateUploadHooks, CreateUploadOwner, Engine, FetchSnapshot,
-    OrdinaryDirectoryView, PendingCreateView,
+    LookupAbsenceHint, LookupEmptyDirectoryHint, LookupEntryHint, OrdinaryDirectoryView,
+    PendingCreateView,
 };
 
 mod create_handoff;
+pub mod diagnostics;
 use vault_routes::{
     VaultCancelledCreateReceiptState, VaultDirectoryCreateOutcome, VaultInstallHook,
     VaultPendingCreateResolution, VaultPendingDirectoryRetargetState,
@@ -106,6 +108,9 @@ fn trace_fuse_namespace_error(_stage: &str, _error: &CloudError) {}
 const PERSONAL: u64 = 2;
 const SPACES: u64 = 3;
 const TTL: Duration = Duration::from_secs(1);
+const LOOKUP_ABSENCE_MEMO_TTL: Duration = Duration::from_millis(250);
+const MAX_LOOKUP_ABSENCE_MEMOS: usize = 256;
+const LOOKUP_EMPTY_DIRECTORY_TTL: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
 thread_local! {
@@ -416,6 +421,8 @@ impl Seek for VaultRouteReader<'_, '_> {
 struct State {
     nodes: HashMap<u64, Node>,
     children: HashMap<(u64, String), u64>,
+    lookup_absence_memos: HashMap<LookupAbsenceKey, LookupAbsenceMemo>,
+    lookup_empty_directory_hints: HashMap<LookupEmptyDirectoryKey, LookupEmptyDirectoryHintMemo>,
     // Emitted historical names remain mutation-denied for this mount session,
     // even if an already admitted cloud operation later replaces the mapping.
     recovery_aliases: std::collections::HashSet<(u64, String)>,
@@ -424,6 +431,93 @@ struct State {
     directory_handles: HashMap<u64, DirectoryHandle>,
     pending_parent_refs: HashMap<u64, (u64, VaultParentRef)>,
     active_writers: std::collections::HashSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LookupAbsenceKey {
+    caller_pid: u32,
+    parent_ino: u64,
+    name: String,
+}
+
+struct LookupAbsenceMemo {
+    space: String,
+    parent_path: String,
+    parent_resource_id: String,
+    target_path: String,
+    hint: LookupAbsenceHint,
+    expires_at: Instant,
+}
+
+struct LookupPointBinding<'a> {
+    parent: u64,
+    name: &'a str,
+    space: &'a str,
+    parent_path: &'a str,
+    parent_resource_id: &'a str,
+    child_path: &'a str,
+    cached_child: Option<(u64, &'a str)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LookupEmptyDirectoryKey {
+    caller_pid: u32,
+    directory_ino: u64,
+}
+
+#[derive(Clone)]
+struct LookupEmptyDirectoryHintMemo {
+    space: String,
+    path: String,
+    resource_id: String,
+    hint: LookupEmptyDirectoryHint,
+    expires_at: Instant,
+}
+
+fn clear_lookup_absence_memos_for_name(state: &mut State, parent: u64, name: &str) {
+    state
+        .lookup_absence_memos
+        .retain(|key, _| key.parent_ino != parent || key.name != name);
+}
+
+fn clear_lookup_empty_directory_hints_for_parent(state: &mut State, parent: u64) {
+    state
+        .lookup_empty_directory_hints
+        .retain(|key, _| key.directory_ino != parent);
+}
+
+fn prune_lookup_absence_memos(state: &mut State, now: Instant) {
+    state
+        .lookup_absence_memos
+        .retain(|_, memo| memo.expires_at > now);
+    while state.lookup_absence_memos.len() > MAX_LOOKUP_ABSENCE_MEMOS {
+        let Some(oldest) = state
+            .lookup_absence_memos
+            .iter()
+            .min_by_key(|(_, memo)| memo.expires_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        state.lookup_absence_memos.remove(&oldest);
+    }
+}
+
+fn prune_lookup_empty_directory_hints(state: &mut State, now: Instant) {
+    state
+        .lookup_empty_directory_hints
+        .retain(|_, hint| hint.expires_at > now);
+    while state.lookup_empty_directory_hints.len() > MAX_LOOKUP_ABSENCE_MEMOS {
+        let Some(oldest) = state
+            .lookup_empty_directory_hints
+            .iter()
+            .min_by_key(|(_, hint)| hint.expires_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        state.lookup_empty_directory_hints.remove(&oldest);
+    }
 }
 
 /// Immutable metadata used to fence namespace moves against already-open
@@ -439,11 +533,122 @@ struct VaultFileHandleMeta {
 }
 
 #[derive(Clone)]
-struct DirectoryHandle {
+struct DirectorySnapshot {
+    parent_ino: u64,
     entries: Vec<(String, u64, FileType)>,
     routes: Vec<(VaultRouteControl, u64)>,
     locked_vaults: Vec<u64>,
     owner_vault: Option<(u64, u64, u64, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LazyDirectoryBinding {
+    parent_ino: u64,
+    space: String,
+    path: String,
+    resource_id: String,
+}
+
+enum DirectoryContents {
+    Lazy(LazyDirectoryBinding),
+    Loading(LazyDirectoryBinding),
+    Ready(DirectorySnapshot),
+    Closed,
+}
+
+#[derive(Clone)]
+struct DirectoryHandle {
+    contents: Arc<(Mutex<DirectoryContents>, Condvar)>,
+}
+
+impl DirectoryHandle {
+    fn ready(snapshot: DirectorySnapshot) -> Self {
+        Self {
+            contents: Arc::new((
+                Mutex::new(DirectoryContents::Ready(snapshot)),
+                Condvar::new(),
+            )),
+        }
+    }
+
+    fn lazy(binding: LazyDirectoryBinding) -> Self {
+        Self {
+            contents: Arc::new((Mutex::new(DirectoryContents::Lazy(binding)), Condvar::new())),
+        }
+    }
+
+    fn ready_snapshot(&self) -> Option<DirectorySnapshot> {
+        let (state, _) = &*self.contents;
+        state.lock().ok().and_then(|state| match &*state {
+            DirectoryContents::Ready(snapshot) => Some(snapshot.clone()),
+            _ => None,
+        })
+    }
+
+    fn close(&self) {
+        let (state, changed) = &*self.contents;
+        if let Ok(mut state) = state.lock() {
+            *state = DirectoryContents::Closed;
+            changed.notify_all();
+        }
+    }
+}
+
+fn validate_lazy_binding(state: &State, binding: &LazyDirectoryBinding) -> Result<(), CloudError> {
+    match state.nodes.get(&binding.parent_ino).map(|node| &node.kind) {
+        Some(NodeKind::Remote { space, entry })
+            if *space == binding.space
+                && entry.path == binding.path
+                && entry.id == binding.resource_id
+                && entry.directory
+                && !entry.encrypted =>
+        {
+            Ok(())
+        }
+        _ => Err(CloudError::new(
+            ErrorKind::Conflict,
+            "ordinary directory identity changed",
+        )),
+    }
+}
+
+fn validate_directory_snapshot(
+    state: &State,
+    snapshot: &DirectorySnapshot,
+) -> Result<(), CloudError> {
+    if let Some((route_id, _, _, owner_path)) = &snapshot.owner_vault {
+        let blocked = state.active_writers.iter().any(|active| {
+            vault_reservation_path(active, *route_id).is_some_and(|(subtree, reserved_path)| {
+                subtree && path_is_within(owner_path, reserved_path)
+            })
+        });
+        if blocked {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "encrypted directory is being cancelled or moved",
+            ));
+        }
+    }
+    let listed_cancelled_file = snapshot.entries.iter().any(|(_, ino, _)| {
+        state.nodes.get(ino).is_some_and(|node| {
+            let NodeKind::Vault { route, entry, .. } = &node.kind else {
+                return false;
+            };
+            let key = format!(
+                "vault-cancel-file:{}:\0{}",
+                route.control.route_id(),
+                entry.path
+            );
+            state.active_writers.contains(&key)
+        })
+    });
+    if listed_cancelled_file {
+        return Err(CloudError::new(
+            ErrorKind::Conflict,
+            "encrypted directory listing overlaps a file cancellation",
+        ));
+    }
+    Ok(())
 }
 
 struct RegisteredVaultHooks {
@@ -493,6 +698,8 @@ fn purge_vault_route_state(
     let mut state = shared_state
         .lock()
         .map_err(|_| io_error("provider state is unavailable"))?;
+    state.lookup_absence_memos.clear();
+    state.lookup_empty_directory_hints.clear();
     let removed: std::collections::HashSet<u64> = state
         .nodes
         .iter()
@@ -518,10 +725,12 @@ fn purge_vault_route_state(
         .children
         .retain(|_, child_ino| !removed.contains(child_ino));
     state.directory_handles.retain(|_, handle| {
-        !handle
-            .routes
-            .iter()
-            .any(|(route, _)| route.route_id() == route_id)
+        !handle.ready_snapshot().is_some_and(|snapshot| {
+            snapshot
+                .routes
+                .iter()
+                .any(|(route, _)| route.route_id() == route_id)
+        })
     });
     let vault_handles: Vec<u64> = state
         .vault_file_handles
@@ -559,6 +768,8 @@ fn purge_locked_vault_state(
     let mut state = shared_state
         .lock()
         .map_err(|_| io_error("provider state is unavailable"))?;
+    state.lookup_absence_memos.clear();
+    state.lookup_empty_directory_hints.clear();
     let removed: std::collections::HashSet<u64> = state
         .nodes
         .iter()
@@ -627,9 +838,14 @@ fn purge_locked_vault_state(
     state
         .children
         .retain(|_, child_ino| !all_removed.contains(child_ino));
-    state
-        .directory_handles
-        .retain(|_, handle| !handle.locked_vaults.iter().any(|ino| removed.contains(ino)));
+    state.directory_handles.retain(|_, handle| {
+        !handle.ready_snapshot().is_some_and(|snapshot| {
+            snapshot
+                .locked_vaults
+                .iter()
+                .any(|ino| removed.contains(ino))
+        })
+    });
     Ok(invalidations)
 }
 
@@ -855,6 +1071,7 @@ struct CreateHandoffCapability {
 }
 
 struct RaiunFilesystem {
+    diagnostics: Arc<diagnostics::MountDiagnostics>,
     create_handoff: Option<CreateHandoffCapability>,
     engine: Engine,
     pool: RemotePool,
@@ -1159,9 +1376,15 @@ pub struct MountHandle {
     create_upload_owner: Option<CreateUploadOwner>,
     root: PathBuf,
     source: String,
+    diagnostics: Arc<diagnostics::MountDiagnostics>,
 }
 
 impl MountHandle {
+    /// Return an immutable, serializable snapshot of bounded in-memory FUSE diagnostics.
+    pub fn diagnostics(&self) -> diagnostics::DiagnosticsSnapshot {
+        self.diagnostics.snapshot()
+    }
+
     /// Whether this process still sees the FUSE mount at its configured root.
     /// If mountinfo cannot be read, keep the conservative answer that a live
     /// session may still be mounted.
@@ -1453,6 +1676,7 @@ pub fn mount_with_vault_registry_and_create_handoff(
         Arc::clone(&notifier),
     )
     .map_err(|error| error.to_string())?;
+    let diagnostics = Arc::clone(&filesystem.diagnostics);
     let create_upload_owner = if let Some(options) = handoff {
         if options.max_pending_bytes == 0 {
             return Err("create pending byte budget must be nonzero".into());
@@ -1495,6 +1719,7 @@ pub fn mount_with_vault_registry_and_create_handoff(
         create_upload_owner,
         root,
         source,
+        diagnostics,
     })
 }
 
@@ -1550,6 +1775,169 @@ fn mountinfo_fuse_source_at(mountinfo: &[u8], root: &Path) -> Option<Vec<u8>> {
 }
 
 impl RaiunFilesystem {
+    fn lookup_target_still_unmapped(
+        &self,
+        parent: u64,
+        name: &str,
+        space: &str,
+        path: &str,
+        resource_id: &str,
+    ) -> bool {
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        if state.children.contains_key(&(parent, name.to_owned()))
+            || state.recovery_aliases.contains(&(parent, name.to_owned()))
+        {
+            return false;
+        }
+        state.nodes.get(&parent).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::Remote { space: current_space, entry }
+                    if current_space.as_str() == space
+                        && entry.path.as_str() == path
+                        && entry.id.as_str() == resource_id
+                        && entry.directory
+                        && !entry.encrypted
+            )
+        })
+    }
+
+    fn lookup_point_state_matches(&self, state: &State, binding: &LookupPointBinding<'_>) -> bool {
+        if state
+            .recovery_aliases
+            .contains(&(binding.parent, binding.name.to_owned()))
+            || state.nodes.get(&binding.parent).is_none_or(|node| {
+                !matches!(
+                    &node.kind,
+                    NodeKind::Remote { space: current_space, entry }
+                        if current_space == binding.space
+                            && entry.path == binding.parent_path
+                            && entry.id == binding.parent_resource_id
+                            && entry.directory
+                            && !entry.encrypted
+                )
+            })
+        {
+            return false;
+        }
+        match binding.cached_child {
+            Some((expected_ino, expected_id)) => {
+                state
+                    .children
+                    .get(&(binding.parent, binding.name.to_owned()))
+                    == Some(&expected_ino)
+                    && state.nodes.get(&expected_ino).is_some_and(|node| {
+                        node.parent == binding.parent
+                            && node.name == binding.name
+                            && matches!(
+                                &node.kind,
+                                NodeKind::Remote { space: current_space, entry }
+                                    if current_space == binding.space
+                                        && entry.path == binding.child_path
+                                        && entry.id == expected_id
+                                        && !entry.encrypted
+                                        && !entry.id.starts_with("pending:")
+                            )
+                    })
+            }
+            None => !state
+                .children
+                .contains_key(&(binding.parent, binding.name.to_owned())),
+        }
+    }
+
+    fn lookup_point_local_overlay_free(&self, binding: &LookupPointBinding<'_>) -> bool {
+        // An active route is a local namespace overlay even when the remote
+        // directory listing has no matching plaintext child.
+        let mut route_entries = Vec::new();
+        if self
+            .append_active_vault_routes(binding.space, binding.parent_path, &mut route_entries)
+            .is_err()
+            || route_entries
+                .iter()
+                .any(|entry| entry.path == binding.child_path)
+        {
+            return false;
+        }
+        let (spool, marker) = self.spool_paths(binding.space, binding.child_path);
+        for path in [spool, marker] {
+            match fs::symlink_metadata(path) {
+                Ok(_) => return false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return false,
+            }
+        }
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        if !self.lookup_point_state_matches(&state, binding) {
+            return false;
+        }
+        !state.active_writers.iter().any(|key| {
+            let reservation = ordinary_subtree_path(key).or_else(|| key.split_once('\0'));
+            reservation.is_some_and(|(active_space, active_path)| {
+                active_space == binding.space && paths_overlap(active_path, binding.child_path)
+            })
+        })
+    }
+
+    fn publish_lookup_point_entry(
+        &self,
+        hint: &LookupEntryHint,
+        binding: &LookupPointBinding<'_>,
+        mut entry: RemoteEntry,
+    ) -> Result<Option<Node>, CloudError> {
+        if entry.path != binding.child_path
+            || entry.encrypted
+            || entry.id.is_empty()
+            || entry.id.starts_with("pending:")
+            || entry.id.starts_with("raiun-pending-create:")
+            || !self.lookup_point_local_overlay_free(binding)
+        {
+            return Ok(None);
+        }
+        if !self
+            .engine
+            .validate_lookup_entry_hint(
+                hint,
+                binding.space,
+                binding.child_path,
+                binding.parent_resource_id,
+                &entry,
+            )
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        entry.writable &= self.space_is_writable(binding.space);
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io_error("provider state is unavailable"))?;
+        if !self.lookup_point_state_matches(&state, binding)
+            || state.active_writers.iter().any(|key| {
+                let reservation = ordinary_subtree_path(key).or_else(|| key.split_once('\0'));
+                reservation.is_some_and(|(active_space, active_path)| {
+                    active_space == binding.space && paths_overlap(active_path, binding.child_path)
+                })
+            })
+        {
+            return Ok(None);
+        }
+        let ino = self.add_node_locked(
+            &mut state,
+            binding.parent,
+            binding.name.to_owned(),
+            NodeKind::Remote {
+                space: binding.space.to_owned(),
+                entry,
+            },
+        )?;
+        Ok(state.nodes.get(&ino).cloned())
+    }
+
     fn reserve_vault_write(&self, route_id: u64, path: &str) -> Result<String, CloudError> {
         let key = format!("vault-write:{route_id}:\0{path}");
         let cancellation_key = format!("vault-cancel-file:{route_id}:\0{path}");
@@ -1616,10 +2004,10 @@ impl RaiunFilesystem {
         });
         let open_directory_conflict = state.directory_handles.values().any(|handle| {
             handle
-                .owner_vault
-                .as_ref()
+                .ready_snapshot()
+                .and_then(|snapshot| snapshot.owner_vault)
                 .is_some_and(|(owner_route, _, _, path)| {
-                    *owner_route == route_id && path_is_within(path, source)
+                    owner_route == route_id && path_is_within(&path, source)
                 })
         });
         if conflicts || open_file_conflict || open_directory_conflict {
@@ -1681,10 +2069,10 @@ impl RaiunFilesystem {
         });
         let directory_conflict = state.directory_handles.values().any(|handle| {
             handle
-                .owner_vault
-                .as_ref()
+                .ready_snapshot()
+                .and_then(|snapshot| snapshot.owner_vault)
                 .is_some_and(|(owner_route, _, _, owner_path)| {
-                    *owner_route == route_id && path_is_within(owner_path, path)
+                    owner_route == route_id && path_is_within(&owner_path, path)
                 })
         });
         if writer_conflict || directory_conflict {
@@ -1742,10 +2130,12 @@ impl RaiunFilesystem {
                 })
         });
         let open_directory_conflict = state.directory_handles.values().any(|handle| {
-            handle
-                .entries
-                .iter()
-                .any(|(_, entry_ino, _)| *entry_ino == ino)
+            handle.ready_snapshot().is_some_and(|snapshot| {
+                snapshot
+                    .entries
+                    .iter()
+                    .any(|(_, entry_ino, _)| *entry_ino == ino)
+            })
         });
         if operation_conflict {
             return Err(CloudError::new(
@@ -1782,7 +2172,7 @@ impl RaiunFilesystem {
     fn register_directory_handle(
         &self,
         fh: u64,
-        handle: DirectoryHandle,
+        snapshot: DirectorySnapshot,
     ) -> Result<(), CloudError> {
         let mut state = self
             .state
@@ -1794,40 +2184,225 @@ impl RaiunFilesystem {
                 "provider directory handle limit reached",
             ));
         }
-        if let Some((route_id, _, _, owner_path)) = &handle.owner_vault {
-            let blocked = state.active_writers.iter().any(|active| {
-                vault_reservation_path(active, *route_id).is_some_and(|(subtree, reserved_path)| {
-                    subtree && path_is_within(owner_path, reserved_path)
-                })
-            });
-            if blocked {
-                return Err(CloudError::new(
-                    ErrorKind::Conflict,
-                    "encrypted directory is being cancelled or moved",
-                ));
-            }
-        }
-        let listed_cancelled_file = handle.entries.iter().any(|(_, ino, _)| {
-            state.nodes.get(ino).is_some_and(|node| {
-                let NodeKind::Vault { route, entry, .. } = &node.kind else {
-                    return false;
-                };
-                let key = format!(
-                    "vault-cancel-file:{}:\0{}",
-                    route.control.route_id(),
-                    entry.path
-                );
-                state.active_writers.contains(&key)
-            })
-        });
-        if listed_cancelled_file {
+        validate_directory_snapshot(&state, &snapshot)?;
+        state
+            .directory_handles
+            .insert(fh, DirectoryHandle::ready(snapshot));
+        Ok(())
+    }
+
+    fn register_lazy_directory_handle(
+        &self,
+        fh: u64,
+        binding: LazyDirectoryBinding,
+    ) -> Result<(), CloudError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io_error("provider state is unavailable"))?;
+        if state.directory_handles.len() >= MAX_DIRECTORY_HANDLES {
             return Err(CloudError::new(
-                ErrorKind::Conflict,
-                "encrypted directory listing overlaps a file cancellation",
+                ErrorKind::Unsupported,
+                "provider directory handle limit reached",
             ));
         }
-        state.directory_handles.insert(fh, handle);
+        validate_lazy_binding(&state, &binding)?;
+        state
+            .directory_handles
+            .insert(fh, DirectoryHandle::lazy(binding));
         Ok(())
+    }
+
+    fn initialize_lazy_directory(
+        &self,
+        fh: u64,
+        ino: u64,
+        handle: &DirectoryHandle,
+    ) -> Result<DirectorySnapshot, CloudError> {
+        let binding = loop {
+            let (contents, changed) = &*handle.contents;
+            let mut state = contents
+                .lock()
+                .map_err(|_| io_error("directory handle state is unavailable"))?;
+            match &*state {
+                DirectoryContents::Ready(snapshot) => {
+                    if snapshot.parent_ino != ino {
+                        return Err(invalid("directory handle inode changed"));
+                    }
+                    return Ok(snapshot.clone());
+                }
+                DirectoryContents::Lazy(binding) => {
+                    if binding.parent_ino != ino {
+                        return Err(invalid("directory handle inode changed"));
+                    }
+                    let binding = binding.clone();
+                    *state = DirectoryContents::Loading(binding.clone());
+                    break binding;
+                }
+                DirectoryContents::Loading(_) => {
+                    state = changed
+                        .wait(state)
+                        .map_err(|_| io_error("directory handle state is unavailable"))?;
+                    drop(state);
+                }
+                DirectoryContents::Closed => {
+                    return Err(CloudError::new(
+                        ErrorKind::NotFound,
+                        "open directory handle was released",
+                    ));
+                }
+            }
+        };
+
+        let result = self.build_lazy_directory_snapshot(&binding);
+        let snapshot = match result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.finish_lazy_directory_load(fh, handle, &binding, None)?;
+                return Err(error);
+            }
+        };
+        let routes_to_acquire = snapshot.routes.clone();
+        let mut publication_attempted = false;
+        let publish = with_vault_route_leases(&routes_to_acquire, 0, || {
+            publication_attempted = true;
+            self.finish_lazy_directory_load(fh, handle, &binding, Some(snapshot.clone()))
+        });
+        if let Err(error) = publish {
+            if !publication_attempted {
+                self.finish_lazy_directory_load(fh, handle, &binding, None)?;
+            }
+            return Err(error);
+        }
+        Ok(snapshot)
+    }
+
+    fn finish_lazy_directory_load(
+        &self,
+        fh: u64,
+        handle: &DirectoryHandle,
+        binding: &LazyDirectoryBinding,
+        snapshot: Option<DirectorySnapshot>,
+    ) -> Result<(), CloudError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| io_error("provider state is unavailable"))?;
+        let still_registered = state
+            .directory_handles
+            .get(&fh)
+            .is_some_and(|current| Arc::ptr_eq(&current.contents, &handle.contents));
+        let (contents, changed) = &*handle.contents;
+        let mut content_state = contents
+            .lock()
+            .map_err(|_| io_error("directory handle state is unavailable"))?;
+        let mut failure = None;
+        if still_registered {
+            let loading = matches!(&*content_state, DirectoryContents::Loading(current) if current == binding);
+            match snapshot {
+                Some(snapshot) if loading => {
+                    if let Err(error) = validate_lazy_binding(&state, binding) {
+                        *content_state = DirectoryContents::Lazy(binding.clone());
+                        failure = Some(error);
+                    } else if let Err(error) = validate_directory_snapshot(&state, &snapshot) {
+                        *content_state = DirectoryContents::Lazy(binding.clone());
+                        failure = Some(error);
+                    } else {
+                        *content_state = DirectoryContents::Ready(snapshot);
+                    }
+                }
+                Some(_) => {
+                    *content_state = DirectoryContents::Closed;
+                    failure = Some(CloudError::new(
+                        ErrorKind::NotFound,
+                        "open directory handle was released",
+                    ));
+                }
+                None if loading => {
+                    *content_state = DirectoryContents::Lazy(binding.clone());
+                }
+                None if matches!(&*content_state, DirectoryContents::Lazy(current) if current == binding) =>
+                    {}
+                None => {
+                    *content_state = DirectoryContents::Closed;
+                    failure = Some(CloudError::new(
+                        ErrorKind::NotFound,
+                        "open directory handle was released",
+                    ));
+                }
+            }
+        } else {
+            *content_state = DirectoryContents::Closed;
+        }
+        changed.notify_all();
+        if !still_registered {
+            return Err(CloudError::new(
+                ErrorKind::NotFound,
+                "open directory handle was released",
+            ));
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn build_lazy_directory_snapshot(
+        &self,
+        binding: &LazyDirectoryBinding,
+    ) -> Result<DirectorySnapshot, CloudError> {
+        self.verify_lazy_directory_binding(binding)?;
+        let children = self.children_with_lease(binding.parent_ino, None)?;
+        if children.len() > MAX_DIRECTORY_ENTRIES {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "directory exceeds the provider listing limit",
+            ));
+        }
+        self.verify_lazy_directory_binding(binding)?;
+        let parent = self.node(binding.parent_ino)?;
+        let mut entries = vec![(".".into(), binding.parent_ino, FileType::Directory)];
+        entries.push(("..".into(), parent.parent, FileType::Directory));
+        entries.extend(
+            children
+                .iter()
+                .map(|node| (node.name.clone(), node.ino, self.file_type(node))),
+        );
+        let routes = directory_vault_routes(&parent, &children);
+        let locked_vaults = children
+            .iter()
+            .filter_map(|node| {
+                matches!(node.kind, NodeKind::LockedVault { .. }).then_some(node.ino)
+            })
+            .collect();
+        Ok(DirectorySnapshot {
+            parent_ino: binding.parent_ino,
+            entries,
+            routes,
+            locked_vaults,
+            owner_vault: None,
+        })
+    }
+
+    fn verify_lazy_directory_binding(
+        &self,
+        binding: &LazyDirectoryBinding,
+    ) -> Result<(), CloudError> {
+        match self.node(binding.parent_ino)?.kind {
+            NodeKind::Remote { space, entry }
+                if space == binding.space
+                    && entry.path == binding.path
+                    && entry.id == binding.resource_id
+                    && entry.directory
+                    && !entry.encrypted =>
+            {
+                Ok(())
+            }
+            _ => Err(CloudError::new(
+                ErrorKind::Conflict,
+                "ordinary directory identity changed",
+            )),
+        }
     }
 
     fn release_write_key(&self, key: &str) {
@@ -2503,6 +3078,7 @@ impl RaiunFilesystem {
         nodes.insert(PERSONAL, personal);
         nodes.insert(SPACES, spaces_node);
         let filesystem = Self {
+            diagnostics: diagnostics::MountDiagnostics::new(),
             create_handoff: None,
             engine,
             pool: RemotePool::new(4),
@@ -2522,6 +3098,8 @@ impl RaiunFilesystem {
                     ((ROOT, "Personal".into()), PERSONAL),
                     ((ROOT, "Spaces".into()), SPACES),
                 ]),
+                lookup_absence_memos: HashMap::new(),
+                lookup_empty_directory_hints: HashMap::new(),
                 recovery_aliases: std::collections::HashSet::new(),
                 file_handles: HashMap::new(),
                 vault_file_handles: HashMap::new(),
@@ -2880,6 +3458,17 @@ impl RaiunFilesystem {
             .state
             .lock()
             .map_err(|_| io_error("provider state is unavailable"))?;
+        self.add_node_locked(&mut state, parent, name, kind)
+    }
+
+    fn add_node_locked(
+        &self,
+        state: &mut State,
+        parent: u64,
+        name: String,
+        kind: NodeKind,
+    ) -> Result<u64, CloudError> {
+        clear_lookup_absence_memos_for_name(state, parent, &name);
         if let Some(ino) = state.children.get(&(parent, name.clone())).copied() {
             if let Some(current) = state.nodes.get_mut(&ino) {
                 if same_identity(&current.kind, &kind) {
@@ -2890,6 +3479,7 @@ impl RaiunFilesystem {
                     return Ok(ino);
                 }
             }
+            clear_lookup_empty_directory_hints_for_parent(state, ino);
         }
         if state.nodes.len() >= MAX_NODES {
             return Err(CloudError::new(
@@ -3209,6 +3799,8 @@ impl RaiunFilesystem {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        state.lookup_absence_memos.clear();
+        state.lookup_empty_directory_hints.clear();
         let removed: std::collections::HashSet<u64> = state
             .nodes
             .iter()
@@ -3410,59 +4002,45 @@ impl RaiunFilesystem {
         let parent = self.node(parent_ino)?;
         let (space, path) = self.child_path(&parent, name)?;
         let reservation = self.reserve_path(&space, &path)?;
-        let engine = self.engine.clone();
-        let check_space = space.clone();
-        let check_path = path.clone();
-        match self
-            .pool
-            .call(move || engine.stat(&check_space, &check_path))?
-        {
-            Ok(entry) => {
-                if flags & libc::O_EXCL != 0 {
-                    return Err(CloudError::new(
-                        ErrorKind::Conflict,
-                        "destination already exists",
-                    ));
+        // Exclusive handoff creates already obtain a fresh, root/parent-bound
+        // absence proof below. A separate stat repeats the same HTTP walk.
+        // Nonexclusive O_CREAT must retain its existing-file open path.
+        if self.create_handoff.is_none() || flags & libc::O_EXCL == 0 {
+            let engine = self.engine.clone();
+            let check_space = space.clone();
+            let check_path = path.clone();
+            match self
+                .pool
+                .call(move || engine.stat(&check_space, &check_path))?
+            {
+                Ok(entry) => {
+                    if flags & libc::O_EXCL != 0 {
+                        return Err(CloudError::new(
+                            ErrorKind::Conflict,
+                            "destination already exists",
+                        ));
+                    }
+                    // FUSE CREATE may be used for open(O_CREAT) even when the
+                    // path already exists. Without O_EXCL, POSIX semantics
+                    // require opening that file; open_node refreshes its
+                    // metadata and preserves the current ETag write condition.
+                    let ino = self.add_node(
+                        parent_ino,
+                        name.into(),
+                        NodeKind::Remote {
+                            space: space.clone(),
+                            entry,
+                        },
+                    )?;
+                    drop(reservation);
+                    let fh = self.open_node(ino, flags)?;
+                    return Ok((self.node(ino)?, fh, flags));
                 }
-                // FUSE CREATE may be used for open(O_CREAT) even when the
-                // path already exists. Without O_EXCL, POSIX semantics
-                // require opening that file; open_node refreshes its
-                // metadata and preserves the current ETag write condition.
-                let ino = self.add_node(
-                    parent_ino,
-                    name.into(),
-                    NodeKind::Remote {
-                        space: space.clone(),
-                        entry,
-                    },
-                )?;
-                drop(reservation);
-                let fh = self.open_node(ino, flags)?;
-                return Ok((self.node(ino)?, fh, flags));
+                Err(error) if error.kind == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
-            Err(error) if error.kind == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
         }
-        let entry = RemoteEntry {
-            id: format!("pending:{}", stable_hash(&format!("{space}:{path}"))),
-            path: path.clone(),
-            directory: false,
-            size: 0,
-            etag: String::new(),
-            modified_unix: 0,
-            writable: true,
-            encrypted: false,
-        };
-        let ino = self.add_node(
-            parent_ino,
-            name.into(),
-            NodeKind::Remote {
-                space: space.clone(),
-                entry,
-            },
-        )?;
         let binding = if let Some(capability) = &self.create_handoff {
-            let scope = self.engine.ordinary_write_scope(&space)?;
             let parent_id = match &parent.kind {
                 NodeKind::Personal { .. } | NodeKind::Space { .. } => None,
                 NodeKind::Remote { entry, .. } if entry.directory && !entry.encrypted => {
@@ -3470,8 +4048,8 @@ impl RaiunFilesystem {
                 }
                 _ => return Err(invalid("ordinary create parent is not remote")),
             };
-            Some(self.engine.capture_new_plaintext_create_parent(
-                &scope,
+            Some(self.engine.capture_new_plaintext_create_parent_for_space(
+                &space,
                 &path,
                 parent_id,
                 capability.current.as_ref(),
@@ -3494,7 +4072,28 @@ impl RaiunFilesystem {
                 }
             }
         }
-        let mut write = self.prepare_write(ino, &space, &path, None, true)?;
+        let entry = RemoteEntry {
+            id: format!("pending:{}", stable_hash(&format!("{space}:{path}"))),
+            path: path.clone(),
+            directory: false,
+            size: 0,
+            etag: String::new(),
+            modified_unix: 0,
+            writable: true,
+            encrypted: false,
+        };
+        let ino = self.add_node(
+            parent_ino,
+            name.into(),
+            NodeKind::Remote {
+                space: space.clone(),
+                entry,
+            },
+        )?;
+        let mut write = match binding.as_ref() {
+            Some(parent) => self.prepare_create_write(ino, parent)?,
+            None => self.prepare_write(ino, &space, &path, None, true)?,
+        };
         if binding
             .as_ref()
             .is_some_and(|parent| parent.scope() != &write.scope || parent.path() != write.path)
@@ -3951,14 +4550,28 @@ impl RaiunFilesystem {
         held_lease: Option<&VaultRouteLease<'_>>,
         now: Instant,
     ) -> Result<Node, CloudError> {
-        let parent_is_vault = matches!(self.node(parent)?.kind, NodeKind::Vault { .. });
-        let cached_ino = {
-            self.state
+        self.lookup_child_with_caller_at(parent, name, held_lease, now, None)
+    }
+
+    fn lookup_child_with_caller_at(
+        &self,
+        parent: u64,
+        name: &str,
+        held_lease: Option<&VaultRouteLease<'_>>,
+        now: Instant,
+        caller_pid: Option<u32>,
+    ) -> Result<Node, CloudError> {
+        let parent_node = self.node(parent)?;
+        let parent_is_vault = matches!(parent_node.kind, NodeKind::Vault { .. });
+        let (cached_ino, is_recovery_alias) = {
+            let state = self
+                .state
                 .lock()
-                .map_err(|_| io_error("provider state is unavailable"))?
-                .children
-                .get(&(parent, name.to_owned()))
-                .copied()
+                .map_err(|_| io_error("provider state is unavailable"))?;
+            (
+                state.children.get(&(parent, name.to_owned())).copied(),
+                state.recovery_aliases.contains(&(parent, name.to_owned())),
+            )
         };
         if let Some(ino) = cached_ino {
             let cached = self.node(ino)?;
@@ -3984,11 +4597,342 @@ impl RaiunFilesystem {
             if safe_to_reuse {
                 return Ok(cached);
             }
+            if caller_pid.is_some()
+                && let NodeKind::Remote {
+                    space: parent_space,
+                    entry: parent_entry,
+                } = &parent_node.kind
+                && parent_entry.directory
+                && !parent_entry.encrypted
+                && let NodeKind::Remote {
+                    space: child_space,
+                    entry: child_entry,
+                } = &cached.kind
+                && child_space == parent_space
+                && !child_entry.encrypted
+                && !child_entry.id.starts_with("pending:")
+            {
+                let child_path = format!("{}/{name}", parent_entry.path.trim_end_matches('/'));
+                let cached_child = Some((ino, child_entry.id.as_str()));
+                let binding = LookupPointBinding {
+                    parent,
+                    name,
+                    space: parent_space,
+                    parent_path: &parent_entry.path,
+                    parent_resource_id: &parent_entry.id,
+                    child_path: &child_path,
+                    cached_child,
+                };
+                if self.lookup_point_local_overlay_free(&binding) {
+                    let engine = self.engine.clone();
+                    let request_space = parent_space.clone();
+                    let request_path = child_path.clone();
+                    let expected_parent_id = parent_entry.id.clone();
+                    if let Ok((Ok(fresh), _, Some(hint))) = self.pool.call(move || {
+                        engine.provider_stat_for_lookup_view(
+                            &request_space,
+                            &request_path,
+                            &expected_parent_id,
+                        )
+                    }) && fresh.id == child_entry.id
+                        && let Ok(Some(refreshed)) =
+                            self.publish_lookup_point_entry(&hint, &binding, fresh)
+                    {
+                        self.diagnostics.lookup_point_hit();
+                        return Ok(refreshed);
+                    }
+                }
+            }
+        }
+        if cached_ino.is_none()
+            && !is_recovery_alias
+            && safe_component(name)
+            && let Some(caller_pid) = caller_pid
+            && let Node {
+                kind: NodeKind::Remote { space, entry },
+                ..
+            } = &parent_node
+            && entry.directory
+            && !entry.encrypted
+        {
+            let key = LookupEmptyDirectoryKey {
+                caller_pid,
+                directory_ino: parent,
+            };
+            let memo = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| io_error("provider state is unavailable"))?;
+                prune_lookup_empty_directory_hints(&mut state, now);
+                state.lookup_empty_directory_hints.get(&key).cloned()
+            };
+            if let Some(memo) = memo.as_ref()
+                && memo.space == space.as_str()
+                && memo.path == entry.path
+                && memo.resource_id == entry.id
+                && memo.expires_at > now
+            {
+                let child_path = format!("{}/{name}", entry.path.trim_end_matches('/'));
+                let valid = self
+                    .engine
+                    .validate_lookup_empty_directory_hint(
+                        &memo.hint,
+                        space,
+                        &entry.path,
+                        &entry.id,
+                        &child_path,
+                    )
+                    .unwrap_or(false);
+                if valid
+                    && self.lookup_target_still_unmapped(
+                        parent,
+                        name,
+                        space,
+                        &entry.path,
+                        &entry.id,
+                    )
+                {
+                    self.diagnostics.empty_directory_memo_hit();
+                    return Err(CloudError::new(
+                        ErrorKind::NotFound,
+                        "cloud item was not found",
+                    ));
+                }
+            }
+            if memo.is_some() {
+                if let Ok(mut state) = self.state.lock() {
+                    state.lookup_empty_directory_hints.remove(&key);
+                }
+            }
+        }
+        if cached_ino.is_none()
+            && !is_recovery_alias
+            && safe_component(name)
+            && let Node {
+                kind: NodeKind::Remote { space, entry },
+                ..
+            } = &parent_node
+            && entry.directory
+            && !entry.encrypted
+        {
+            let child_path = format!("{}/{name}", entry.path.trim_end_matches('/'));
+            let key = caller_pid.map(|caller_pid| LookupAbsenceKey {
+                caller_pid,
+                parent_ino: parent,
+                name: name.to_owned(),
+            });
+            let engine = self.engine.clone();
+            let request_space = space.as_str().to_owned();
+            if let (Some(key), NodeKind::Remote { entry, .. }) = (&key, &parent_node.kind) {
+                let memo = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| io_error("provider state is unavailable"))?;
+                    prune_lookup_absence_memos(&mut state, now);
+                    state.lookup_absence_memos.remove(key)
+                };
+                if let Some(memo) = memo
+                    && memo.space == space.as_str()
+                    && memo.parent_path == entry.path
+                    && memo.parent_resource_id == entry.id
+                    && memo.target_path == child_path
+                    && memo.expires_at > now
+                {
+                    let hint = memo.hint;
+                    let expected_space = space.as_str().to_owned();
+                    let expected_path = child_path.clone();
+                    let expected_parent_id = entry.id.clone();
+                    let valid = self
+                        .engine
+                        .validate_lookup_absence_hint(
+                            &hint,
+                            &expected_space,
+                            &expected_path,
+                            &expected_parent_id,
+                        )
+                        .unwrap_or(false);
+                    if valid
+                        && self.lookup_target_still_unmapped(
+                            parent,
+                            name,
+                            space,
+                            &entry.path,
+                            &entry.id,
+                        )
+                    {
+                        self.diagnostics.lookup_absence_memo_hit();
+                        return Err(CloudError::new(
+                            ErrorKind::NotFound,
+                            "cloud item was not found",
+                        ));
+                    }
+                }
+            }
+            let request_path = child_path.clone();
+            let expected_parent_id = entry.id.clone();
+            let (result, hint, entry_hint) = if caller_pid.is_some() {
+                self.pool.call(move || {
+                    engine.provider_stat_for_lookup_view(
+                        &request_space,
+                        &request_path,
+                        &expected_parent_id,
+                    )
+                })?
+            } else {
+                self.pool
+                    .call(move || engine.stat(&request_space, &request_path))
+                    .map(|result| (result, None, None))?
+            };
+            match result {
+                Ok(fresh) => {
+                    if let (Some(hint), NodeKind::Remote { entry, .. }) =
+                        (entry_hint, &parent_node.kind)
+                    {
+                        let binding = LookupPointBinding {
+                            parent,
+                            name,
+                            space,
+                            parent_path: &entry.path,
+                            parent_resource_id: &entry.id,
+                            child_path: &child_path,
+                            cached_child: None,
+                        };
+                        if let Ok(Some(node)) =
+                            self.publish_lookup_point_entry(&hint, &binding, fresh)
+                        {
+                            self.diagnostics.lookup_point_hit();
+                            return Ok(node);
+                        }
+                    }
+                }
+                Err(error) if error.kind == ErrorKind::NotFound => {
+                    if let (Some(key), Some(hint)) = (key, hint) {
+                        let mut state = self
+                            .state
+                            .lock()
+                            .map_err(|_| io_error("provider state is unavailable"))?;
+                        prune_lookup_absence_memos(&mut state, now);
+                        if state.lookup_absence_memos.len() >= MAX_LOOKUP_ABSENCE_MEMOS
+                            && !state.lookup_absence_memos.contains_key(&key)
+                            && let Some(oldest) = state
+                                .lookup_absence_memos
+                                .iter()
+                                .min_by_key(|(_, memo)| memo.expires_at)
+                                .map(|(key, _)| key.clone())
+                        {
+                            state.lookup_absence_memos.remove(&oldest);
+                        }
+                        state.lookup_absence_memos.insert(
+                            key,
+                            LookupAbsenceMemo {
+                                space: space.as_str().to_owned(),
+                                parent_path: entry.path.clone(),
+                                parent_resource_id: entry.id.clone(),
+                                target_path: child_path,
+                                hint,
+                                expires_at: now + LOOKUP_ABSENCE_MEMO_TTL,
+                            },
+                        );
+                    }
+                    // Preserve this fresh lookup's direct result. A result
+                    // without a typed scoped hint is never reusable.
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
         }
         self.children_with_lease(parent, held_lease)?
             .into_iter()
             .find(|child| child.name == name)
             .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "cloud item was not found"))
+    }
+
+    fn remember_lookup_empty_directory_hint(
+        &self,
+        caller_pid: u32,
+        operation_started: Instant,
+        space: &str,
+        path: &str,
+        entry: &RemoteEntry,
+        ino: u64,
+        hint: LookupEmptyDirectoryHint,
+    ) {
+        let expires_at = operation_started + LOOKUP_EMPTY_DIRECTORY_TTL;
+        if Instant::now() >= expires_at {
+            return;
+        }
+        let Ok(Node {
+            kind:
+                NodeKind::Remote {
+                    space: current_space,
+                    entry: current_entry,
+                },
+            ..
+        }) = self.node(ino)
+        else {
+            return;
+        };
+        if current_space != space
+            || current_entry.path != path
+            || current_entry.id != entry.id
+            || !current_entry.directory
+            || current_entry.encrypted
+        {
+            return;
+        }
+        let child_path = format!("{}/raiun-birth-view-check", path.trim_end_matches('/'));
+        if !self
+            .engine
+            .validate_lookup_empty_directory_hint(&hint, space, path, &entry.id, &child_path)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        prune_lookup_empty_directory_hints(&mut state, Instant::now());
+        let still_current = state.nodes.get(&ino).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::Remote { space: current_space, entry: current_entry }
+                    if current_space == space
+                        && current_entry.path == path
+                        && current_entry.id == entry.id
+                        && current_entry.directory
+                        && !current_entry.encrypted
+            )
+        });
+        let has_children = state.children.keys().any(|(parent, _)| *parent == ino);
+        if !still_current || has_children || Instant::now() >= expires_at {
+            return;
+        }
+        let key = LookupEmptyDirectoryKey {
+            caller_pid,
+            directory_ino: ino,
+        };
+        if state.lookup_empty_directory_hints.len() >= MAX_LOOKUP_ABSENCE_MEMOS
+            && !state.lookup_empty_directory_hints.contains_key(&key)
+            && let Some(oldest) = state
+                .lookup_empty_directory_hints
+                .iter()
+                .min_by_key(|(_, memo)| memo.expires_at)
+                .map(|(key, _)| key.clone())
+        {
+            state.lookup_empty_directory_hints.remove(&oldest);
+        }
+        state.lookup_empty_directory_hints.insert(
+            key,
+            LookupEmptyDirectoryHintMemo {
+                space: space.to_owned(),
+                path: path.to_owned(),
+                resource_id: entry.id.clone(),
+                hint,
+                expires_at,
+            },
+        );
     }
 
     fn space_is_writable(&self, space: &str) -> bool {
@@ -4231,12 +5175,51 @@ impl RaiunFilesystem {
         existing: Option<&RemoteEntry>,
         truncate: bool,
     ) -> Result<WriteHandle, CloudError> {
-        let (spool, manifest) = self.spool_paths(space, path);
         let engine = self.engine.clone();
         let scope_space = space.to_owned();
         let scope = self
             .pool
             .call(move || engine.ordinary_write_scope(&scope_space))??;
+        self.prepare_write_with_scope(ino, space, path, existing, truncate, scope)
+    }
+
+    /// Only a fresh Engine create proof can bypass ordinary scope discovery.
+    /// Edits and recovery reopen continue through prepare_write above.
+    fn prepare_create_write(
+        &self,
+        ino: u64,
+        parent: &raiun_engine::VerifiedCreateParent,
+    ) -> Result<WriteHandle, CloudError> {
+        let capability = self
+            .create_handoff
+            .as_ref()
+            .ok_or_else(|| invalid("create handoff is unavailable"))?;
+        if !(capability.current)() {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "ordinary create owner changed before spool admission",
+            ));
+        }
+        self.prepare_write_with_scope(
+            ino,
+            parent.scope().space_id(),
+            parent.path(),
+            None,
+            true,
+            parent.scope().clone(),
+        )
+    }
+
+    fn prepare_write_with_scope(
+        &self,
+        ino: u64,
+        space: &str,
+        path: &str,
+        existing: Option<&RemoteEntry>,
+        truncate: bool,
+        scope: CacheScope,
+    ) -> Result<WriteHandle, CloudError> {
+        let (spool, manifest) = self.spool_paths(space, path);
         let resource_id = existing.map(|entry| entry.id.clone());
         let mut condition = existing
             .map(|entry| WriteCondition::Match(entry.etag.clone()))
@@ -4541,6 +5524,21 @@ impl RaiunFilesystem {
                 ));
             }
             for item in page.items {
+                if matches!(
+                    item.warnings.as_slice(),
+                    [recovery::RecoveryWarning::CancelledCreateWorkingCopy]
+                ) && item.space_id.is_some()
+                    && item.remote_path.is_some()
+                    && item.local_data_path.is_some()
+                    && item.bytes.is_some()
+                    && item.condition == Some(recovery::RecoveryConditionKind::Absent)
+                {
+                    // The cancelled working copy remains local recovery data,
+                    // but it carries no pending upload or remote mutation.
+                    // Its bytes are retained; only this local namespace
+                    // overlap blocker is waived.
+                    continue;
+                }
                 let (Some(space), Some(path)) =
                     (item.space_id.as_deref(), item.remote_path.as_deref())
                 else {
@@ -4864,13 +5862,24 @@ impl Filesystem for RaiunFilesystem {
         reply.error(Errno::ENOSYS);
     }
 
-    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Lookup, parent.0);
         let mut reply = Some(reply);
         let outcome = self.with_node_lease(parent.0, |lease| {
             let result = name
                 .to_str()
                 .ok_or_else(|| CloudError::new(ErrorKind::Unsupported, "file name is not UTF-8"))
-                .and_then(|name| self.lookup_child_with_lease(parent.0, name, lease));
+                .and_then(|name| {
+                    self.lookup_child_with_caller_at(
+                        parent.0,
+                        name,
+                        lease,
+                        Instant::now(),
+                        Some(req.pid()),
+                    )
+                });
             match result {
                 Ok(node) => {
                     let mut send_entry = || {
@@ -4940,24 +5949,27 @@ impl Filesystem for RaiunFilesystem {
                         reply
                             .take()
                             .expect("FUSE reply is used once")
-                            .error(errno(&error));
+                            .error(diagnostic.cloud_failure(&error));
                     }
                 }
                 Err(error) => reply
                     .take()
                     .expect("FUSE reply is used once")
-                    .error(errno(&error)),
+                    .error(diagnostic.cloud_failure(&error)),
             }
             Ok(())
         });
         if let Err(error) = outcome {
             if let Some(reply) = reply {
-                reply.error(errno(&error));
+                reply.error(diagnostic.cloud_failure(&error));
             }
         }
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Getattr, ino.0);
         let mut reply = Some(reply);
         let outcome = self.with_node_lease(ino.0, |lease| {
             let result = (|| {
@@ -5042,21 +6054,48 @@ impl Filesystem for RaiunFilesystem {
                 Err(error) => reply
                     .take()
                     .expect("FUSE reply is used once")
-                    .error(errno(&error)),
+                    .error(diagnostic.cloud_failure(&error)),
             }
             Ok(())
         });
         if let Err(error) = outcome {
             if let Some(reply) = reply {
-                reply.error(errno(&error));
+                reply.error(diagnostic.cloud_failure(&error));
             }
         }
     }
 
     fn opendir(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Opendir, ino.0);
         let mut reply = Some(reply);
         let outcome = self.with_node_lease(ino.0, |held_lease| {
             let result = (|| {
+                let parent = self.node(ino.0)?;
+                if held_lease.is_none()
+                    && let NodeKind::Remote { space, entry } = &parent.kind
+                    && entry.directory
+                    && !entry.encrypted
+                    && entry.path != "/"
+                {
+                    // Opening this handle grants no data or write authority.
+                    // First readdir validates the remote parent identity;
+                    // child operations retain their own admission checks.
+                    let binding = LazyDirectoryBinding {
+                        parent_ino: ino.0,
+                        space: space.clone(),
+                        path: entry.path.clone(),
+                        resource_id: entry.id.clone(),
+                    };
+                    let fh = self.next_handle.fetch_add(1, Ordering::Relaxed).max(1);
+                    self.register_lazy_directory_handle(fh, binding)?;
+                    reply
+                        .take()
+                        .expect("FUSE reply is used once")
+                        .opened(FileHandle(fh), FopenFlags::empty());
+                    return Ok(());
+                }
                 let children = self.children_with_lease(ino.0, held_lease)?;
                 if children.len() > MAX_DIRECTORY_ENTRIES {
                     return Err(CloudError::new(
@@ -5064,11 +6103,11 @@ impl Filesystem for RaiunFilesystem {
                         "directory exceeds the provider listing limit",
                     ));
                 }
-                let mut snapshot = vec![(".".into(), ino.0, FileType::Directory)];
+                let mut entries = vec![(".".into(), ino.0, FileType::Directory)];
                 if let Ok(parent) = self.node(ino.0) {
-                    snapshot.push(("..".into(), parent.parent, FileType::Directory));
+                    entries.push(("..".into(), parent.parent, FileType::Directory));
                 }
-                snapshot.extend(
+                entries.extend(
                     children
                         .iter()
                         .map(|node| (node.name.clone(), node.ino, self.file_type(node))),
@@ -5113,16 +6152,15 @@ impl Filesystem for RaiunFilesystem {
                     ));
                 }
                 let fh = self.next_handle.fetch_add(1, Ordering::Relaxed).max(1);
+                let snapshot = DirectorySnapshot {
+                    parent_ino: ino.0,
+                    entries,
+                    routes,
+                    locked_vaults,
+                    owner_vault,
+                };
                 with_vault_route_leases(&routes_to_acquire, 0, || {
-                    self.register_directory_handle(
-                        fh,
-                        DirectoryHandle {
-                            entries: snapshot,
-                            routes,
-                            locked_vaults,
-                            owner_vault,
-                        },
-                    )?;
+                    self.register_directory_handle(fh, snapshot)?;
                     reply
                         .take()
                         .expect("FUSE reply is used once")
@@ -5134,13 +6172,13 @@ impl Filesystem for RaiunFilesystem {
                 reply
                     .take()
                     .expect("FUSE reply is used once")
-                    .error(errno(&error));
+                    .error(diagnostic.cloud_failure(&error));
             }
             Ok(())
         });
         if let Err(error) = outcome {
             if let Some(reply) = reply {
-                reply.error(errno(&error));
+                reply.error(diagnostic.cloud_failure(&error));
             }
         }
         let _ = req;
@@ -5154,14 +6192,24 @@ impl Filesystem for RaiunFilesystem {
         offset: u64,
         reply: ReplyDirectory,
     ) {
-        let snapshot = self
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Readdir, ino.0);
+        let handle = self
             .state
             .lock()
             .ok()
             .and_then(|state| state.directory_handles.get(&fh.0).cloned());
-        let Some(snapshot) = snapshot else {
-            reply.error(Errno::EBADF);
+        let Some(handle) = handle else {
+            reply.error(diagnostic.failure(Errno::EBADF));
             return;
+        };
+        let snapshot = match self.initialize_lazy_directory(fh.0, ino.0, &handle) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                reply.error(diagnostic.cloud_failure(&error));
+                return;
+            }
         };
         let mut reply = Some(reply);
         let emit = |reply: ReplyDirectory| {
@@ -5182,7 +6230,7 @@ impl Filesystem for RaiunFilesystem {
             Ok(()) => {}
             Err(error) => {
                 if let Some(reply) = reply.take() {
-                    reply.error(errno(&error));
+                    reply.error(diagnostic.cloud_failure(&error));
                 }
             }
         }
@@ -5197,13 +6245,21 @@ impl Filesystem for RaiunFilesystem {
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
-        if let Ok(mut state) = self.state.lock() {
-            state.directory_handles.remove(&fh.0);
+        let handle = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|mut state| state.directory_handles.remove(&fh.0));
+        if let Some(handle) = handle {
+            handle.close();
         }
         reply.ok();
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Open, ino.0);
         let initial = self.node(ino.0);
         if let Ok(node) = &initial
             && let NodeKind::Vault {
@@ -5214,7 +6270,7 @@ impl Filesystem for RaiunFilesystem {
             && let Err(error) =
                 self.wait_for_vault_path(route, *generation, &entry.path, Duration::from_secs(5))
         {
-            reply.error(errno(&error));
+            reply.error(diagnostic.cloud_failure(&error));
             return;
         }
         if let Ok(Node {
@@ -5290,19 +6346,19 @@ impl Filesystem for RaiunFilesystem {
                     Err(error) => reply
                         .take()
                         .expect("FUSE reply is used once")
-                        .error(errno(&error)),
+                        .error(diagnostic.cloud_failure(&error)),
                 }
                 Ok(())
             });
             if let Err(error) = outcome {
                 if let Some(reply) = reply {
-                    reply.error(errno(&error));
+                    reply.error(diagnostic.cloud_failure(&error));
                 }
             }
         } else {
             match initial.and_then(|_| self.open_node(ino.0, flags.0)) {
                 Ok(fh) => reply.opened(FileHandle(fh), self.ordinary_open_flags(ino.0, fh)),
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(diagnostic.cloud_failure(&error)),
             }
         }
     }
@@ -5427,6 +6483,9 @@ impl Filesystem for RaiunFilesystem {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyWrite,
     ) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Write, ino.0);
         let handle = self.file_handle(fh.0);
         let vault_access = handle.as_ref().ok().and_then(|handle| {
             handle.lock().ok().and_then(|open| match &*open {
@@ -5497,13 +6556,13 @@ impl Filesystem for RaiunFilesystem {
                     Err(error) => reply
                         .take()
                         .expect("FUSE reply is used once")
-                        .error(errno(&error)),
+                        .error(diagnostic.cloud_failure(&error)),
                 }
                 Ok(())
             });
             if let Err(error) = outcome {
                 if let Some(reply) = reply {
-                    reply.error(errno(&error));
+                    reply.error(diagnostic.cloud_failure(&error));
                 }
             }
             return;
@@ -5525,18 +6584,21 @@ impl Filesystem for RaiunFilesystem {
                 self.update_size_after_write(ino.0, size);
                 reply.written(count);
             }
-            Err(error) => reply.error(errno(&error)),
+            Err(error) => reply.error(diagnostic.cloud_failure(&error)),
         }
     }
 
     fn flush(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FileHandle,
         _lock_owner: fuser::LockOwner,
         reply: ReplyEmpty,
     ) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Flush, ino.0);
         let handle = self.file_handle(fh.0);
         let vault = handle.as_ref().ok().and_then(|handle| {
             handle.lock().ok().and_then(|open| match &*open {
@@ -5554,31 +6616,34 @@ impl Filesystem for RaiunFilesystem {
                     Err(error) => reply
                         .take()
                         .expect("FUSE reply is used once")
-                        .error(errno(&error)),
+                        .error(diagnostic.cloud_failure(&error)),
                 }
                 Ok(())
             });
             if let Err(error) = outcome {
                 if let Some(reply) = reply {
-                    reply.error(errno(&error));
+                    reply.error(diagnostic.cloud_failure(&error));
                 }
             }
             return;
         }
         match handle.and_then(|handle| self.commit(&handle)) {
             Ok(()) => reply.ok(),
-            Err(error) => reply.error(errno(&error)),
+            Err(error) => reply.error(diagnostic.cloud_failure(&error)),
         }
     }
 
     fn fsync(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FileHandle,
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Fsync, ino.0);
         let handle = self.file_handle(fh.0);
         let vault = handle.as_ref().ok().and_then(|handle| {
             handle.lock().ok().and_then(|open| match &*open {
@@ -5596,33 +6661,36 @@ impl Filesystem for RaiunFilesystem {
                     Err(error) => reply
                         .take()
                         .expect("FUSE reply is used once")
-                        .error(errno(&error)),
+                        .error(diagnostic.cloud_failure(&error)),
                 }
                 Ok(())
             });
             if let Err(error) = outcome {
                 if let Some(reply) = reply {
-                    reply.error(errno(&error));
+                    reply.error(diagnostic.cloud_failure(&error));
                 }
             }
             return;
         }
         match handle.and_then(|handle| self.commit(&handle)) {
             Ok(()) => reply.ok(),
-            Err(error) => reply.error(errno(&error)),
+            Err(error) => reply.error(diagnostic.cloud_failure(&error)),
         }
     }
 
     fn release(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FileHandle,
         _flags: fuser::OpenFlags,
         _lock_owner: Option<fuser::LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Release, ino.0);
         let handle = self.state.lock().ok().and_then(|mut state| {
             state.vault_file_handles.remove(&fh.0);
             state.file_handles.remove(&fh.0)
@@ -5677,10 +6745,10 @@ impl Filesystem for RaiunFilesystem {
                         self.release_write_key(&active_key);
                         match result {
                             Ok(()) => reply.ok(),
-                            Err(error) => reply.error(errno(&error)),
+                            Err(error) => reply.error(diagnostic.cloud_failure(&error)),
                         }
                     }
-                    Err(error) => reply.error(errno(&error)),
+                    Err(error) => reply.error(diagnostic.cloud_failure(&error)),
                 }
             }
             Some(handle)
@@ -5708,26 +6776,29 @@ impl Filesystem for RaiunFilesystem {
                 match result {
                     Ok(()) => reply.ok(),
                     Err(error) if error.kind == ErrorKind::Unauthorized => reply.ok(),
-                    Err(error) => reply.error(errno(&error)),
+                    Err(error) => reply.error(diagnostic.cloud_failure(&error)),
                 }
             }
             Some(handle) => match self.finish_ordinary_handle(&handle) {
                 Ok(()) => reply.ok(),
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(diagnostic.cloud_failure(&error)),
             },
-            None => reply.error(Errno::EBADF),
+            None => reply.error(diagnostic.failure(Errno::EBADF)),
         }
     }
 
     fn mkdir(
         &self,
-        _req: &Request,
+        req: &Request,
         parent_ino: INodeNo,
         name: &OsStr,
         _mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Mkdir, parent_ino.0);
         if matches!(
             self.node(parent_ino.0),
             Ok(Node {
@@ -5750,7 +6821,7 @@ impl Filesystem for RaiunFilesystem {
                 self.wait_for_vault_path(route, *generation, &path, Duration::from_secs(5))
             })();
             if let Err(error) = wait {
-                reply.error(errno(&error));
+                reply.error(diagnostic.cloud_failure(&error));
                 return;
             }
             let mut reply = Some(reply);
@@ -5875,13 +6946,13 @@ impl Filesystem for RaiunFilesystem {
                     Err(error) => reply
                         .take()
                         .expect("FUSE reply is used once")
-                        .error(errno(&error)),
+                        .error(diagnostic.cloud_failure(&error)),
                 }
                 Ok(())
             });
             if let Err(error) = outcome {
                 if let Some(reply) = reply {
-                    reply.error(errno(&error));
+                    reply.error(diagnostic.cloud_failure(&error));
                 }
             }
             return;
@@ -5893,13 +6964,16 @@ impl Filesystem for RaiunFilesystem {
             let parent = self.node(parent_ino.0)?;
             let (space, path) = self.child_path(&parent, name)?;
             let _reservation = self.reserve_path(&space, &path)?;
+            let operation_started = Instant::now();
+            let caller_pid = req.pid();
             let engine = self.engine.clone();
             let operation_space = space.clone();
             let operation_path = path.clone();
-            let entry = self
+            let request_space = operation_space.clone();
+            let (entry, hint) = self
                 .pool
-                .call(move || engine.mkdir(&operation_space, &operation_path))??;
-            self.add_node(
+                .call(move || engine.mkdir_for_provider(&request_space, &operation_path))??;
+            let ino = self.add_node(
                 parent_ino.0,
                 name.to_owned(),
                 NodeKind::Remote {
@@ -5907,6 +6981,17 @@ impl Filesystem for RaiunFilesystem {
                     entry: entry.clone(),
                 },
             )?;
+            if let Some(hint) = hint {
+                self.remember_lookup_empty_directory_hint(
+                    caller_pid,
+                    operation_started,
+                    &operation_space,
+                    &path,
+                    &entry,
+                    ino,
+                    hint,
+                );
+            }
             Ok(entry)
         })();
         match result {
@@ -5917,14 +7002,17 @@ impl Filesystem for RaiunFilesystem {
                 );
                 match node {
                     Ok(node) => reply.entry(&TTL, &self.attr(&node), Generation(0)),
-                    Err(error) => reply.error(errno(&error)),
+                    Err(error) => reply.error(diagnostic.cloud_failure(&error)),
                 }
             }
-            Err(error) => reply.error(errno(&error)),
+            Err(error) => reply.error(diagnostic.cloud_failure(&error)),
         }
     }
 
     fn unlink(&self, _req: &Request, parent_ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Unlink, parent_ino.0);
         if matches!(
             self.node(parent_ino.0),
             Ok(Node {
@@ -5967,18 +7055,21 @@ impl Filesystem for RaiunFilesystem {
             })();
             match result {
                 Ok(()) => reply.ok(),
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(diagnostic.cloud_failure(&error)),
             }
             return;
         }
         let result = self.delete_child(parent_ino.0, name, false);
         match result {
             Ok(()) => reply.ok(),
-            Err(error) => reply.error(errno(&error)),
+            Err(error) => reply.error(diagnostic.cloud_failure(&error)),
         }
     }
 
     fn rmdir(&self, _req: &Request, parent_ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Rmdir, parent_ino.0);
         if matches!(
             self.node(parent_ino.0),
             Ok(Node {
@@ -6021,14 +7112,14 @@ impl Filesystem for RaiunFilesystem {
             })();
             match result {
                 Ok(()) => reply.ok(),
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(diagnostic.cloud_failure(&error)),
             }
             return;
         }
         let result = self.delete_child(parent_ino.0, name, true);
         match result {
             Ok(()) => reply.ok(),
-            Err(error) => reply.error(errno(&error)),
+            Err(error) => reply.error(diagnostic.cloud_failure(&error)),
         }
     }
 
@@ -6042,6 +7133,9 @@ impl Filesystem for RaiunFilesystem {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Rename, parent.0);
         let source_parent_node = self.node(parent.0);
         let destination_parent_node = self.node(newparent.0);
         let source_parent_route =
@@ -6076,24 +7170,24 @@ impl Filesystem for RaiunFilesystem {
                 // the source. Cross-vault moves need verified destination
                 // completion before source deletion; that protocol is not
                 // implemented, so refuse without suggesting a copy fallback.
-                reply.error(Errno::EPERM);
+                reply.error(diagnostic.failure(Errno::EPERM));
                 return;
             }
             if flags.bits() != 0 {
-                reply.error(Errno::EOPNOTSUPP);
+                reply.error(diagnostic.failure(Errno::EOPNOTSUPP));
                 return;
             }
             let source_name = match name.to_str() {
                 Some(name) => name,
                 None => {
-                    reply.error(Errno::EINVAL);
+                    reply.error(diagnostic.failure(Errno::EINVAL));
                     return;
                 }
             };
             let destination_name = match newname.to_str() {
                 Some(name) => name,
                 None => {
-                    reply.error(Errno::EINVAL);
+                    reply.error(diagnostic.failure(Errno::EINVAL));
                     return;
                 }
             };
@@ -6140,7 +7234,7 @@ impl Filesystem for RaiunFilesystem {
             })();
             match result {
                 Ok(()) => reply.ok(),
-                Err(error) => reply.error(errno(&error)),
+                Err(error) => reply.error(diagnostic.cloud_failure(&error)),
             }
             return;
         }
@@ -6148,7 +7242,7 @@ impl Filesystem for RaiunFilesystem {
             if matches!(source.kind, NodeKind::Vault { .. }) {
                 // An unlocked vault root is bound to its registered route.
                 // Do not turn an unsupported root move into copy-and-delete.
-                reply.error(Errno::EPERM);
+                reply.error(diagnostic.failure(Errno::EPERM));
                 return;
             }
         }
@@ -6336,6 +7430,8 @@ impl Filesystem for RaiunFilesystem {
             };
             if let Ok(mut state) = self.state.lock() {
                 state.children.remove(&(parent.0, source.name.clone()));
+                clear_lookup_absence_memos_for_name(&mut state, parent.0, &source.name);
+                clear_lookup_empty_directory_hints_for_parent(&mut state, parent.0);
                 if let Some(existing) = state
                     .children
                     .remove(&(newparent.0, destination_name.into()))
@@ -6363,7 +7459,7 @@ impl Filesystem for RaiunFilesystem {
         })();
         match result {
             Ok(()) => reply.ok(),
-            Err(error) => reply.error(errno(&error)),
+            Err(error) => reply.error(diagnostic.cloud_failure(&error)),
         }
     }
 
@@ -6377,6 +7473,9 @@ impl Filesystem for RaiunFilesystem {
         flags: i32,
         reply: ReplyCreate,
     ) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Create, parent_ino.0);
         if matches!(
             self.node(parent_ino.0),
             Ok(Node {
@@ -6399,7 +7498,7 @@ impl Filesystem for RaiunFilesystem {
                 self.wait_for_vault_path(route, *generation, &path, Duration::from_secs(5))
             })();
             if let Err(error) = wait {
-                reply.error(errno(&error));
+                reply.error(diagnostic.cloud_failure(&error));
                 return;
             }
             let mut reply = Some(reply);
@@ -6424,13 +7523,13 @@ impl Filesystem for RaiunFilesystem {
                     Err(error) => reply
                         .take()
                         .expect("FUSE reply is used once")
-                        .error(errno(&error)),
+                        .error(diagnostic.cloud_failure(&error)),
                 }
                 Ok(())
             });
             if let Err(error) = outcome {
                 if let Some(reply) = reply {
-                    reply.error(errno(&error));
+                    reply.error(diagnostic.cloud_failure(&error));
                 }
             }
             return;
@@ -6444,7 +7543,7 @@ impl Filesystem for RaiunFilesystem {
                 FileHandle(fh),
                 self.ordinary_open_flags(node.ino, fh),
             ),
-            Err(error) => reply.error(errno(&error)),
+            Err(error) => reply.error(diagnostic.cloud_failure(&error)),
         }
     }
 
@@ -6466,6 +7565,9 @@ impl Filesystem for RaiunFilesystem {
         flags: Option<fuser::BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        let diagnostic = self
+            .diagnostics
+            .operation(diagnostics::Operation::Setattr, ino.0);
         let mut reply = Some(reply);
         let outcome = self.with_node_lease(ino.0, |lease| {
             let result = (|| {
@@ -6480,6 +7582,7 @@ impl Filesystem for RaiunFilesystem {
                     || bkuptime.is_some()
                     || flags.is_some()
                 {
+                    self.diagnostics.unsupported_metadata_rejection();
                     return Err(CloudError::new(
                         ErrorKind::Unsupported,
                         "cloud metadata updates are not supported",
@@ -6559,13 +7662,13 @@ impl Filesystem for RaiunFilesystem {
                 Err(error) => reply
                     .take()
                     .expect("FUSE reply is used once")
-                    .error(errno(&error)),
+                    .error(diagnostic.cloud_failure(&error)),
             }
             Ok(())
         });
         if let Err(error) = outcome {
             if let Some(reply) = reply {
-                reply.error(errno(&error));
+                reply.error(diagnostic.cloud_failure(&error));
             }
         }
     }
@@ -6877,6 +7980,66 @@ impl RaiunFilesystem {
             .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "cloud item was not found"))
     }
 
+    fn cancel_unreleased_ordinary_create(
+        &self,
+        parent: u64,
+        name: &str,
+        node: &Node,
+    ) -> Result<bool, CloudError> {
+        let NodeKind::Remote { space, entry } = &node.kind else {
+            return Ok(false);
+        };
+        if self.create_handoff.is_none() || entry.directory || !entry.id.starts_with("pending:") {
+            return Ok(false);
+        }
+        // Never lock a file handle while holding the namespace mutex.
+        let handles: Vec<_> = self
+            .state
+            .lock()
+            .map_err(|_| io_error("provider state is unavailable"))?
+            .file_handles
+            .values()
+            .cloned()
+            .collect();
+        for handle in handles {
+            let mut open = handle
+                .lock()
+                .map_err(|_| io_error("open file state is unavailable"))?;
+            let OpenFile::Write(write) = &mut *open else {
+                continue;
+            };
+            if write.ino != node.ino
+                || write.space != *space
+                || write.path != entry.path
+                || write.create.is_none()
+            {
+                continue;
+            }
+            create_handoff::cancel_before_handoff(self, write)?;
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| io_error("provider state is unavailable"))?;
+            if state.children.get(&(parent, name.to_owned())) != Some(&node.ino) {
+                return Err(invalid("cancelled create namespace changed"));
+            }
+            state.children.remove(&(parent, name.to_owned()));
+            clear_lookup_absence_memos_for_name(&mut state, parent, name);
+            clear_lookup_empty_directory_hints_for_parent(&mut state, parent);
+            // Keep the detached inode available for the existing descriptor.
+            // Its retained working marker is not mutation/replay authority.
+            if let Some(Node {
+                kind: NodeKind::Remote { entry, .. },
+                ..
+            }) = state.nodes.get_mut(&node.ino)
+            {
+                entry.writable = false;
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn delete_child(
         &self,
         parent_ino: u64,
@@ -6887,7 +8050,24 @@ impl RaiunFilesystem {
             .to_str()
             .ok_or_else(|| invalid("file name is not UTF-8"))?;
         self.reject_recovery_alias(parent_ino, name)?;
-        let node = self.child(parent_ino, name)?;
+        let mut node = self.child(parent_ino, name)?;
+        if !directory && self.cancel_unreleased_ordinary_create(parent_ino, name, &node)? {
+            return Ok(());
+        }
+        if matches!(&node.kind, NodeKind::PendingCreate { .. }) {
+            // A successful cloud-copy check can have resolved this cached
+            // overlay since the file manager last looked it up.
+            node = self.refresh_remote_node(node.ino)?;
+        }
+        if let NodeKind::PendingCreate { scope, view, .. } = &node.kind {
+            let _ = self
+                .engine
+                .record_pending_create_delete_refusal(scope, &view.entry.path);
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                PENDING_CREATE_DELETE_REFUSAL,
+            ));
+        }
         let NodeKind::Remote { space, entry } = node.kind else {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
@@ -6914,13 +8094,29 @@ impl RaiunFilesystem {
                 "file has pending local data",
             ));
         }
-        if directory && !self.children(node.ino)?.is_empty() {
-            return Err(CloudError::new(
-                ErrorKind::Conflict,
-                "directory is not empty",
-            ));
+        let bound_empty_delete = directory && self.engine.can_delete_empty_directory_bound();
+        if directory {
+            if bound_empty_delete {
+                // A provider's empty-directory proof cannot see FUSE's active
+                // local vault-route overlays. Preserve the same direct-child
+                // namespace exclusion before using the coalesced provider
+                // proof and conditional delete.
+                let mut route_overlays = Vec::new();
+                self.append_active_vault_routes(&space, &entry.path, &mut route_overlays)?;
+                if !route_overlays.is_empty() {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "directory is not empty",
+                    ));
+                }
+            } else if !self.children(node.ino)?.is_empty() {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "directory is not empty",
+                ));
+            }
         }
-        if directory && self.create_handoff.is_some() {
+        if directory && (self.create_handoff.is_some() || bound_empty_delete) {
             // A failed handoff may have a frozen V3 spool before Cache has any
             // ledger row. Preserve the same bounded recovery exclusion used
             // by rename before removing its intended ordinary ancestor.
@@ -6928,11 +8124,19 @@ impl RaiunFilesystem {
         }
         let engine = self.engine.clone();
         let path = entry.path;
+        let resource_id = entry.id;
         let etag = entry.etag;
-        self.pool
-            .call(move || engine.delete(&space, &path, &etag))??;
+        self.pool.call(move || {
+            if bound_empty_delete {
+                engine.delete_empty_directory(&space, &path, &resource_id)
+            } else {
+                engine.delete(&space, &path, &etag)
+            }
+        })??;
         if let Ok(mut state) = self.state.lock() {
             state.children.remove(&(parent_ino, name.to_owned()));
+            clear_lookup_absence_memos_for_name(&mut state, parent_ino, name);
+            clear_lookup_empty_directory_hints_for_parent(&mut state, parent_ino);
             state.nodes.remove(&node.ino);
         }
         Ok(())
@@ -7468,6 +8672,8 @@ impl RaiunFilesystem {
             };
             let moved_is_directory = moved.directory;
             if let Ok(mut state) = self.state.lock() {
+                state.lookup_absence_memos.clear();
+                state.lookup_empty_directory_hints.clear();
                 if moved.directory {
                     let mut descendants = std::collections::HashSet::new();
                     let mut pending = vec![source_node.ino];
@@ -7487,10 +8693,12 @@ impl RaiunFilesystem {
                     }
                     let route_id = source_route.control.route_id();
                     state.directory_handles.retain(|_, handle| {
-                        !handle
-                            .routes
-                            .iter()
-                            .any(|(route, _)| route.route_id() == route_id)
+                        !handle.ready_snapshot().is_some_and(|snapshot| {
+                            snapshot
+                                .routes
+                                .iter()
+                                .any(|(route, _)| route.route_id() == route_id)
+                        })
                     });
                 }
                 state
@@ -7524,10 +8732,12 @@ impl RaiunFilesystem {
                     state.pending_parent_refs.remove(&source_node.ino);
                 }
                 state.directory_handles.retain(|_, handle| {
-                    !handle
-                        .routes
-                        .iter()
-                        .any(|(route, _)| route.route_id() == source_route.control.route_id())
+                    !handle.ready_snapshot().is_some_and(|snapshot| {
+                        snapshot
+                            .routes
+                            .iter()
+                            .any(|(route, _)| route.route_id() == source_route.control.route_id())
+                    })
                 });
             }
             Ok(())
@@ -7756,11 +8966,15 @@ impl RaiunFilesystem {
                 .lock()
                 .map_err(|_| io_error("provider state is unavailable"))?;
             state.children.remove(&(parent_ino, name.to_owned()));
+            clear_lookup_absence_memos_for_name(&mut state, parent_ino, name);
+            clear_lookup_empty_directory_hints_for_parent(&mut state, parent_ino);
             state.nodes.remove(&child.ino);
             state.pending_parent_refs.remove(&child.ino);
-            state
-                .directory_handles
-                .retain(|_, handle| !handle.entries.iter().any(|(_, ino, _)| *ino == child.ino));
+            state.directory_handles.retain(|_, handle| {
+                !handle.ready_snapshot().is_some_and(|snapshot| {
+                    snapshot.entries.iter().any(|(_, ino, _)| *ino == child.ino)
+                })
+            });
             return Ok(());
         }
         if !directory && pending_file_create_identity(&entry).is_some() {
@@ -7824,6 +9038,8 @@ impl RaiunFilesystem {
         }
         if let Ok(mut state) = self.state.lock() {
             state.children.remove(&(parent_ino, name.to_owned()));
+            clear_lookup_absence_memos_for_name(&mut state, parent_ino, name);
+            clear_lookup_empty_directory_hints_for_parent(&mut state, parent_ino);
             state.nodes.remove(&child.ino);
         }
         Ok(())
@@ -8153,10 +9369,25 @@ fn io_error(message: &str) -> CloudError {
     CloudError::new(ErrorKind::Io, message)
 }
 fn io_cloud(error: std::io::Error) -> CloudError {
-    CloudError::new(
-        ErrorKind::Io,
-        format!("local file operation failed: {error}"),
-    )
+    // Retain the actionable OS code without paths or arbitrary error strings.
+    let message = error.raw_os_error().map_or_else(
+        || "local file operation failed".to_owned(),
+        |code| format!("local file operation failed (errno: {code})"),
+    );
+    CloudError::new(ErrorKind::Io, message)
+}
+
+fn local_io_errno(error: &CloudError) -> Option<i32> {
+    if error.kind != ErrorKind::Io {
+        return None;
+    }
+    error
+        .message
+        .strip_prefix("local file operation failed (errno: ")?
+        .strip_suffix(')')?
+        .parse::<i32>()
+        .ok()
+        .filter(|code| (1..=4095).contains(code))
 }
 fn vault_write_error(error: vault_write::VaultWriteError) -> CloudError {
     use vault_write::VaultWriteError as VaultError;
@@ -8190,11 +9421,17 @@ fn vault_write_error(error: vault_write::VaultWriteError) -> CloudError {
         ),
     }
 }
+const PENDING_CREATE_DELETE_REFUSAL: &str = "Saved upload cannot be deleted while its remote outcome is unresolved. Review it in Transfers; the local copy is preserved.";
+
 fn errno(error: &CloudError) -> Errno {
+    if let Some(code) = local_io_errno(error) {
+        return std::io::Error::from_raw_os_error(code).into();
+    }
     match error.kind {
         ErrorKind::Unauthorized => Errno::EACCES,
         ErrorKind::Forbidden => Errno::EACCES,
         ErrorKind::NotFound => Errno::ENOENT,
+        ErrorKind::Conflict if error.message == PENDING_CREATE_DELETE_REFUSAL => Errno::EBUSY,
         ErrorKind::Conflict if error.message.contains("active writer") => Errno::EAGAIN,
         ErrorKind::Conflict => Errno::EEXIST,
         ErrorKind::Offline => Errno::EHOSTUNREACH,
@@ -8618,6 +9855,7 @@ mod tests {
         spaces_override: Mutex<Option<Vec<CloudSpace>>>,
         network_error: Mutex<Option<ErrorKind>>,
         root_ids: Mutex<HashMap<String, String>>,
+        lookup_memo_fixture: Mutex<bool>,
         list_calls: AtomicUsize,
         stat_calls: AtomicUsize,
         create_barrier: Option<Arc<CreateBarrier>>,
@@ -9816,6 +11054,7 @@ mod tests {
                 spaces_override: Mutex::new(None),
                 network_error: Mutex::new(None),
                 root_ids: Mutex::new(HashMap::new()),
+                lookup_memo_fixture: Mutex::new(false),
                 list_calls: AtomicUsize::new(0),
                 stat_calls: AtomicUsize::new(0),
                 create_barrier: None,
@@ -9825,6 +11064,14 @@ mod tests {
 
         fn set_network_error(&self, error: Option<ErrorKind>) {
             *self.network_error.lock().expect("fake network state") = error;
+        }
+
+        fn enable_lookup_memo_fixture(&self) {
+            *self.lookup_memo_fixture.lock().expect("fake mode") = true;
+        }
+
+        fn lookup_memo_fixture_enabled(&self) -> bool {
+            *self.lookup_memo_fixture.lock().expect("fake mode")
         }
 
         fn add_space_entry(
@@ -9889,6 +11136,10 @@ mod tests {
     impl CloudBackend for FakeBackend {
         fn server_origin(&self) -> Option<String> {
             Some("https://example.invalid".into())
+        }
+
+        fn read_only_generation(&self) -> Option<u64> {
+            self.lookup_memo_fixture_enabled().then_some(1)
         }
 
         fn spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
@@ -9968,6 +11219,47 @@ mod tests {
                 .get(&(space.into(), path.into()))
                 .map(|(item, _)| item.clone())
                 .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "missing"))
+        }
+
+        fn ordinary_stat_snapshot(
+            &self,
+            space: &str,
+            path: &str,
+        ) -> Result<raiun_core::backend::OrdinaryStatSnapshot, CloudError> {
+            let (selected, root) = self.space_root_metadata(space)?;
+            if !self.lookup_memo_fixture_enabled() {
+                let target = if path == "/" {
+                    Ok(root.clone())
+                } else {
+                    self.stat(space, path)
+                };
+                return Ok(raiun_core::backend::OrdinaryStatSnapshot {
+                    space: selected,
+                    observed_parent: (path == "/").then(|| root.clone()),
+                    root,
+                    target,
+                });
+            }
+            let observed_parent = if path == "/" {
+                Some(root.clone())
+            } else {
+                let parent = path
+                    .rsplit_once('/')
+                    .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+                    .unwrap_or("/");
+                self.stat(space, parent).ok()
+            };
+            let target = if path == "/" {
+                Ok(root.clone())
+            } else {
+                self.stat(space, path)
+            };
+            Ok(raiun_core::backend::OrdinaryStatSnapshot {
+                space: selected,
+                root,
+                observed_parent,
+                target,
+            })
         }
 
         fn download(
@@ -10093,6 +11385,71 @@ mod tests {
         fn mkdir(&self, _space: &str, _path: &str) -> Result<RemoteEntry, CloudError> {
             Err(CloudError::new(ErrorKind::Unsupported, "not needed"))
         }
+        fn mkdir_and_confirm_with_preflight_and_view(
+            &self,
+            space: &str,
+            path: &str,
+            preflight: &dyn Fn(&CloudSpace, &RemoteEntry) -> Result<(), CloudError>,
+        ) -> Result<(RemoteEntry, bool), CloudError> {
+            if !self.lookup_memo_fixture_enabled() {
+                return self
+                    .mkdir_and_confirm_with_preflight(space, path, preflight)
+                    .map(|entry| (entry, false));
+            }
+            let selected = self
+                .spaces()?
+                .into_iter()
+                .find(|candidate| candidate.id == space)
+                .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "missing Space"))?;
+            let root = self.stat(space, "/")?;
+            preflight(&selected, &root)?;
+            let (parent_path, _) = path.rsplit_once('/').unwrap_or(("", path));
+            let parent_path = if parent_path.is_empty() {
+                "/"
+            } else {
+                parent_path
+            };
+            let mut files = self.files.lock().expect("fake files");
+            let parent = files
+                .get(&(space.to_owned(), parent_path.to_owned()))
+                .map(|(entry, _)| entry)
+                .or_else(|| {
+                    (parent_path == "/").then(|| {
+                        // Root metadata is synthesized by `stat` and is not
+                        // stored in the fixture's item map.
+                        &root
+                    })
+                })
+                .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "missing parent"))?;
+            if !parent.directory || files.contains_key(&(space.to_owned(), path.to_owned())) {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "fixture directory parent changed or target exists",
+                ));
+            }
+            let created = RemoteEntry {
+                id: format!("{space}:{path}"),
+                path: path.to_owned(),
+                directory: true,
+                size: 0,
+                etag: "folder-v1".into(),
+                modified_unix: 1,
+                writable: true,
+                encrypted: false,
+            };
+            files.insert(
+                (space.to_owned(), path.to_owned()),
+                (created.clone(), Vec::new()),
+            );
+            let empty = !files.keys().any(|(candidate_space, candidate_path)| {
+                candidate_space == space
+                    && candidate_path
+                        .rsplit_once('/')
+                        .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+                        == Some(path)
+            });
+            Ok((created, empty))
+        }
         fn delete(&self, space: &str, path: &str, etag: &str) -> Result<(), CloudError> {
             let mut files = self.files.lock().expect("fake lock");
             match files.get(&(space.into(), path.into())) {
@@ -10161,6 +11518,43 @@ mod tests {
 
     fn filesystem(temp: &tempfile::TempDir, backend: Arc<FakeBackend>) -> RaiunFilesystem {
         filesystem_with_registry(temp, backend, VaultMountRegistry::new())
+    }
+
+    fn cached_filesystem(temp: &tempfile::TempDir, backend: Arc<FakeBackend>) -> RaiunFilesystem {
+        let cache_dir = temp.path().join("offline-cache");
+        fs::create_dir(&cache_dir).expect("cache state directory");
+        #[cfg(unix)]
+        fs::set_permissions(
+            &cache_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private cache state directory");
+        let cache =
+            raiun_cache::Cache::open(&cache_dir, 64 * 1024 * 1024).expect("account-bound cache");
+        let engine = Engine::open(&temp.path().join("engine"), backend)
+            .expect("engine")
+            .with_offline_cache(
+                cache,
+                "fuse-test-account".into(),
+                "https://example.invalid".into(),
+            )
+            .expect("bind account-bound cache");
+        let spool = temp.path().join("spool");
+        fs::create_dir_all(&spool).expect("spool directory");
+        #[cfg(unix)]
+        fs::set_permissions(&spool, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .expect("private spool directory");
+        let owner = fs::metadata(temp.path()).expect("mount owner");
+        RaiunFilesystem::new(
+            engine,
+            spool,
+            owner.uid(),
+            owner.gid(),
+            "fuse-test-profile".into(),
+            VaultMountRegistry::new(),
+            Arc::new(Mutex::new(None)),
+        )
+        .expect("filesystem")
     }
 
     fn writable_vault_filesystem(
@@ -10666,7 +12060,8 @@ mod tests {
         empty_fs
             .register_directory_handle(
                 9901,
-                DirectoryHandle {
+                DirectorySnapshot {
+                    parent_ino: empty.ino,
                     entries: Vec::new(),
                     routes: vec![(empty_route.control.clone(), empty_generation)],
                     locked_vaults: Vec::new(),
@@ -10781,7 +12176,8 @@ mod tests {
 
         control
             .with_read_lease(generation, |lease| {
-                let handle = DirectoryHandle {
+                let handle = DirectorySnapshot {
+                    parent_ino: dir_ino,
                     entries: vec![(".".into(), dir_ino, FileType::Directory)],
                     routes: vec![(control.clone(), generation)],
                     locked_vaults: Vec::new(),
@@ -11078,7 +12474,8 @@ mod tests {
             writable: false,
             encrypted: true,
         };
-        let handle = || DirectoryHandle {
+        let handle = || DirectorySnapshot {
+            parent_ino: 999,
             entries: vec![(".".into(), 999, FileType::Directory)],
             routes: vec![(control.clone(), generation)],
             locked_vaults: Vec::new(),
@@ -11966,6 +13363,169 @@ mod tests {
     }
 
     #[test]
+    fn scoped_lookup_absence_memo_is_one_use_and_create_still_rechecks() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let backend = Arc::new(FakeBackend::with_file("/folder/seed.txt", b"seed"));
+        backend.add_space_entry("personal", "/folder", b"", true, "folder-v1");
+        backend.enable_lookup_memo_fixture();
+        let filesystem = cached_filesystem(&temp, backend.clone());
+        let folder = filesystem
+            .children(PERSONAL)
+            .expect("list Personal")
+            .into_iter()
+            .find(|node| node.name == "folder")
+            .expect("listed folder");
+        let first_now = Instant::now();
+
+        let first = filesystem
+            .lookup_child_with_caller_at(folder.ino, "new.txt", None, first_now, Some(701))
+            .err()
+            .expect("exact target is initially absent");
+        assert_eq!(first.kind, ErrorKind::NotFound);
+        let after_first = backend.stat_calls.load(Ordering::Relaxed);
+
+        let second = filesystem
+            .lookup_child_with_caller_at(
+                folder.ino,
+                "new.txt",
+                None,
+                first_now + Duration::from_millis(10),
+                Some(701),
+            )
+            .err()
+            .expect("one-use hint preserves the exact negative once");
+        assert_eq!(second.kind, ErrorKind::NotFound);
+        assert_eq!(
+            backend.stat_calls.load(Ordering::Relaxed),
+            after_first,
+            "a same-caller repeat within the memo window should skip metadata HTTP"
+        );
+
+        filesystem
+            .lookup_child_with_caller_at(
+                folder.ino,
+                "new.txt",
+                None,
+                first_now + Duration::from_millis(20),
+                Some(701),
+            )
+            .err()
+            .expect("the one-use memo is consumed");
+        let after_one_use = backend.stat_calls.load(Ordering::Relaxed);
+        assert!(after_one_use > after_first);
+
+        backend.add_space_entry("personal", "/folder/new.txt", b"arrived", false, "new-v1");
+        filesystem
+            .lookup_child_with_caller_at(
+                folder.ino,
+                "new.txt",
+                None,
+                first_now + Duration::from_millis(30),
+                Some(701),
+            )
+            .err()
+            .expect("the next one-use absence can only cause bounded visibility lag");
+        assert_eq!(backend.stat_calls.load(Ordering::Relaxed), after_one_use);
+
+        let create = filesystem
+            .create_ordinary_file(
+                folder.ino,
+                OsStr::new("new.txt"),
+                libc::O_CREAT | libc::O_EXCL,
+            )
+            .err()
+            .expect("CREATE performs a fresh existence check, independent of memo");
+        assert_eq!(create.kind, ErrorKind::Conflict);
+        assert!(backend.stat_calls.load(Ordering::Relaxed) > after_one_use);
+
+        backend
+            .files
+            .lock()
+            .expect("fake files")
+            .get_mut(&("personal".into(), "/folder/new.txt".into()))
+            .expect("new remote target")
+            .0
+            .encrypted = true;
+        let encrypted_create = filesystem
+            .create_ordinary_file(
+                folder.ino,
+                OsStr::new("new.txt"),
+                libc::O_CREAT | libc::O_EXCL,
+            )
+            .err()
+            .expect("CREATE freshly refuses a target that became encrypted");
+        assert_eq!(encrypted_create.kind, ErrorKind::Unsupported);
+
+        let expiry_now = Instant::now();
+        filesystem
+            .lookup_child_with_caller_at(folder.ino, "expired.txt", None, expiry_now, Some(702))
+            .err()
+            .expect("expiry fixture begins with an absent target");
+        let before_expiry = backend.stat_calls.load(Ordering::Relaxed);
+        filesystem
+            .lookup_child_with_caller_at(
+                folder.ino,
+                "expired.txt",
+                None,
+                expiry_now + Duration::from_millis(251),
+                Some(702),
+            )
+            .err()
+            .expect("expired memo falls back to fresh lookup");
+        assert!(backend.stat_calls.load(Ordering::Relaxed) > before_expiry);
+    }
+
+    #[test]
+    fn confirmed_empty_directory_hint_skips_lookup_but_create_still_rechecks() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let backend = Arc::new(FakeBackend::with_file("/seed.txt", b"seed"));
+        backend.enable_lookup_memo_fixture();
+        let filesystem = cached_filesystem(&temp, backend.clone());
+        let started = Instant::now();
+        let (entry, hint) = filesystem
+            .engine
+            .mkdir_for_provider("personal", "/Fresh")
+            .expect("create and observe empty directory");
+        let hint = hint.expect("confirmed empty view hint");
+        let ino = filesystem
+            .add_node(
+                PERSONAL,
+                "Fresh".into(),
+                NodeKind::Remote {
+                    space: "personal".into(),
+                    entry: entry.clone(),
+                },
+            )
+            .expect("publish created node");
+        filesystem.remember_lookup_empty_directory_hint(
+            703, started, "personal", "/Fresh", &entry, ino, hint,
+        );
+        let before = backend.stat_calls.load(Ordering::Relaxed);
+
+        let absent = filesystem
+            .lookup_child_with_caller_at(ino, "arrived.txt", None, Instant::now(), Some(703))
+            .err()
+            .expect("unknown child is absent in the confirmed birth view");
+        assert_eq!(absent.kind, ErrorKind::NotFound);
+        assert_eq!(backend.stat_calls.load(Ordering::Relaxed), before);
+
+        backend.add_space_entry("personal", "/Fresh/arrived.txt", b"remote", false, "v1");
+        let bounded_lag = filesystem
+            .lookup_child_with_caller_at(ino, "arrived.txt", None, Instant::now(), Some(703))
+            .err()
+            .expect("birth view only permits bounded namespace visibility lag");
+        assert_eq!(bounded_lag.kind, ErrorKind::NotFound);
+        assert_eq!(backend.stat_calls.load(Ordering::Relaxed), before);
+
+        let create = filesystem
+            .create_ordinary_file(ino, OsStr::new("arrived.txt"), libc::O_CREAT | libc::O_EXCL)
+            .err()
+            .expect("CREATE must perform its own fresh target observation");
+        assert_eq!(create.kind, ErrorKind::Conflict);
+        assert!(backend.stat_calls.load(Ordering::Relaxed) > before);
+    }
+
+    #[test]
     fn whole_space_route_overlaps_folder_routes_only_within_its_space() {
         let root_route = |space: &str, resource: &str| {
             VaultMountRoute::new(
@@ -12665,7 +14225,8 @@ mod tests {
         let routes = directory_vault_routes(&parent, &children);
         assert_eq!(routes.len(), 2);
         assert!(routes[0].0.route_id() < routes[1].0.route_id());
-        let snapshot = DirectoryHandle {
+        let snapshot = DirectorySnapshot {
+            parent_ino: PERSONAL,
             entries: children
                 .iter()
                 .map(|node| (node.name.clone(), node.ino, FileType::Directory))
@@ -12674,7 +14235,8 @@ mod tests {
             locked_vaults: Vec::new(),
             owner_vault: None,
         };
-        let unrelated_snapshot = DirectoryHandle {
+        let unrelated_snapshot = DirectorySnapshot {
+            parent_ino: PERSONAL,
             entries: vec![("ordinary".into(), 90, FileType::Directory)],
             routes: Vec::new(),
             locked_vaults: Vec::new(),
@@ -12687,12 +14249,14 @@ mod tests {
         let state = Arc::new(Mutex::new(State {
             nodes: HashMap::new(),
             children: HashMap::new(),
+            lookup_absence_memos: HashMap::new(),
+            lookup_empty_directory_hints: HashMap::new(),
             recovery_aliases: std::collections::HashSet::new(),
             file_handles: HashMap::new(),
             vault_file_handles: HashMap::new(),
             directory_handles: HashMap::from([
-                (1, snapshot.clone()),
-                (2, unrelated_snapshot.clone()),
+                (1, DirectoryHandle::ready(snapshot.clone())),
+                (2, DirectoryHandle::ready(unrelated_snapshot.clone())),
             ]),
             pending_parent_refs: HashMap::new(),
             active_writers: std::collections::HashSet::new(),
@@ -12902,6 +14466,8 @@ mod tests {
         let state = Arc::new(Mutex::new(State {
             nodes,
             children: HashMap::new(),
+            lookup_absence_memos: HashMap::new(),
+            lookup_empty_directory_hints: HashMap::new(),
             recovery_aliases: std::collections::HashSet::new(),
             file_handles: HashMap::from([(7, Arc::clone(&handle))]),
             vault_file_handles: HashMap::from([(
@@ -13198,12 +14764,13 @@ mod tests {
             state.vault_file_handles.remove(&file_handle);
             state.directory_handles.insert(
                 92,
-                DirectoryHandle {
+                DirectoryHandle::ready(DirectorySnapshot {
+                    parent_ino: 93,
                     entries: Vec::new(),
                     routes: vec![(control.clone(), generation)],
                     locked_vaults: Vec::new(),
                     owner_vault: Some((route_id, generation, 93, "/folder/nested".into())),
-                },
+                }),
             );
         }
         match filesystem.reserve_vault_rename_paths(route_id, "/folder", "/moved", false) {

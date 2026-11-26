@@ -39,6 +39,17 @@ pub(crate) fn agent_action_waits_for_completion(action: &str) -> bool {
 }
 
 pub(crate) fn agent_response_timeout(action: &str) -> Duration {
+    #[cfg(windows)]
+    if action == "diagnostics" {
+        // Support metadata uses a bounded 25-second owner wait. Keep the UI
+        // response budget aligned with the existing 30-second Agent client.
+        return Duration::from_secs(30);
+    }
+    if action == "windows_recovery_check_cloud" {
+        // The configured read-only check is capped at 24 hours; allow its
+        // bounded metadata work and result to finish without an early IPC error.
+        return Duration::from_secs(24 * 60 * 60 + 30);
+    }
     if action == "auth_begin"
         || matches!(
             action,

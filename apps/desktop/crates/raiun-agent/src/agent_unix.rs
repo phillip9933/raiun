@@ -162,6 +162,9 @@ struct AuthState {
 }
 
 trait MountedCloud: Send {
+    fn diagnostics(&self) -> Option<raiun_fuse::diagnostics::DiagnosticsSnapshot> {
+        None
+    }
     fn stop_create_uploads(&mut self) -> Result<(), String> {
         Ok(())
     }
@@ -170,6 +173,9 @@ trait MountedCloud: Send {
 }
 
 impl MountedCloud for raiun_fuse::MountHandle {
+    fn diagnostics(&self) -> Option<raiun_fuse::diagnostics::DiagnosticsSnapshot> {
+        Some(raiun_fuse::MountHandle::diagnostics(self))
+    }
     fn stop_create_uploads(&mut self) -> Result<(), String> {
         raiun_fuse::MountHandle::stop_create_uploads(self)
     }
@@ -1371,6 +1377,7 @@ impl Runtime {
         if self.shutdown.load(Ordering::Acquire) {
             return Ok(());
         }
+        let refresh_generation = self.operation_generation()?;
         let settings = self
             .settings
             .lock()
@@ -1402,6 +1409,30 @@ impl Runtime {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| "System clock is invalid")?
             .as_secs();
+        let mut refresh_admission = None;
+        if state
+            .session
+            .as_ref()
+            .is_some_and(|session| session.expires_at <= now + 120)
+            && let Some(client) = state.client.clone()
+        {
+            // An admitted provider operation may need Runtime state in its
+            // preflight. Never wait for that operation while holding this lock.
+            drop(state);
+            refresh_admission = Some(client.begin_bearer_refresh().map_err(|e| e.to_string())?);
+            state = self
+                .auth_state
+                .lock()
+                .map_err(|_| "Authentication state poisoned")?;
+            if self.operation_generation()? != refresh_generation
+                || !state
+                    .client
+                    .as_ref()
+                    .is_some_and(|current| current.shares_authentication_with(&client))
+            {
+                return Err("Token refresh was canceled by an account change".into());
+            }
+        }
         let (token, refreshed) = {
             let session = state.session.as_mut().ok_or("Session disappeared")?;
             session.proxy = settings.network_proxy.clone();
@@ -1417,9 +1448,23 @@ impl Runtime {
         }
         if let Some(token) = token {
             if let Some(client) = state.client.as_ref() {
-                client.set_bearer_token(token).map_err(|e| e.to_string())?;
+                // Authentication may be invalidated while the refresh HTTP
+                // request owns this state lock. Never apply its late result
+                // after an account/security transition has started.
+                if self.operation_generation()? != refresh_generation {
+                    return Err("Token refresh was canceled by an account change".into());
+                }
+                let admission = refresh_admission
+                    .as_mut()
+                    .ok_or("Token refresh has no matching client admission")?;
+                client
+                    .set_refreshed_bearer_token(token, admission)
+                    .map_err(|e| e.to_string())?;
             }
         }
+        // Token HTTP is bounded to twenty seconds. Reopen short-operation
+        // admission before any namespace probe can enter the same client.
+        drop(refresh_admission);
         let offline_namespace = self.offline_namespace.load(Ordering::Acquire);
         let last_probe = self.offline_namespace_probe_unix.load(Ordering::Acquire);
         let namespace_probe_due = offline_namespace
@@ -2642,7 +2687,13 @@ impl Runtime {
                     .lock()
                     .map_err(|_| "Settings poisoned")?
                     .clone();
-                let (connected, offline_namespace, session_expires_at, session_last_refresh_at) = {
+                let (
+                    connected,
+                    offline_namespace,
+                    session_expires_at,
+                    session_last_refresh_at,
+                    create_admission_diagnostics,
+                ) = {
                     let auth = self
                         .auth_state
                         .lock()
@@ -2662,6 +2713,9 @@ impl Runtime {
                         auth.session
                             .as_ref()
                             .and_then(|session| session.last_refresh_at),
+                        auth.engine
+                            .as_ref()
+                            .map(Engine::create_admission_diagnostics),
                     )
                 };
                 let mounted = self
@@ -2763,6 +2817,12 @@ impl Runtime {
                         }),
                     },
                 };
+                let provider_diagnostics = self
+                    .mount
+                    .lock()
+                    .map_err(|_| "Mount state poisoned")?
+                    .as_ref()
+                    .and_then(|mount| mount.diagnostics());
                 let mut paused_space_ids = s.paused_space_ids.clone();
                 paused_space_ids.sort();
                 // Never attach a new account generation to observations taken
@@ -2778,6 +2838,9 @@ impl Runtime {
                     "folder_sync_enabled": self.mode == RuntimeMode::Desktop,
                     "auth_generation": generation,
                     "folder_settings_supported": self.mode == RuntimeMode::Desktop,
+                    "saved_upload_check_supported": true,
+                    "provider_diagnostics": provider_diagnostics,
+                    "create_admission_diagnostics": create_admission_diagnostics,
                     "connected": connected,
                     "offline_namespace": offline_namespace,
                     "session_expires_at": session_expires_at,
@@ -4052,6 +4115,100 @@ impl Runtime {
                     "path": item.path,
                     "bytes": item.bytes,
                     "destination": destination,
+                }))
+            }
+            "cache_saved_upload_check" => {
+                let generation = self.operation_generation()?;
+                let expected_generation = request
+                    .get("expected_generation")
+                    .and_then(Value::as_u64)
+                    .ok_or("Refresh saved edits before checking an upload")?;
+                if generation != expected_generation {
+                    return Err("Account changed; refresh saved edits".into());
+                }
+                let expected_scope = text("expected_account_scope")?;
+                let space_id = text("space_id")?.to_owned();
+                validate_space_id(&space_id)?;
+                let write_id = text("write_id")?
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|id| *id > 0)
+                    .ok_or("Saved upload identifier is invalid")?;
+                let root_resource_id = text("root_resource_id")?.to_owned();
+                if root_resource_id.trim().is_empty()
+                    || root_resource_id.len() > 16 * 1024
+                    || root_resource_id.chars().any(char::is_control)
+                {
+                    return Err("Saved root identity is invalid".into());
+                }
+                let settings = self
+                    .settings
+                    .lock()
+                    .map_err(|_| "Settings poisoned")?
+                    .clone();
+                if Self::saved_write_account_scope(&settings).as_deref() != Some(expected_scope) {
+                    return Err("Account changed; refresh saved edits".into());
+                }
+                let account_id = settings
+                    .account_id
+                    .clone()
+                    .ok_or("No saved account cache is available")?;
+                let origin = settings
+                    .server
+                    .as_deref()
+                    .ok_or("No saved account server is available")?;
+                let saved_scope = raiun_cache::CacheScope::new(
+                    origin,
+                    &account_id,
+                    &space_id,
+                    &root_resource_id,
+                    raiun_cache::ScopeProtection::PlaintextAllowed,
+                )
+                .map_err(|_| "Saved upload scope is invalid")?;
+                let current = || {
+                    self.auth_generation.load(Ordering::Acquire) == generation
+                        && self.settings.lock().is_ok_and(|latest| {
+                            latest.server == settings.server
+                                && latest.account_id == settings.account_id
+                                && latest.config.cloud_root == settings.config.cloud_root
+                                && Self::saved_write_account_scope(&latest).as_deref()
+                                    == Some(expected_scope)
+                        })
+                };
+                if !current() {
+                    return Err("Account changed; refresh saved edits".into());
+                }
+                let engine = self.engine()?;
+                let checked = engine
+                    .check_saved_create(&saved_scope, write_id, &current)
+                    .map_err(|error| match error.kind {
+                        raiun_core::backend::ErrorKind::Unauthorized => {
+                            "Cloud authentication is stale; reconnect and retry"
+                        }
+                        raiun_core::backend::ErrorKind::Offline => {
+                            "Cloud is unreachable; reconnect and check again"
+                        }
+                        raiun_core::backend::ErrorKind::Io => {
+                            "Could not read the retained file or local records; the saved upload was kept"
+                        }
+                        raiun_core::backend::ErrorKind::Forbidden => {
+                            "Access to the saved cloud location is unavailable; the saved upload was kept"
+                        }
+                        _ => "Could not verify the saved upload with the cloud",
+                    })?;
+                if !current() {
+                    return Err("Account changed; refresh saved edits".into());
+                }
+                Ok(json!({
+                    "outcome": checked.outcome,
+                    "checked_at_unix": checked.checked_at_unix,
+                    "bytes": checked.bytes,
+                    "resolved": checked.resolved,
+                    "write_id": write_id.to_string(),
+                    "space_id": space_id,
+                    "root_resource_id": root_resource_id,
+                    "local_copy_preserved": true,
+                    "cloud_mutated": false,
                 }))
             }
             "cache_reconcile_writes" => {

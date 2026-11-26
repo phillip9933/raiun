@@ -19,6 +19,10 @@ struct State {
     rename_claimed: bool,
     dispatch_claimed: bool,
     completion_claimed: bool,
+    #[cfg(windows)]
+    ordinary_creates: Vec<independent_create::Claim>,
+    #[cfg(windows)]
+    create_nonce: u64,
 }
 
 #[derive(Default)]
@@ -95,6 +99,22 @@ impl CloseCaptureAdmission {
         })
     }
 
+    /// Scheduling information before any new ticket/capture/intent exists.
+    /// Unknown bookkeeping never becomes retry authority through this query.
+    #[cfg(windows)]
+    pub(crate) fn known_busy_for_create(&self) -> bool {
+        if self.unknown.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(state) = self.try_state() else {
+            return false;
+        };
+        !self.unknown.load(Ordering::Acquire)
+            && (state.active_closes != 0
+                || state.rename_claimed
+                || !state.ordinary_creates.is_empty())
+    }
+
     fn try_begin_ticket(&self) -> Option<TicketState> {
         if self.unknown.load(Ordering::Acquire) {
             return None;
@@ -102,6 +122,10 @@ impl CloseCaptureAdmission {
         let mut state = self.try_state()?;
         if self.unknown.load(Ordering::Acquire) || state.active_closes != 0 || state.rename_claimed
         {
+            return None;
+        }
+        #[cfg(windows)]
+        if !state.ordinary_creates.is_empty() {
             return None;
         }
         state.rename_claimed = true;
@@ -871,3 +895,9 @@ mod owned_deleted_close_tests {
         assert!(tracker.unknown.load(Ordering::Acquire));
     }
 }
+
+#[cfg(windows)]
+#[path = "independent_create_admission.rs"]
+mod independent_create;
+#[cfg(windows)]
+pub(crate) use independent_create::{IndependentCreateAdmission, IndependentCreateAdmissionError};

@@ -3,17 +3,33 @@
 
 /// Generation-bound notice only, never an activation or admission capability.
 #[derive(Default)]
-pub(crate) struct Notice(Option<(u64, &'static str)>);
+pub(crate) struct Notice(Option<(u64, &'static str, Option<u32>)>);
 impl Notice {
     pub(crate) fn record(&mut self, original: u64, current: u64, message: &'static str) {
+        self.record_hresult(original, current, message, None);
+    }
+    pub(crate) fn record_hresult(
+        &mut self,
+        original: u64,
+        current: u64,
+        message: &'static str,
+        hresult: Option<u32>,
+    ) {
         if original != 0 && original == current {
-            self.0 = Some((original, message));
+            self.0 = Some((original, message, hresult));
         }
     }
     pub(crate) fn get(&self, current: u64, connected: bool) -> Option<&'static str> {
         self.0
-            .filter(|(generation, _)| connected && current != 0 && *generation == current)
-            .map(|(_, text)| text)
+            .filter(|(generation, _, _)| connected && current != 0 && *generation == current)
+            .map(|(_, text, _)| text)
+    }
+    pub(crate) fn rendered(&self, current: u64, connected: bool) -> Option<String> {
+        let message = self.get(current, connected)?;
+        Some(match self.0.and_then(|(_, _, code)| code) {
+            Some(code) => format!("{message} HRESULT 0x{code:08X}"),
+            None => message.to_owned(),
+        })
     }
 }
 

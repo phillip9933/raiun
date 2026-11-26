@@ -32,6 +32,10 @@ mod namespace_storage;
 #[path = "recovery_provider_streamed.rs"]
 mod streamed;
 
+#[path = "saved_edit_check.rs"]
+mod saved_edit_check;
+pub use saved_edit_check::SavedEditCloudCheck;
+
 const CATALOG_DIRECTORY: &str = "cloud-files-edit-scopes-v1";
 const CATALOG_SUFFIX: &str = ".scope";
 const CATALOG_AAD_PREFIX: &[u8] = b"raiun/windows-edit-scope-catalog/v1\0";
@@ -353,54 +357,121 @@ impl crate::opencloud::ProviderIdentityCatalog for DurableProviderIdentityCatalo
         scope: &crate::opencloud::ProviderIdentityCatalogScope,
         binding: &crate::opencloud::ProviderIdentityBinding,
     ) -> Result<(), BackendError> {
+        self.upsert_many(scope, std::slice::from_ref(binding), &|| Ok(()))
+    }
+
+    fn upsert_many(
+        &self,
+        scope: &crate::opencloud::ProviderIdentityCatalogScope,
+        bindings: &[crate::opencloud::ProviderIdentityBinding],
+        ensure_current: &dyn Fn() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        ensure_current()?;
         self.validate_owner_scope(scope)?;
         validate_identity_scope(scope).map_err(|_| BackendError::Unavailable)?;
-        validate_identity_binding(scope, binding).map_err(|_| BackendError::Unavailable)?;
-        let identity = *binding.identity().as_bytes();
-
+        if bindings.len() > crate::MAX_DIRECTORY_CHILDREN {
+            return Err(BackendError::Unavailable);
+        }
+        let mut identities = std::collections::HashSet::with_capacity(bindings.len());
+        for binding in bindings {
+            ensure_current()?;
+            validate_identity_binding(scope, binding).map_err(|_| BackendError::Unavailable)?;
+            if !identities.insert(*binding.identity().as_bytes()) {
+                return Err(BackendError::Unavailable);
+            }
+        }
+        let scope_key = identity_scope_key(scope).map_err(|_| BackendError::Unavailable)?;
         for _ in 0..MAX_IDENTITY_WRITE_RETRIES {
             let _guard = IDENTITY_CATALOG_LOCK
                 .lock()
                 .map_err(|_| BackendError::Unavailable)?;
+            // Authenticate the complete bounded catalog once, including all
+            // history/tombstones, before deriving any updates for this listing.
             let entries = self.load_all().map_err(|_| BackendError::Unavailable)?;
-            let existing_bytes = identity_catalog_bytes(&entries)?;
-            let scope_key = identity_scope_key(scope).map_err(|_| BackendError::Unavailable)?;
-            let existing = entries
+            ensure_current()?;
+            let mut existing_bytes = identity_catalog_bytes(&entries)?;
+            let mut record_count = entries
                 .iter()
-                .find(|entry| entry.scope_key == scope_key && entry.identity == identity);
-            let generation = if let Some(existing) = existing {
-                if existing.scope != *scope {
-                    return Err(BackendError::Unavailable);
-                }
-                let Some(current) = existing.binding.as_ref() else {
-                    // Removed identities are tombstoned and may never be
-                    // rebound to a different remote object.
-                    return Err(BackendError::Unavailable);
+                .try_fold(entries.len() as u64, |count, entry| {
+                    count.checked_add(entry.generation)
+                })
+                .ok_or(BackendError::Unavailable)?;
+            let current = entries
+                .iter()
+                .filter(|entry| entry.scope_key == scope_key)
+                .map(|entry| (entry.identity, entry))
+                .collect::<std::collections::HashMap<_, _>>();
+            let mut binding_count = current.len();
+            let mut records = Vec::new();
+            for binding in bindings {
+                ensure_current()?;
+                let identity = *binding.identity().as_bytes();
+                let generation = if let Some(existing) = current.get(&identity) {
+                    if existing.scope != *scope {
+                        return Err(BackendError::Unavailable);
+                    }
+                    let Some(previous) = existing.binding.as_ref() else {
+                        // Removed identities remain permanently tombstoned.
+                        return Err(BackendError::Unavailable);
+                    };
+                    if !same_identity_target(previous, binding) {
+                        return Err(BackendError::Unavailable);
+                    }
+                    if previous == binding {
+                        continue;
+                    }
+                    existing
+                        .generation
+                        .checked_add(1)
+                        .ok_or(BackendError::Unavailable)?
+                } else {
+                    binding_count = binding_count
+                        .checked_add(1)
+                        .ok_or(BackendError::Unavailable)?;
+                    record_count = record_count
+                        .checked_add(1)
+                        .ok_or(BackendError::Unavailable)?;
+                    1
                 };
-                if !same_identity_target(current, binding) {
+                record_count = record_count
+                    .checked_add(1)
+                    .ok_or(BackendError::Unavailable)?;
+                if binding_count > MAX_IDENTITY_BINDINGS_PER_SCOPE
+                    || record_count > MAX_IDENTITY_CATALOG_RECORDS as u64
+                    || generation > MAX_IDENTITY_RECORD_VERSIONS as u64
+                {
                     return Err(BackendError::Unavailable);
                 }
-                if current == binding {
-                    return Ok(());
+                records.push(ProtectedIdentityRecord {
+                    schema_version: 1,
+                    scope: scope.clone(),
+                    identity,
+                    generation,
+                    binding: Some(binding.clone()),
+                });
+            }
+            // Individual immutable appends preserve a safe prefix on failure;
+            // callers must not expose native identities until all have succeeded.
+            // A concurrent process winning an append requires fresh full auth,
+            // never a name-based rebind or an unverified generation increment.
+            let mut raced = false;
+            for record in records {
+                ensure_current()?;
+                match self.append_record(&record, &scope_key, existing_bytes) {
+                    Ok(bytes) => {
+                        existing_bytes = existing_bytes
+                            .checked_add(bytes)
+                            .ok_or(BackendError::Unavailable)?;
+                    }
+                    Err(IdentityAppendError::AlreadyExists) => {
+                        raced = true;
+                        break;
+                    }
+                    Err(IdentityAppendError::Failed) => return Err(BackendError::Unavailable),
                 }
-                existing
-                    .generation
-                    .checked_add(1)
-                    .ok_or(BackendError::Unavailable)?
-            } else {
-                1
-            };
-            let record = ProtectedIdentityRecord {
-                schema_version: 1,
-                scope: scope.clone(),
-                identity,
-                generation,
-                binding: Some(binding.clone()),
-            };
-            match self.append_record(&record, &scope_key, existing_bytes) {
-                Ok(()) => return Ok(()),
-                Err(IdentityAppendError::AlreadyExists) => continue,
-                Err(IdentityAppendError::Failed) => return Err(BackendError::Unavailable),
+            }
+            if !raced {
+                return ensure_current();
             }
         }
         Err(BackendError::Unavailable)
@@ -443,7 +514,7 @@ impl crate::opencloud::ProviderIdentityCatalog for DurableProviderIdentityCatalo
                 binding: None,
             };
             match self.append_record(&record, &scope_key, existing_bytes) {
-                Ok(()) => return Ok(()),
+                Ok(_) => return Ok(()),
                 Err(IdentityAppendError::AlreadyExists) => continue,
                 Err(IdentityAppendError::Failed) => return Err(BackendError::Unavailable),
             }
@@ -687,7 +758,7 @@ impl DurableProviderIdentityCatalog {
         record: &ProtectedIdentityRecord,
         scope_key: &str,
         existing_bytes: u64,
-    ) -> Result<(), IdentityAppendError> {
+    ) -> Result<u64, IdentityAppendError> {
         let body = serde_json::to_vec(record).map_err(|_| IdentityAppendError::Failed)?;
         if body.len() > MAX_IDENTITY_RECORD_BYTES {
             return Err(IdentityAppendError::Failed);
@@ -734,7 +805,7 @@ impl DurableProviderIdentityCatalog {
         file.sync_all().map_err(|_| IdentityAppendError::Failed)?;
         drop(file);
         sync_directory(&identity_directory).map_err(|_| IdentityAppendError::Failed)?;
-        Ok(())
+        Ok(sealed_len)
     }
 }
 
@@ -1294,13 +1365,29 @@ fn streamed_unresolved_metadata(
         .max_metadata_bytes_per_scan
         .min(64 * 1024 * 1024);
     let mut budget = crate::streamed_store::DiscoveryBudget::new(scan_policy);
-    let scopes = crate::streamed_store::SnapshotStore::discover_state_scopes_bounded(
+    let mut scopes = crate::streamed_store::SnapshotStore::discover_state_scopes_bounded(
         Arc::clone(&context.state),
         Arc::clone(protector),
         scan_policy,
         &mut budget,
     )
     .map_err(crate::edit_journal::admission_error)?;
+    // A retained join must not disappear from this listing merely because its
+    // snapshot catalog is missing. Include authenticated join-catalog scopes
+    // so the existing snapshot/manifest readers refuse that incomplete state.
+    for joined_scope in
+        crate::streamed_store::namespace_file_store::FileCreateStore::discover_state_scopes_bounded(
+            Arc::clone(&context.state),
+            Arc::clone(protector),
+            scan_policy,
+            &mut budget,
+        )
+        .map_err(crate::edit_journal::admission_error)?
+    {
+        if !scopes.contains(&joined_scope) {
+            scopes.push(joined_scope);
+        }
+    }
     if scopes.len() > MAX_DISCOVERY_CATALOG_SCOPES {
         return Err(crate::JournalError::ScanLimit);
     }
@@ -1321,24 +1408,45 @@ fn streamed_unresolved_metadata(
         let records = store
             .discover_records_bounded(&mut budget)
             .map_err(crate::edit_journal::admission_error)?;
-        // A superseded stream alone leaves the namespace commit gap pending.
-        // Keep that original selectable until its paired join is authenticated.
-        let continued = if records.iter().any(|record| {
-            matches!(
-                record.state,
-                crate::streamed_store::StreamedAttemptState::Superseded { .. }
-            )
-        }) {
+        // A snapshot ACK alone cannot close its namespace commit gap. Read the
+        // joins on every scan, sharing the same allowance as record discovery.
+        // These are authenticated metadata/reference reads, never body reads
+        // or permission to replay the original create.
+        let joins =
             crate::streamed_store::namespace_file_store::FileCreateStore::new(store.clone())
-                .and_then(|store| store.discover())
-                .map_err(crate::edit_journal::admission_error)?
-                .into_iter()
-                .filter(|join| join.progress().continued && join.progress().recorded_complete)
-                .map(|join| join.snapshot_id().to_owned())
-                .collect::<std::collections::HashSet<_>>()
-        } else {
-            std::collections::HashSet::new()
-        };
+                .and_then(|store| store.discover_existing_locked_bounded(&mut budget))
+                .map_err(crate::edit_journal::admission_error)?;
+        let mut records_by_key = std::collections::HashMap::new();
+        for record in &records {
+            let key = (record.key.record_id().to_owned(), record.key.generation());
+            if records_by_key.insert(key, record).is_some() {
+                return Err(crate::JournalError::ScanLimit);
+            }
+        }
+        let mut joined = std::collections::HashSet::new();
+        let mut pending = std::collections::HashSet::new();
+        let mut continued = std::collections::HashSet::new();
+        for join in joins {
+            let key = (join.snapshot_id().to_owned(), join.key().generation());
+            if !joined.insert(key.clone()) {
+                return Err(crate::JournalError::CorruptRecord);
+            }
+            let progress = join.progress();
+            if !progress.recorded_complete {
+                let record = records_by_key
+                    .get(&key)
+                    .ok_or(crate::JournalError::CorruptRecord)?;
+                if record.key.scope() != join.key().scope()
+                    || record.key.commitment_sha256() != join.manifest_commitment_sha256()
+                {
+                    return Err(crate::JournalError::CorruptRecord);
+                }
+                pending.insert(key);
+            } else if progress.continued {
+                continued.insert(key);
+            }
+        }
+        drop(records_by_key);
         for record in records {
             scanned_records = scanned_records
                 .checked_add(1)
@@ -1348,13 +1456,15 @@ fn streamed_unresolved_metadata(
             {
                 return Err(crate::JournalError::ScanLimit);
             }
-            let resolved = matches!(
+            let key = (record.key.record_id().to_owned(), record.key.generation());
+            let resolved = (matches!(
                 record.state,
                 crate::streamed_store::StreamedAttemptState::LocallyAcknowledged { .. }
-            ) || (matches!(
-                record.state,
-                crate::streamed_store::StreamedAttemptState::Superseded { .. }
-            ) && continued.contains(record.key.record_id()));
+            ) && !pending.contains(&key))
+                || (matches!(
+                    record.state,
+                    crate::streamed_store::StreamedAttemptState::Superseded { .. }
+                ) && continued.contains(&key));
             if !resolved {
                 output.push(streamed_manifest_metadata(&record.manifest));
             }
@@ -1610,6 +1720,18 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
     }
 
     #[cfg(windows)]
+    fn existing_file_rename_store(
+        &self,
+        scope: &EditJournalScope,
+        authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>,
+        BackendError,
+    > {
+        namespace_storage::prepared_existing_store(self, scope, authorization)
+    }
+
+    #[cfg(windows)]
     fn directory_intent_store(
         &self,
         scope: &EditJournalScope,
@@ -1619,6 +1741,18 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         BackendError,
     > {
         namespace_storage::prepared_directory_store(self, scope, authorization)
+    }
+
+    #[cfg(windows)]
+    fn existing_directory_intent_store(
+        &self,
+        scope: &EditJournalScope,
+        authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>,
+        BackendError,
+    > {
+        namespace_storage::prepared_existing_directory_store(self, scope, authorization)
     }
 
     fn append_edit(
@@ -1856,6 +1990,116 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
     }
 
     #[cfg(windows)]
+    fn has_unresolved_namespace_for_fresh_create(&self) -> Result<bool, BackendError> {
+        namespace_storage::has_unresolved_for_fresh_create(
+            self.namespace_rename.as_ref(),
+            self.streamed.as_ref(),
+            &self.catalog,
+            &self.scope,
+            self.root_identity,
+        )
+    }
+
+    #[cfg(windows)]
+    fn has_unresolved_for_fresh_create_in_space(
+        &self,
+        space: &crate::FreshCreateSpace,
+    ) -> Result<bool, BackendError> {
+        let trace = space.preparation_trace();
+        if let Some(trace) = trace {
+            trace.enter(crate::creation_preparation::Stage::RecoveryScope);
+        }
+        let candidate = space.scope();
+        if !valid_scope_binding(&self.scope, self.root_identity)
+            || !scope_matches_provider(candidate, &self.scope, self.root_identity)
+            || validate_catalog_scope(candidate).is_err()
+        {
+            if let Some(trace) = trace {
+                trace.backend(BackendError::Unavailable);
+            }
+            return Err(BackendError::Unavailable);
+        }
+        // An unconfigured namespace consumer cannot reinterpret retained
+        // history or gain writer admission from this health query.
+        if let Some(trace) = trace {
+            trace.enter(crate::creation_preparation::Stage::RecoveryContext);
+        }
+        let context = self
+            .namespace_rename
+            .as_ref()
+            .ok_or(BackendError::Unavailable)
+            .inspect_err(|error| {
+                if let Some(trace) = trace {
+                    trace.backend(*error);
+                }
+            })?;
+        if context.admission.state_identity() != context.state.identity()
+            || context.state.path() != self.catalog.state_directory
+        {
+            if let Some(trace) = trace {
+                trace.backend(BackendError::Unavailable);
+            }
+            return Err(BackendError::Unavailable);
+        }
+        crate::streamed_store::SnapshotStore::fresh_create_space_pending_existing(
+            Arc::clone(&context.state),
+            Arc::clone(&self.catalog.protector),
+            context.policy,
+            &self.scope,
+            self.root_identity,
+            candidate,
+            space.target(),
+            true,
+            trace,
+            |budget| {
+                self.catalog
+                    .content_presence_authenticated_bounded(&self.scope, self.root_identity, budget)
+                    .map_err(|_| crate::streamed_store::StoreError::IncompleteEvidence)
+            },
+        )
+        .map_err(|_| BackendError::Unavailable)
+    }
+
+    #[cfg(windows)]
+    fn namespace_recovery_summary(&self) -> Result<crate::NamespaceRecoverySummary, BackendError> {
+        self.namespace_recovery_diagnostics()
+            .map_err(|_| BackendError::Unavailable)
+    }
+
+    #[cfg(windows)]
+    fn namespace_recovery_diagnostics(
+        &self,
+    ) -> Result<crate::NamespaceRecoverySummary, crate::NamespaceRecoveryDiagnosticError> {
+        let summary = namespace_storage::namespace_history_diagnostics(
+            self.namespace_rename.as_ref(),
+            self.streamed.as_ref(),
+            &self.catalog,
+            &self.scope,
+            self.root_identity,
+        )?;
+        // Preserve configured-format and unknown-history refusals. The result
+        // below is support metadata, never an admission or replay decision.
+        let _ = crate::streamed_store::namespace_rename_store::history_unresolved(
+            &summary,
+            self.namespace_rename.is_some(),
+        )
+        .map_err(crate::NamespaceRecoveryDiagnosticError::HistoryPolicy)?;
+        Ok(crate::NamespaceRecoverySummary {
+            rename_records: summary.records,
+            rename_unresolved: summary.unresolved,
+            directory_records: summary.directory_records,
+            directory_unresolved: summary.directory_unresolved,
+            directory_pending_classifications: summary.directory_pending_classifications,
+            file_records: summary.file_records,
+            file_unresolved: summary.file_unresolved,
+            file_acknowledged_join_gaps: summary.file_acknowledged_join_gaps,
+            file_pending_classifications: summary.file_pending_classifications,
+            delete_records: summary.delete_records,
+            delete_unresolved: summary.delete_unresolved,
+        })
+    }
+
+    #[cfg(windows)]
     fn has_unresolved_content(&self) -> Result<bool, BackendError> {
         if !valid_scope_binding(&self.scope, self.root_identity) {
             return Err(BackendError::Unavailable);
@@ -1954,6 +2198,15 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         )
         .map_err(|_| BackendError::Unavailable)?;
         Ok(pending)
+    }
+
+    fn check_recovered_edit_readback(
+        &self,
+        record_id: &str,
+        generation: u64,
+        remote: &dyn RecoveryRemote,
+    ) -> Result<SavedEditCloudCheck, crate::JournalError> {
+        saved_edit_check::check(self, record_id, generation, remote)
     }
 
     fn dispatch_recovered_edit(

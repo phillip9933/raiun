@@ -312,10 +312,41 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Read-only storage binding in this SAME prepared account/root context.
+    /// None is verified absence or unsupported; storage verification errors
+    /// must remain Err. This grants no health, capture or dispatch authority.
+    #[cfg(windows)]
+    fn existing_file_rename_store(
+        &self,
+        _scope: &crate::EditJournalScope,
+        _authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>,
+        BackendError,
+    > {
+        Ok(None)
+    }
+
     /// Optional directory journal from this SAME prepared account/root context.
     /// Storage does not grant directory dispatch or native publication authority.
     #[cfg(windows)]
     fn directory_intent_store(
+        &self,
+        _scope: &crate::EditJournalScope,
+        _authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>,
+        BackendError,
+    > {
+        Ok(None)
+    }
+
+    /// Read-only binding to an existing directory journal root in this SAME
+    /// prepared account/root context. None means verified absence or an
+    /// unsupported implementation; unsafe/malformed storage must return Err.
+    /// This supplies no health, dispatch or native publication authority.
+    #[cfg(windows)]
+    fn existing_directory_intent_store(
         &self,
         _scope: &crate::EditJournalScope,
         _authorization: crate::namespace_intent::CapturedAuthorization,
@@ -443,6 +474,42 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     /// are treated as unresolved by the native teardown path.
     fn has_unresolved(&self) -> Result<bool, BackendError>;
 
+    /// Namespace admission for a distinct fresh create, never old-record repair.
+    /// Callers must also check authenticated content health independently.
+    /// Unsupported providers retain the conservative combined refusal.
+    #[cfg(windows)]
+    fn has_unresolved_namespace_for_fresh_create(&self) -> Result<bool, BackendError> {
+        self.has_unresolved()
+    }
+
+    /// Joint custody health for the same retained SDK-verified create Space.
+    /// Other-Space isolation never changes generic history or grants a replay.
+    #[cfg(windows)]
+    fn has_unresolved_for_fresh_create_in_space(
+        &self,
+        _space: &crate::FreshCreateSpace,
+    ) -> Result<bool, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    /// Counts authenticated namespace metadata only at this original account/root.
+    /// Unknown or unsupported evidence is unavailable, never an empty summary.
+    /// This grants no replay, dispatch, native completion or cleanup authority.
+    #[cfg(windows)]
+    fn namespace_recovery_summary(&self) -> Result<crate::NamespaceRecoverySummary, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    /// Same single inspection as the summary, retaining typed support errors.
+    /// Existing fixture implementations need not add a diagnostic adapter.
+    #[cfg(windows)]
+    fn namespace_recovery_diagnostics(
+        &self,
+    ) -> Result<crate::NamespaceRecoverySummary, crate::NamespaceRecoveryDiagnosticError> {
+        self.namespace_recovery_summary()
+            .map_err(crate::NamespaceRecoveryDiagnosticError::Provider)
+    }
+
     /// Read-only content-recovery admission check for this exact retained
     /// account/root capability. Namespace operation history is intentionally
     /// excluded. `false` is returned only after a bounded authenticated scan;
@@ -465,6 +532,18 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     #[cfg(windows)]
     fn has_unresolved_content_authenticated_legacy(&self) -> Result<bool, BackendError> {
         Err(BackendError::Unavailable)
+    }
+
+    /// Authenticate one selected retained ordinary body and compare the current
+    /// cloud copy without uploading, changing attempt history, or acknowledging
+    /// a native placeholder. A match is informational only; custody is unchanged.
+    fn check_recovered_edit_readback(
+        &self,
+        _record_id: &str,
+        _generation: u64,
+        _remote: &dyn crate::RecoveryRemote,
+    ) -> Result<crate::SavedEditCloudCheck, crate::JournalError> {
+        Err(crate::JournalError::InvalidState)
     }
 
     /// Explicitly dispatch one previously selected recovered edit. This does

@@ -12,12 +12,13 @@ use raiun_core::backend::{CloudError, ErrorKind};
 use std::{
     future::Future,
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
+    thread,
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    sync::watch,
+    sync::{oneshot, watch},
     time::Instant,
 };
 use zeroize::Zeroizing;
@@ -26,6 +27,72 @@ use crate::transfer_budget::{TransferBudget, TransferDirection};
 
 const BODY_CHUNK_BYTES: usize = 64 * 1024;
 pub(crate) const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One executor for a shared async HTTP client pool and all of its clones.
+/// Its driver stays running between synchronous body calls, so pooled HTTP
+/// connection tasks do not belong to a short-lived operation runtime.
+pub(crate) struct BodyRuntime {
+    handle: tokio::runtime::Handle,
+    shutdown: Option<oneshot::Sender<()>>,
+    driver: Option<thread::JoinHandle<()>>,
+}
+
+impl BodyRuntime {
+    pub(crate) fn new() -> Result<Arc<Self>, CloudError> {
+        let unavailable = || CloudError::new(ErrorKind::Offline, "body runtime is unavailable");
+        let (ready, handle) = mpsc::sync_channel(1);
+        let (shutdown, stopped) = oneshot::channel();
+        let driver = thread::Builder::new()
+            .name("raiun-http-body".to_owned())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
+                    .build()
+                else {
+                    return;
+                };
+                if ready.send(runtime.handle().clone()).is_ok() {
+                    // Handle::block_on polls each borrowed operation on its
+                    // caller thread; only Runtime::block_on drives this
+                    // current-thread runtime's I/O, timers and spawned tasks.
+                    runtime.block_on(async {
+                        let _ = stopped.await;
+                    });
+                }
+                // Runtime shutdown happens on this non-async owner thread.
+                // It joins already-started filesystem/DNS blocking work;
+                // shutdown does not detach that work or promise a hard bound.
+            })
+            .map_err(|_| unavailable())?;
+        let handle = match handle.recv() {
+            Ok(handle) => handle,
+            Err(_) => {
+                let _ = driver.join();
+                return Err(unavailable());
+            }
+        };
+        Ok(Arc::new(Self {
+            handle,
+            shutdown: Some(shutdown),
+            driver: Some(driver),
+        }))
+    }
+}
+
+impl Drop for BodyRuntime {
+    fn drop(&mut self) {
+        // OpenCloudClient drops its async client field before this owner.
+        // Active synchronous calls borrow it, so final shutdown cannot race
+        // a body operation. The driver holds no Arc back to this owner.
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(driver) = self.driver.take() {
+            let _ = driver.join();
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct BodyProgress {
@@ -283,6 +350,92 @@ where
     }
 }
 
+/// Hash a full response through EOF without staging its content. Budget waits
+/// alone pause inactivity; network reads and hashing remain under the watchdog.
+pub(crate) async fn hash_response_body(
+    response: &mut reqwest::Response,
+    expected_bytes: u64,
+    budget: &TransferBudget,
+    is_cancelled: impl Fn() -> bool,
+    progress: &BodyProgress,
+) -> Result<[u8; 32], CloudError> {
+    use sha2::{Digest, Sha256};
+
+    let mut count = 0u64;
+    let mut hash = Sha256::new();
+    loop {
+        if is_cancelled() {
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "content transfer was cancelled",
+            ));
+        }
+        progress.budget_wait_started();
+        let reservation = budget
+            .acquire_cancellable_async(
+                TransferDirection::Download,
+                expected_bytes
+                    .saturating_sub(count)
+                    .clamp(1, BODY_CHUNK_BYTES as u64) as usize,
+                &is_cancelled,
+            )
+            .await;
+        progress.budget_wait_finished();
+        let reservation = reservation.map_err(crate::io_error)?;
+        // Request EOF even when the expected body is empty or fully hashed.
+        let Some(chunk) = response.chunk().await.map_err(crate::network)? else {
+            reservation.settle(0);
+            if count != expected_bytes {
+                return Err(crate::invalid("readback size did not match Content-Length"));
+            }
+            return Ok(hash.finalize().into());
+        };
+        if chunk.len() as u64 > expected_bytes.saturating_sub(count) {
+            reservation.settle(0);
+            return Err(crate::invalid(
+                "readback body exceeded its advertised byte limit",
+            ));
+        }
+        if is_cancelled() {
+            reservation.settle(0);
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "content transfer was cancelled",
+            ));
+        }
+        let take = chunk.len().min(reservation.granted());
+        hash.update(&chunk[..take]);
+        reservation.settle(take);
+        progress.bytes_progressed();
+        let mut offset = take;
+        while offset < chunk.len() {
+            progress.budget_wait_started();
+            let reservation = budget
+                .acquire_cancellable_async(
+                    TransferDirection::Download,
+                    (chunk.len() - offset).min(BODY_CHUNK_BYTES),
+                    &is_cancelled,
+                )
+                .await;
+            progress.budget_wait_finished();
+            let reservation = reservation.map_err(crate::io_error)?;
+            if is_cancelled() {
+                reservation.settle(0);
+                return Err(CloudError::new(
+                    ErrorKind::Offline,
+                    "content transfer was cancelled",
+                ));
+            }
+            let end = offset + reservation.granted();
+            hash.update(&chunk[offset..end]);
+            reservation.settle(end - offset);
+            offset = end;
+            progress.bytes_progressed();
+        }
+        count += chunk.len() as u64;
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct VecAsyncWriter(Zeroizing<Vec<u8>>);
 
@@ -317,9 +470,7 @@ impl tokio::io::AsyncWrite for VecAsyncWriter {
     }
 }
 
-/// Run the async body path on a bounded current-thread runtime. The runtime
-/// and request future are owned by this synchronous worker call; timeout drops
-/// the future and its socket/body stream instead of detaching a blocked task.
+/// Isolated executor for body primitive tests that have no shared HTTP pool.
 #[cfg(test)]
 pub(crate) fn run_body_operation<T, F, Fut>(
     idle_timeout: Duration,
@@ -330,10 +481,16 @@ where
     F: FnOnce(BodyProgress) -> Fut,
     Fut: Future<Output = Result<T, CloudError>>,
 {
-    run_body_operation_cancellable(idle_timeout, total_timeout, || false, operation)
+    let runtime = BodyRuntime::new()?;
+    run_body_operation_cancellable(&runtime, idle_timeout, total_timeout, || false, operation)
 }
 
+/// Poll the borrowed, possibly non-Send body future on its synchronous caller.
+/// The client's separately owned runtime continuously drives pooled connection
+/// tasks; timeout/cancellation still drops this operation rather than spawning
+/// or detaching a request worker.
 pub(crate) fn run_body_operation_cancellable<T, F, Fut, C>(
+    runtime: &BodyRuntime,
     idle_timeout: Duration,
     total_timeout: Duration,
     is_cancelled: C,
@@ -350,13 +507,8 @@ where
             "synchronous OpenCloud body API cannot run inside an async executor",
         ));
     }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(|_| CloudError::new(ErrorKind::Offline, "body runtime is unavailable"))?;
     let (progress, events) = BodyProgress::channel();
-    match runtime.block_on(with_body_watchdog_cancellable(
+    match runtime.handle.block_on(with_body_watchdog_cancellable(
         operation(progress),
         events,
         idle_timeout,
@@ -963,6 +1115,7 @@ mod tests {
         });
         let started = Instant::now();
         let result = run_body_operation_cancellable(
+            &BodyRuntime::new().unwrap(),
             Duration::from_secs(3),
             Duration::from_secs(3),
             || cancelled.load(Ordering::Acquire),

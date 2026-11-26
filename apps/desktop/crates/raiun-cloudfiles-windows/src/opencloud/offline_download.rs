@@ -28,7 +28,9 @@ impl OpenCloudPlaceholderBackend {
         cancellation.is_cancelled()
             || cancellation.is_expired()
             || self.revoked.load(Ordering::Acquire)
-            || self.client.token_generation() != self.token_generation
+            || !self
+                .client
+                .provider_generation_is_current(self.token_generation)
     }
 
     fn verification_error(&self, cancellation: &CancellationToken) -> BackendError {
@@ -223,7 +225,9 @@ impl OpenCloudPlaceholderBackend {
                                     cancellation.is_cancelled()
                                         || cancellation.is_expired()
                                         || self.revoked.load(Ordering::Acquire)
-                                        || self.client.token_generation() != self.token_generation
+                                        || !self
+                                            .client
+                                            .provider_generation_is_current(self.token_generation)
                                 },
                             )
                             .map_err(|error| self.reject_cached_cloud_error(error))?;

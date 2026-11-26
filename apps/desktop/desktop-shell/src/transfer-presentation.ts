@@ -1,6 +1,6 @@
 export type TransferTab = 'active' | 'attention' | 'history';
 export type TransferTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger';
-export type TransferDirection = 'upload' | 'download' | 'unknown';
+export type TransferDirection = 'upload' | 'download' | 'folder_create' | 'delete' | 'rename' | 'cloud_check' | 'cache_read' | 'cloud_activity' | 'unknown';
 
 type Presentation = {
   tab: TransferTab;
@@ -19,9 +19,10 @@ const ACTIVE_STATES: Record<string, Omit<Presentation, 'direction'>> = {
 };
 
 const ATTENTION_STATES: Record<string, Omit<Presentation, 'direction'>> = {
-  failed: { tab: 'attention', label: 'Failed', help: 'Review the error before trying again.', tone: 'danger' },
-  conflict: { tab: 'attention', label: 'Conflict', help: 'Review the conflicting copy before continuing.', tone: 'warning' },
-  awaiting_authentication: { tab: 'attention', label: 'Sign-in needed', help: 'Sign in to continue this transfer.', tone: 'warning' }
+  failed: { tab: 'attention', label: 'Recorded issue', help: 'A failed operation is recorded here. This may be historical; Saved uploads and edits shows local files that still need review.', tone: 'danger' },
+  conflict: { tab: 'attention', label: 'Needs review', help: 'This operation recorded a conflict. Review the saved files and current cloud copy before continuing.', tone: 'warning' },
+  needs_review: { tab: 'attention', label: 'Needs review', help: 'The cloud check found a missing or different copy. The saved local file remains for review; it was not resent or replaced.', tone: 'warning' },
+  awaiting_authentication: { tab: 'attention', label: 'Sign-in needed', help: 'This record notes that sign-in was needed. Reconnect if this account still needs it.', tone: 'warning' }
 };
 
 const HISTORY_STATES: Record<string, Omit<Presentation, 'direction'>> = {
@@ -33,45 +34,52 @@ function normalized(value: string | null | undefined): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
-function parseDirection(value: string | null | undefined): TransferDirection {
+function parseDirection(value: string | null | undefined, operation?: string | null): TransferDirection {
+  const action = normalized(operation);
+  if (action === 'cache_read') return 'cache_read';
+  if (['mkdir', 'create_folder', 'create_directory', 'folder_create'].includes(action)) return 'folder_create';
+  if (action === 'delete' || action === 'remove') return 'delete';
+  if (action === 'rename' || action === 'move') return 'rename';
+  if (['verify_upload', 'verify', 'verification', 'cloud_check'].includes(action)) return 'cloud_check';
   const direction = normalized(value);
   if (direction === 'upload' || direction === 'up') return 'upload';
   if (direction === 'download' || direction === 'down') return 'download';
+  if (['cloud', 'metadata', 'cloud_activity'].includes(direction)) return 'cloud_activity';
   return 'unknown';
 }
 
-export function transferPresentation(state?: string | null, direction?: string | null): Presentation {
+export function transferPresentation(state?: string | null, direction?: string | null, operation?: string | null): Presentation {
   const key = normalized(state);
   const states = [ACTIVE_STATES, ATTENTION_STATES, HISTORY_STATES];
   const known = states.find(table => Object.hasOwn(table, key))?.[key];
-  if (known) return { ...known, direction: parseDirection(direction) };
+  if (known) return { ...known, direction: parseDirection(direction, operation) };
   return {
     tab: 'attention',
     label: 'Status unavailable',
     help: 'Refresh the transfer list. If the status remains unavailable, check for a Raiun update.',
     tone: 'warning',
-    direction: parseDirection(direction)
+    direction: parseDirection(direction, operation)
   };
 }
 
 const TAB_SUMMARIES: Record<TransferTab, { label: string; description: string; emptyTitle: string; emptyHelp: string }> = {
   active: {
-    label: 'Current & paused',
-    description: 'Transfers that are queued, running, paused, retrying, or being checked.',
-    emptyTitle: 'No current or paused folder-sync transfers',
-    emptyHelp: 'New folder-sync transfers will appear here.'
+    label: 'Active',
+    description: 'Provider operations that are queued, running, paused, retrying, or being checked.',
+    emptyTitle: 'No active provider operations',
+    emptyHelp: 'New folder-sync and cloud-file operations will appear here.'
   },
   attention: {
-    label: 'Needs attention',
-    description: 'Transfers with an error, conflict, sign-in request, or unavailable status.',
-    emptyTitle: 'No folder-sync transfers need attention',
-    emptyHelp: 'Folder-sync transfers that need review will appear here.'
+    label: 'Recent issues',
+    description: 'Recent provider records with a failure, conflict, sign-in request, or unknown status. A recorded issue may already be resolved.',
+    emptyTitle: 'No recent provider issues',
+    emptyHelp: 'Recent issues will appear here. Saved uploads and edits shows local files that still need review.'
   },
   history: {
-    label: 'History',
-    description: 'Completed or cancelled folder-sync transfers.',
-    emptyTitle: 'No folder-sync transfer history',
-    emptyHelp: 'Completed and cancelled folder-sync transfers will appear here. Saved edits and recovery records are listed separately.'
+    label: 'Recent activity',
+    description: 'Recent completed or cancelled provider activity.',
+    emptyTitle: 'No recent provider activity',
+    emptyHelp: 'Recent completed and cancelled provider operations will appear here. Saved edits and recovery records are listed separately.'
   }
 };
 

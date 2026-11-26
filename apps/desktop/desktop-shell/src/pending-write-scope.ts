@@ -112,12 +112,11 @@ export function pendingWritePresentation(item: PendingOfflineWrite): { label: st
       staged: { label: 'Saved locally', help: 'A local copy is saved. It has not been queued for upload.' },
       ready: { label: 'Queued for upload', help: 'The file is queued. Cloud delivery is not confirmed.' },
       claimed: { label: 'Uploading', help: 'An upload attempt is in progress. Cloud delivery is not confirmed.' },
-      uncertain: { label: 'Outcome uncertain', help: 'The upload may have reached the cloud. The local copy is retained for review; it will not be retried automatically.' },
+      uncertain: { label: 'Upload not confirmed', help: 'Raiun could not verify this file on the server. Your saved file is kept on this PC. It will not be resent automatically, and this file and its parent folders stay protected from deletion.' },
       conflict: { label: 'Needs review', help: 'The local copy is retained for review. This create will not be retried automatically.' }
     };
     const status = presentation[item.create_state];
-    const acceptance = item.local_handoff_acknowledged ? 'Local acceptance is recorded.' : 'Local acceptance has not been confirmed.';
-    return { label: status.label, help: `${status.help} ${acceptance}` };
+    return status;
   }
   return item.state === 'conflict'
     ? { label: 'Needs review', help: 'The local copy is retained for review.' }

@@ -205,7 +205,9 @@ pub use opencloud::{
 };
 #[cfg(windows)]
 pub use recovery_provider::StagedStreamedEdit;
-pub use recovery_provider::{CompletedLocalEdit, DurableEditRecoveryProvider, InitialEditReceipt};
+pub use recovery_provider::{
+    CompletedLocalEdit, DurableEditRecoveryProvider, InitialEditReceipt, SavedEditCloudCheck,
+};
 pub use recovery_reconcile::{
     MAX_RECOVERY_UPLOAD_ATTEMPTS, MAX_RECOVERY_UPLOAD_BYTES, OpenCloudRecoveryRemote,
     ReconciliationIssue, ReconciliationOutcome, RecoveryRemote, RecoveryRemoteBody,
@@ -233,6 +235,8 @@ pub use native::native_namespace_directory::{
 pub enum FileCreateContinuationOutcome {
     LocallyCompleted,
     HistoricalLinkCompleted,
+    /// Original native ACK is historical evidence, not a permit for another PUT.
+    HistoricalReviewRequired,
 }
 
 /// Fixed, data-free phase of an explicitly selected file-create recovery.
@@ -290,7 +294,11 @@ pub trait OrdinaryEditStatusSource: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaultCleanupDiagnostics {
     pub modified_closes: usize,
+    /// Legacy aggregate includes both actual close failures and reconnect
+    /// inventory uncertainty; existing destructive-operation guards retain it.
     pub unverifiable_closes: usize,
+    /// Actual observed close failures only; excludes reconnect scan inventory.
+    pub observed_unverifiable_closes: usize,
     pub journaled_closes: usize,
     pub close_callbacks: usize,
     pub close_pool_refusals: usize,
@@ -299,6 +307,243 @@ pub struct VaultCleanupDiagnostics {
     pub last_close_hresult: i32,
     /// None means the short inventory lock was unavailable, not complete.
     pub inventory_complete: Option<bool>,
+}
+
+// SDK helpers also compile on the host; only native workers emit these labels.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod creation_preparation;
+#[cfg(windows)]
+mod file_create_completion_diagnostics;
+#[cfg(windows)]
+mod fresh_create_send_gate;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod fresh_create_target;
+
+/// An exact Space identity captured by the retained SDK create admission.
+/// This read-only health input grants no dispatch or old-record authority.
+#[cfg(windows)]
+pub struct FreshCreateSpace {
+    scope: EditJournalScope,
+    target: Option<fresh_create_target::FreshCreateTarget>,
+    preparation_trace: Option<std::sync::Arc<creation_preparation::Trace>>,
+}
+#[cfg(windows)]
+impl FreshCreateSpace {
+    pub(crate) fn from_verified_scope(scope: EditJournalScope) -> Self {
+        Self {
+            scope,
+            target: None,
+            preparation_trace: None,
+        }
+    }
+    pub(crate) fn from_verified_target(
+        scope: EditJournalScope,
+        target: fresh_create_target::FreshCreateTarget,
+    ) -> Self {
+        Self {
+            scope,
+            target: Some(target),
+            preparation_trace: None,
+        }
+    }
+    pub(crate) fn target(&self) -> Option<&fresh_create_target::FreshCreateTarget> {
+        self.target.as_ref()
+    }
+    pub(crate) fn with_preparation_trace(
+        mut self,
+        trace: std::sync::Arc<creation_preparation::Trace>,
+    ) -> Self {
+        self.preparation_trace = Some(trace);
+        self
+    }
+    pub(crate) fn preparation_trace(&self) -> Option<&creation_preparation::Trace> {
+        self.preparation_trace.as_deref()
+    }
+    pub(crate) fn scope(&self) -> &EditJournalScope {
+        &self.scope
+    }
+}
+
+#[cfg(windows)]
+pub use streamed_store::namespace_file_store::PendingFileCreateClassification;
+#[cfg(windows)]
+pub use streamed_store::namespace_store::PendingDirectoryCreateClassification;
+
+/// Authenticated namespace metadata counts; no bodies or recovery authority.
+#[cfg(windows)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NamespaceRecoverySummary {
+    pub rename_records: usize,
+    pub rename_unresolved: usize,
+    pub directory_records: usize,
+    pub directory_unresolved: usize,
+    /// Static authenticated pending-directory phases, explicit diagnostics only.
+    pub directory_pending_classifications: Vec<PendingDirectoryCreateClassification>,
+    pub file_records: usize,
+    pub file_unresolved: usize,
+    /// Historical original native ACK0/0, with the join event still incomplete.
+    /// This is not current-content verification or cleanup/recovery authority.
+    pub file_acknowledged_join_gaps: usize,
+    /// Static authenticated phase histogram, populated by explicit diagnostics.
+    pub file_pending_classifications: Vec<PendingFileCreateClassification>,
+    pub delete_records: usize,
+    pub delete_unresolved: usize,
+}
+
+/// Same-call support failure only. Carries typed classes, never paths, payloads,
+/// partial counts or recovery authority.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NamespaceRecoveryDiagnosticError {
+    Connection,
+    RootIdentity,
+    RootRegistration,
+    MissingProvider,
+    ProviderScope,
+    RecoveryContext,
+    RecoveryStateOpen,
+    RecoveryStateAbsence,
+    Provider(BackendError),
+    HistoryPolicy(BackendError),
+    Store(streamed_store::StoreError),
+}
+#[cfg(windows)]
+impl NamespaceRecoveryDiagnosticError {
+    pub fn boundary(self) -> &'static str {
+        match self {
+            Self::Connection => "connection",
+            Self::RootIdentity => "root_identity",
+            Self::RootRegistration => "root_registration",
+            Self::MissingProvider => "prepared_provider",
+            Self::ProviderScope => "provider_scope",
+            Self::RecoveryContext => "recovery_context",
+            Self::RecoveryStateOpen => "recovery_state_open",
+            Self::RecoveryStateAbsence => "recovery_state_absence",
+            Self::Provider(_) => "provider_inspection",
+            Self::HistoryPolicy(_) => "history_policy",
+            Self::Store(_) => "namespace_store_inspection",
+        }
+    }
+    pub fn class(self) -> &'static str {
+        use streamed_store::StoreError;
+        match self {
+            Self::Provider(error) | Self::HistoryPolicy(error) => match error {
+                BackendError::NotFound => "not_found",
+                BackendError::Cancelled => "cancelled",
+                BackendError::InvalidRange => "invalid_range",
+                BackendError::Unavailable => "unavailable",
+            },
+            Self::Store(error) => match error {
+                StoreError::Io => "io",
+                StoreError::Busy => "busy",
+                StoreError::Invalid => "invalid",
+                StoreError::Quota => "quota",
+                StoreError::ScanLimit => "scan_limit",
+                StoreError::IncompleteEvidence => "incomplete_evidence",
+                StoreError::CorruptEvidence => "corrupt_evidence",
+                StoreError::PublicationUncertain => "publication_uncertain",
+                StoreError::Snapshot(_) => "snapshot",
+            },
+            _ => "unavailable",
+        }
+    }
+    pub fn reason(self) -> &'static str {
+        use streamed_snapshot::SnapshotError;
+        match self {
+            Self::Store(streamed_store::StoreError::Snapshot(error)) => match error {
+                SnapshotError::Io => "snapshot_io",
+                SnapshotError::InvalidBinding => "snapshot_invalid_binding",
+                SnapshotError::BindingMismatch => "snapshot_binding_mismatch",
+                SnapshotError::LimitExceeded => "snapshot_limit_exceeded",
+                SnapshotError::SourceLengthMismatch => "snapshot_source_length_mismatch",
+                SnapshotError::Malformed => "snapshot_malformed",
+                SnapshotError::ProtectionFailed => "snapshot_protection_failed",
+                SnapshotError::Cancelled => "snapshot_cancelled",
+            },
+            _ => self.class(),
+        }
+    }
+}
+
+/// Fixed, non-path-bearing creation admission boundaries.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreateAdmissionStage {
+    Candidate,
+    OwnerBorrow,
+    OwnerClosed,
+    OwnerCounter,
+    NativeContext,
+    UnverifiedClose,
+    VaultDirty,
+    RecoveryContext,
+    RecoveryScan,
+    RecoveryPending,
+    ContentScan,
+    ContentPending,
+    CloseAdmission,
+    OriginalJob,
+    Authorization,
+    Ticket,
+    Root,
+}
+#[cfg(windows)]
+impl CreateAdmissionStage {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Candidate => {
+                "Creation paused: candidate or account authorization changed. Recovery files have been kept."
+            }
+            Self::OwnerBorrow => {
+                "Creation paused: native owner is already borrowed. Recovery files have been kept."
+            }
+            Self::OwnerClosed => {
+                "Creation paused: native creation owner is closed. Recovery files have been kept."
+            }
+            Self::OwnerCounter => {
+                "Creation paused: native creation owner counter is exhausted. Recovery files have been kept."
+            }
+            Self::NativeContext => {
+                "Creation paused: native account, root or dirty-close context could not be verified. Recovery files have been kept."
+            }
+            Self::UnverifiedClose => {
+                "Creation paused: a native placeholder close could not be verified. Recovery files have been kept."
+            }
+            Self::VaultDirty => {
+                "Creation paused: protected vault capture is pending or could not be verified. Recovery files have been kept."
+            }
+            Self::RecoveryContext => {
+                "Creation paused: protected recovery account or root binding could not be verified. Recovery files have been kept."
+            }
+            Self::RecoveryScan => {
+                "Creation paused: protected recovery history could not be verified. Recovery files have been kept."
+            }
+            Self::RecoveryPending => {
+                "Creation paused: unresolved protected recovery history needs review. Recovery files have been kept."
+            }
+            Self::ContentScan => {
+                "Creation paused: retained content history could not be verified. Recovery files have been kept."
+            }
+            Self::ContentPending => {
+                "Creation paused: retained content recovery needs review. Recovery files have been kept."
+            }
+            Self::CloseAdmission => {
+                "Creation paused: native close-admission bookkeeping is unknown. Recovery files have been kept."
+            }
+            Self::OriginalJob => {
+                "Creation paused: the original job expired or was cancelled. Recovery files have been kept."
+            }
+            Self::Authorization => {
+                "Creation paused: original account authorization is no longer current. Recovery files have been kept."
+            }
+            Self::Ticket => {
+                "Creation paused: original native close-admission ticket is no longer current. Recovery files have been kept."
+            }
+            Self::Root => {
+                "Creation paused: original registered root could not be verified. Recovery files have been kept."
+            }
+        }
+    }
 }
 
 /// Safe, non-path-bearing error from the Cloud Files adapter.
@@ -327,6 +572,8 @@ pub enum Error {
     /// A protected edit-recovery capability could not be prepared for this
     /// account/root, so the native provider connection was not started.
     EditRecoveryUnavailable,
+    #[cfg(windows)]
+    CreateAdmission { stage: CreateAdmissionStage },
     /// A selected file-create continuation stopped at a fixed safe phase.
     #[cfg(windows)]
     FileCreateContinuation { stage: FileCreateContinuationStage },
@@ -372,6 +619,8 @@ impl fmt::Display for Error {
             }
             Self::EditRecoveryUnavailable => formatter
                 .write_str("durable edit recovery is unavailable for this account and root"),
+            #[cfg(windows)]
+            Self::CreateAdmission { stage } => formatter.write_str(stage.reason()),
             #[cfg(windows)]
             Self::FileCreateContinuation { stage } => {
                 write!(
@@ -906,7 +1155,7 @@ impl fmt::Debug for NamespaceObservation {
 
 // Shared path correspondence only; native component and managed-parent admission
 // remain mandatory. The first component is the local namespace, never a Space.
-#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn personal_create_relative(parent: &[&str], leaf: &str) -> Option<String> {
     let prefix = match parent.first().copied() {
         Some("Personal") => 1,
@@ -1001,6 +1250,14 @@ impl ConfiguredRootConnection {
         wait: std::time::Duration,
     ) -> Result<NamespaceObservation, Error> {
         self.inner.poll_namespace_observer(wait)
+    }
+
+    /// Fixed memory-only terminal transport reason for this original connection.
+    /// This observation grants no hint, inventory or mutation authority.
+    pub fn namespace_observer_terminal_reason(
+        &self,
+    ) -> Option<raiun_control_windows::directory_notifications::RescanReason> {
+        self.inner.namespace_observer_terminal_reason()
     }
     /// Physical cancellation remains available after authentication revocation.
     /// A pending error retains the same observer/root/connection aggregate.
@@ -1342,6 +1599,18 @@ impl ConfiguredRootConnection {
     pub fn vault_cleanup_diagnostics(&self) -> VaultCleanupDiagnostics {
         self.inner.vault_cleanup_diagnostics()
     }
+    /// Authenticated namespace metadata counts only, never recovery authority.
+    pub fn namespace_recovery_summary(&self) -> Result<NamespaceRecoverySummary, BackendError> {
+        self.inner.namespace_recovery_summary()
+    }
+
+    /// One existing metadata inspection, retaining only safe typed failure
+    /// classes. Unavailable counts remain unknown, never a healthy zero.
+    pub fn namespace_recovery_diagnostics(
+        &self,
+    ) -> Result<NamespaceRecoverySummary, NamespaceRecoveryDiagnosticError> {
+        self.inner.namespace_recovery_diagnostics()
+    }
 
     /// Revoke/drain this retained route before cleaning recorded plaintext.
     /// Dirty/uncertain state or failed postproof returns incomplete cleanup;
@@ -1500,6 +1769,13 @@ impl ConfiguredRootConnection {
     ) -> Result<(), Error> {
         self.inner
             .acknowledge_verified_edit(local_components, publication)
+    }
+
+    /// Current memory-only scheduling hint; never a dispatch or root proof.
+    /// An empty queue avoids idle inspection. Every nonempty take must still
+    /// pass all existing root, identity, registration and receipt checks.
+    pub fn has_pending_initial_edit(&self) -> Result<bool, Error> {
+        self.inner.has_pending_initial_edit()
     }
 
     /// Take one newly captured close receipt from this exact live connection.

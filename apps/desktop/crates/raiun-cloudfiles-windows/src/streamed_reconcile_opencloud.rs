@@ -22,7 +22,8 @@ impl OpenCloudStreamedRecoveryRemote {
         context: RangeReadContext,
     ) -> Result<Self, CloudError> {
         if context.token_generation == 0
-            || context.token_generation != client.token_generation()
+            || !client.provider_generation_is_current(context.token_generation)
+            || !client.provider_credentials_match(&scope.account_subject, None, None)
             || context.deadline <= Instant::now()
             || client.server_origin().as_deref() != Some(scope.server_origin.as_str())
             || root_path.is_empty()
@@ -90,7 +91,10 @@ impl StreamedRecoveryRemote for OpenCloudStreamedRecoveryRemote {
         if self.job.as_ref().is_some_and(|job| job.is_stopped())
             || scope != &self.scope
             || generation != self.context.token_generation
-            || self.client.token_generation() != generation
+            || !self.client.provider_generation_is_current(generation)
+            || !self
+                .client
+                .provider_credentials_match(&self.scope.account_subject, None, None)
             || self.context.deadline <= Instant::now()
             || self.client.server_origin().as_deref() != Some(self.scope.server_origin.as_str())
         {

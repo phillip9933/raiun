@@ -122,10 +122,10 @@ impl WindowsAgent {
                 current.server != session.server
                     || current.client_id != session.client_id
                     || current.expected_issuer != session.expected_issuer
-                    || current.access_token != session.access_token
+                    || !Self::same_session_authority(Some(current), Some(session))
+                    || current.expires_at <= unix_time_now().saturating_add(30)
             })
             || backend.is_revoked()
-            || session.expires_at <= unix_time_now().saturating_add(30)
         {
             return Err("The account changed during vault preparation".into());
         }

@@ -56,14 +56,14 @@
       "sha256": "b5c80bb30797d3a2eeb0dbd85ce481bacfa1b9401c6e74c5fbb4134de26dd690"
     },
     {
-      "bytes": 56206,
+      "bytes": 56268,
       "path": "legal/windows/THIRD-PARTY-NOTICES.md",
-      "sha256": "2e2d562e880e59657a78a18b80c7d704f1397d3038f89aacfd496bbea89e7363"
+      "sha256": "10c910dc35394350b68c668b7873c494ee4f73f40649e051d152e7a53895769f"
     }
   ],
   "gaps": [],
   "lock_sha256": {
-    "Cargo.lock": "f36510a206ea6fb2559695994162e9f1146538f73876dba36e6adc625547fb93",
+    "Cargo.lock": "feb0ebf58e7fc376a573a76c537d1a063e8080b16961077413168e62fd33f53a",
     "desktop-shell/package-lock.json": "d0965d09c758ed7e5f3d1dcc1b1d869d5113f836fdf30c0915ddc850d3387932",
     "desktop-shell/src-tauri/Cargo.lock": "515e726034b491d4b4f98ee2aa13fb193b4bd733bd1a5e09294c07d1141774ef",
     "package-lock.json": "fc694dd4b238d9f55909d1a8229f1cfb8f063f042f2bb0256c20c73495dad64d"
@@ -2026,6 +2026,7 @@
       "description": "Traits for key comparison in maps.",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "equivalent",
@@ -2657,6 +2658,25 @@
       "version": "0.3.4"
     },
     {
+      "declared_license": "MIT",
+      "description": "An HTTP/2 client and server",
+      "ecosystem": "cargo",
+      "graphs": [
+        "Cargo.toml"
+      ],
+      "name": "h2",
+      "notice_files": [
+        {
+          "bytes": 1054,
+          "path": "legal/windows/rust/h2-0.4.20/LICENSE",
+          "sha256": "b21623012e6c453d944b0342c515b631cfcbf30704c2621b291526b69c10724d"
+        }
+      ],
+      "repository": "https://github.com/hyperium/h2",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.4.20"
+    },
+    {
       "declared_license": "MIT OR Apache-2.0",
       "description": "A Rust port of Google's SwissTable hash map",
       "ecosystem": "cargo",
@@ -2709,6 +2729,7 @@
       "description": "A Rust port of Google's SwissTable hash map",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "hashbrown",
@@ -3415,6 +3436,7 @@
       "description": "A hash table with consistent order and fast iteration.",
       "ecosystem": "cargo",
       "graphs": [
+        "Cargo.toml",
         "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "indexmap",
