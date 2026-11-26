@@ -158,7 +158,10 @@ internal fun SettingsSections(
                     supportingContent = { Text(stringResource(R.string.updates_summary)) },
                     leadingContent = { Icon(Icons.Default.SystemUpdate, null) },
                     trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },
-                    colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest),
+                    colors =
+                        ListItemDefaults.colors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ),
                 )
             }
         }

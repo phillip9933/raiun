@@ -3,7 +3,7 @@ package eu.opencloud.android.next.feature.settings
 import android.content.Context
 import androidx.compose.runtime.Composable
 
-const val appUpdatesAvailable = true
+const val APP_UPDATES_AVAILABLE = true
 
 fun initializeAppUpdates(context: Context) {
     RaiunUpdates.get(context).initialize()

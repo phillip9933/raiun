@@ -191,7 +191,7 @@ fun SettingsScreen(
     var temporaryFilesOpen by rememberSaveable { mutableStateOf(false) }
     var encryptedPreferencesOpen by rememberSaveable { mutableStateOf(false) }
     var updatesOpen by rememberSaveable(openUpdatesInitially) { mutableStateOf(openUpdatesInitially) }
-    val showUpdates = appUpdatesAvailable && updatesOpen
+    val showUpdates = APP_UPDATES_AVAILABLE && updatesOpen
     var connectionOpen by rememberSaveable { mutableStateOf(false) }
     var permissionsOpen by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showUpdates) { updatesOpen = false }
@@ -262,7 +262,7 @@ fun SettingsScreen(
                             { permissionsOpen = true },
                             { temporaryFilesOpen = true },
                             { openingFiles = true },
-                            ({ updatesOpen = true }).takeIf { appUpdatesAvailable },
+                            ({ updatesOpen = true }).takeIf { APP_UPDATES_AVAILABLE },
                             ({ connectionOpen = true }).takeIf { accountId != null },
                         )
                     }

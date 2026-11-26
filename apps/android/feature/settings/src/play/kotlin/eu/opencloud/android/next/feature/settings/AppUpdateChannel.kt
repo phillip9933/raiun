@@ -8,7 +8,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.work.WorkManager
 
-const val appUpdatesAvailable = false
+const val APP_UPDATES_AVAILABLE = false
 
 /** Retire the direct channel's persisted jobs on an in-place upgrade. */
 fun initializeAppUpdates(context: Context) {

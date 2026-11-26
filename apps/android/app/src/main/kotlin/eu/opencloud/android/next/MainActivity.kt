@@ -22,6 +22,8 @@ import eu.opencloud.android.next.core.datastore.SettingsRepository
 import eu.opencloud.android.next.core.datastore.UserSettings
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudColor
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudTheme
+import eu.opencloud.android.next.feature.settings.AppUpdateChannelNotice
+import eu.opencloud.android.next.feature.settings.initializeAppUpdates
 import eu.opencloud.android.next.ui.OpenCloudNextApp
 
 class MainActivity : AppCompatActivity() {
@@ -41,7 +43,7 @@ class MainActivity : AppCompatActivity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
         }
-        eu.opencloud.android.next.feature.settings.initializeAppUpdates(this)
+        initializeAppUpdates(this)
         launchIntents.acceptInitial(intent, savedInstanceState)
 
         setContent {
@@ -85,7 +87,7 @@ class MainActivity : AppCompatActivity() {
                         launchIntents = launchIntents,
                         onConsumeLaunchRequest = { consumeLaunchRequest(launchIntents, it) },
                     )
-                    eu.opencloud.android.next.feature.settings.AppUpdateChannelNotice()
+                    AppUpdateChannelNotice()
                 }
             }
         }

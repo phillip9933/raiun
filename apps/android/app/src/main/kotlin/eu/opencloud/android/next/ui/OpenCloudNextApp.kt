@@ -41,6 +41,7 @@ import eu.opencloud.android.next.feature.files.DeletedFilesRoute
 import eu.opencloud.android.next.feature.files.FileBrowserDestinations
 import eu.opencloud.android.next.feature.files.FileBrowserRoute
 import eu.opencloud.android.next.feature.files.FileBrowserViewModel
+import eu.opencloud.android.next.feature.settings.APP_UPDATES_AVAILABLE
 import eu.opencloud.android.next.feature.settings.SettingsRoute
 import eu.opencloud.android.next.feature.shares.ResourceSharesRoute
 import eu.opencloud.android.next.feature.shares.TopLevelSharesRoute
@@ -178,11 +179,13 @@ internal fun OpenCloudNextApp(
                                             destination = AppDestination.Settings
                                         },
                                         onOpenAppUpdates =
-                                            ({
-                                                settingsOpenUpdates = true
-                                                destination = AppDestination.Settings
-                                            }).takeIf {
-                                                eu.opencloud.android.next.feature.settings.appUpdatesAvailable
+                                            if (APP_UPDATES_AVAILABLE) {
+                                                {
+                                                    settingsOpenUpdates = true
+                                                    destination = AppDestination.Settings
+                                                }
+                                            } else {
+                                                null
                                             },
                                         onOpenAccount = { destination = AppDestination.Account },
                                         onOpenEncryptedOffline = { destination = AppDestination.Vaults },
