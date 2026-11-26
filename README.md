@@ -2,6 +2,12 @@
 
 Independent OpenCloud apps for Android and desktop, built around the same product and design. This is not an official OpenCloud GmbH product or supported client.
 
+<a href="https://github.com/phillip9933/raiun/releases/tag/android-v1.7.0"><img src="docs/badges/github-releases.svg" alt="Download Raiun Android 1.7.0 from GitHub Releases" height="40"></a>
+
+[Android 8–11: 1.6.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.6.0) · [Linux and Windows: 0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5)
+
+**Support:** [Buy me a coffee](https://buymeacoffee.com/phillip9933) · [GitHub Sponsors](https://github.com/sponsors/phillip9933)
+
 I build projects to solve problems I run into in my own life. I share them because I believe in open source and hope others can learn from them, adapt them or find them useful. Making them public does not mean they are suitable for every setup, and I can't promise a support schedule. Bug reports and feature requests are welcome so please open an issue to share problems, ideas or suggestions and help make these projects better.
 
 ## Apps
@@ -12,7 +18,9 @@ I build projects to solve problems I run into in my own life. I share them becau
 | Linux Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5) |
 | Windows Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5) |
 
-Android and desktop have independent versions and release pages. Android 1.7.0 is the current Android release. Desktop 0.7.5 is the current numeric Beta release for Linux and Windows. The older Windows beta.2 and beta.3 downloads remain withdrawn. The 0.7.4 reconnect fixes passed owner-reported checks with both the Default and a newly added Windows account. macOS is not released.
+Android and desktop have independent versions and release pages. Android 1.7.0 requires Android 12 or later. Use 1.6.0 on Android 8–11. Desktop 0.7.5 is the current numeric Beta release for Linux and Windows. The older Windows beta.2 and beta.3 downloads remain withdrawn. The 0.7.4 reconnect fixes passed owner-reported checks with both the Default and a newly added Windows account. macOS is not released.
+
+## Features
 
 Android includes Personal files and Spaces, encrypted folders and Spaces, offline access, transfers, folder/camera backup and document scanning. See its [features and limitations](apps/android/README.md), [privacy notice](apps/android/PRIVACY.md) and [changelog](apps/android/CHANGELOG.md).
 
@@ -70,8 +78,10 @@ Download Android APKs and Linux/Windows desktop packages from [GitHub Releases](
 
 New releases will use platform-specific tags and assets so Android and desktop can version independently. Existing tags remain unchanged. See [Releasing](docs/RELEASING.md), [version history](CHANGELOG.md), [security reporting](SECURITY.md), [privacy](PRIVACY.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 
-## AI usage and license
-
-I use AI tools to help with development, including analysis, code, tests and documentation. Validation records distinguish checks actually run from checks still required. Source review and automated tests are not security certification.
+## License
 
 Licensed under [AGPL-3.0-only](LICENSE). See [NOTICE](NOTICE); third-party components retain their own licenses and notices. The license does not grant rights to third-party trademarks.
+
+## AI usage
+
+I use AI tools for analysis, implementation, tests, and documentation. I decide what ships and take responsibility for maintaining it. Project-specific testing and known limitations are documented separately.
