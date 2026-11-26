@@ -2,9 +2,11 @@
 
 Independent OpenCloud apps for Android and desktop, built around the same product and design. This is not an official OpenCloud GmbH product or supported client.
 
-<a href="https://github.com/phillip9933/raiun/releases/tag/android-v1.7.0"><img src="docs/badges/github-releases.svg" alt="Download Raiun Android 1.7.0 from GitHub Releases" height="40"></a>
+<a href="https://github.com/phillip9933/raiun/releases/tag/android-v1.7.0"><img src="docs/badges/github-releases-android.svg" alt="Download Raiun Android 1.7.0 from GitHub Releases" height="40"></a>
+<a href="https://github.com/phillip9933/raiun/releases/tag/desktop-v0.8.0"><img src="docs/badges/github-releases-linux.svg" alt="Download Raiun Linux 0.8.0 Beta from GitHub Releases" height="40"></a>
+<a href="https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5"><img src="docs/badges/github-releases-windows.svg" alt="Download Raiun Windows 0.7.5 Beta from GitHub Releases" height="40"></a>
 
-[Android 8–11: 1.6.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.6.0) · [Linux: 0.8.0 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.8.0) · [Windows: 0.7.5 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5)
+[Android 8–11: 1.6.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.6.0)
 
 **Support:** [Buy me a coffee](https://buymeacoffee.com/phillip9933) · [GitHub Sponsors](https://github.com/sponsors/phillip9933)
 
