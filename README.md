@@ -6,8 +6,6 @@ Independent OpenCloud apps for Android and desktop, built around the same produc
 <a href="https://github.com/phillip9933/raiun/releases/tag/desktop-v0.8.0"><img src="docs/badges/github-releases-linux.svg" alt="Download Raiun Linux 0.8.0 Beta from GitHub Releases" height="40"></a>
 <a href="https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.5"><img src="docs/badges/github-releases-windows.svg" alt="Download Raiun Windows 0.7.5 Beta from GitHub Releases" height="40"></a>
 
-[Android 8–11: 1.6.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.6.0)
-
 **Support:** [Buy me a coffee](https://buymeacoffee.com/phillip9933) · [GitHub Sponsors](https://github.com/sponsors/phillip9933)
 
 I build projects to solve problems I run into in my own life. I share them because I believe in open source and hope others can learn from them, adapt them or find them useful. Making them public does not mean they are suitable for every setup, and I can't promise a support schedule. Bug reports and feature requests are welcome so please open an issue to share problems, ideas or suggestions and help make these projects better.
