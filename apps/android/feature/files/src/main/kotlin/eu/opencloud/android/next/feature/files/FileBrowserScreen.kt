@@ -300,7 +300,7 @@ data class FileBrowserDestinations(
     val onOpenEncryptedLocation: (VaultLocation) -> Unit = {},
     val onEncryptedLocationActions: (VaultLocation) -> Unit = {},
     val onOtherLocation: ((List<ResourceEntity>, Boolean) -> Unit)? = null,
-    val onOpenAppUpdates: () -> Unit = {},
+    val onOpenAppUpdates: (() -> Unit)? = null,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -340,7 +340,7 @@ fun FileBrowserScreen(
     onRefreshFavorites: () -> Unit = {},
     onOpenDeletedFiles: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenAppUpdates: () -> Unit = {},
+    onOpenAppUpdates: (() -> Unit)? = null,
     onOpenVaults: (() -> Unit)? = null,
     onOpenEncryptedOffline: (() -> Unit)? = null,
     onOpenEncryptedLocation: (VaultLocation) -> Unit = {},
@@ -545,10 +545,13 @@ fun FileBrowserScreen(
                     scope.launch { drawerState.close() }
                     onOpenSettings()
                 },
-                onAppUpdates = {
-                    scope.launch { drawerState.close() }
-                    onOpenAppUpdates()
-                },
+                onAppUpdates =
+                    onOpenAppUpdates?.let { open ->
+                        {
+                            scope.launch { drawerState.close() }
+                            open()
+                        }
+                    },
                 onVaults =
                     onOpenVaults?.let { open ->
                         {

@@ -308,7 +308,9 @@ def extract_notices(archive: Path | None, coordinate: str, dest: Path) -> list[d
                 data = zf.read(info)
                 if not data:
                     continue
-                out = dest / key / PurePosixPath(name)
+                # Android bundles omit class-file assets. Keep the original bytes and archive entry.
+                asset_name = name + ".bin" if name.lower().endswith(".class") else name
+                out = dest / key / PurePosixPath(asset_name)
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(data)
                 found.append({

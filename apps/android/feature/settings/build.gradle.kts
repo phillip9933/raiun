@@ -6,6 +6,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val playBuild = providers.gradleProperty("raiun.playBuild").map { it.toBooleanStrict() }.getOrElse(false)
+
 android {
     namespace = "eu.opencloud.android.next.feature.settings"
     compileSdk =
@@ -18,6 +20,13 @@ android {
                 .get()
                 .toInt()
     }
+    val channel = if (playBuild) "play" else "direct"
+    sourceSets.getByName("main").kotlin.srcDir("src/$channel/kotlin")
+    if (playBuild) {
+        sourceSets.getByName("main").res.srcDir("src/play/res")
+    } else {
+        sourceSets.getByName("main").manifest.srcFile("src/direct/AndroidManifest.xml")
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -26,7 +35,7 @@ android {
 }
 
 dependencies {
-    api(libs.android.app.updater)
+    if (!playBuild) api(libs.android.app.updater)
     implementation(libs.androidx.core)
     implementation(libs.androidx.appcompat)
     implementation(project(":core:security"))
@@ -42,5 +51,6 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
     testImplementation(libs.junit)
 }

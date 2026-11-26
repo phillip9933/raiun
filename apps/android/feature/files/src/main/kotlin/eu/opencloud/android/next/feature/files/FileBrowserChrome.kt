@@ -315,7 +315,7 @@ internal fun BrowserNavigationDrawer(
     onNavigate: (NavigationItem) -> Unit,
     onDeletedFiles: () -> Unit,
     onSettings: () -> Unit,
-    onAppUpdates: () -> Unit,
+    onAppUpdates: (() -> Unit)?,
     personalSpace: eu.opencloud.android.next.core.database.SpaceEntity?,
     onVaults: (() -> Unit)? = null,
 ) = ModalDrawerSheet(
@@ -400,7 +400,9 @@ internal fun BrowserNavigationDrawer(
     }
     Text(
         text = stringResource(R.string.browser_version, releaseVersion),
-        modifier = Modifier.clickable(onClick = onAppUpdates).padding(OpenCloudDimensions.SpacingXl),
+        modifier =
+            (onAppUpdates?.let { Modifier.clickable(onClick = it) } ?: Modifier)
+                .padding(OpenCloudDimensions.SpacingXl),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         style = MaterialTheme.typography.bodySmall,
     )

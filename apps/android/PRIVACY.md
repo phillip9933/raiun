@@ -4,6 +4,12 @@ Raiun is an independent Android client for OpenCloud. It is not an official Open
 
 Raiun connects to the server and identity provider you configure. File contents, names and account information are sent to those services when needed for your requested operations. Server administrators and identity providers control their own logging and retention. The app does not operate an analytics or advertising backend.
 
+## Account removal and contact
+
+To disconnect an account and request removal of Raiun's local account data, use **Accounts** in the app and remove the account. Removing an account here does not delete an OpenCloud account, cloud originals, server logs or copies saved outside the app. For server account deletion and retention, contact your server administrator.
+
+For privacy questions, contact the maintainer through the [Raiun project](https://github.com/phillip9933/raiun). Do not post private files or account details. See [security reporting](../../SECURITY.md) for the private vulnerability reporting route.
+
 ## Encrypted vaults
 
 Encrypted folder and Space contents use the OpenCloud Web-compatible rclone-crypt format. The vault password derives the content and filename keys locally; it is not sent to the server by Raiun. Optional biometric access wraps a derived key with Android Keystore on this device. The password remains necessary for recovery and other devices. Account credentials authorize server requests and are separate from the vault password.
@@ -24,7 +30,9 @@ Explicitly opening or sharing files, handing files to another app, or opening br
 
 ## App update checks
 
-By default, Raiun checks the public GitHub releases for this project about once a day, subject to Android background scheduling. Turn automatic checks off in Settings → App updates; manual checks remain available. The check uses a separate public HTTP client and sends no OpenCloud account credentials, tokens, file names or file contents. GitHub receives ordinary connection information such as the requesting IP address and HTTP headers.
+Google Play builds use Google Play for app updates. They do not check GitHub for app updates, download update APKs or request permission to install them.
+
+The standalone APK uses the separate update channel below. By default, it checks the public GitHub releases for this project about once a day, subject to Android background scheduling. Turn automatic checks off in Settings → App updates; manual checks remain available. The check uses a separate public HTTP client and sends no OpenCloud account credentials, tokens, file names or file contents. GitHub receives ordinary connection information such as the requesting IP address and HTTP headers.
 
 Automatic APK downloads on unmetered Wi-Fi are off by default. If enabled, GitHub and its release-asset hosting receive the APK download request. Downloads stay in the app-private update cache, separate from cloud files and vault credentials. Partial downloads are discarded on cancellation or failure; obsolete APKs are pruned. Android can also reclaim cache files.
 

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="play_privacy_policy">Privacy policy</string>
+    <string name="play_privacy_policy_open_failed">Could not open the privacy policy. Check that a browser is available.</string>
+</resources>

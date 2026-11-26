@@ -64,7 +64,7 @@ internal fun SettingsSections(
     onPermissions: () -> Unit,
     onOpenTemporary: () -> Unit,
     onFileOpening: () -> Unit,
-    onUpdates: () -> Unit,
+    onUpdates: (() -> Unit)?,
     onConnection: (() -> Unit)? = null,
 ) {
     Column(
@@ -150,14 +150,20 @@ internal fun SettingsSections(
         }
         Text(stringResource(R.string.settings_troubleshooting), style = MaterialTheme.typography.titleSmall)
         DiagnosticsCard(state, diagnostics)
-        Card(onClick = onUpdates, modifier = Modifier.fillMaxWidth()) {
-            ListItem(
-                headlineContent = { Text(stringResource(R.string.updates_title)) },
-                supportingContent = { Text(stringResource(R.string.updates_summary)) },
-                leadingContent = { Icon(Icons.Default.SystemUpdate, null) },
-                trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },
-                colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest),
-            )
+        AppPrivacyPolicyLink()
+        onUpdates?.let { openUpdates ->
+            Card(onClick = openUpdates, modifier = Modifier.fillMaxWidth()) {
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.updates_title)) },
+                    supportingContent = { Text(stringResource(R.string.updates_summary)) },
+                    leadingContent = { Icon(Icons.Default.SystemUpdate, null) },
+                    trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },
+                    colors =
+                        ListItemDefaults.colors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ),
+                )
+            }
         }
     }
 }

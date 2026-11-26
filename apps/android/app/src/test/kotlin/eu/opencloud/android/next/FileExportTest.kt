@@ -22,14 +22,17 @@ import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 class FileExportTest {
-    @Test fun applicationDeclaresUserConfirmedApkInstallationPermission() {
+    @Test fun onlyDirectBuildDeclaresApkInstallationPermission() {
         val context = RuntimeEnvironment.getApplication()
         val info =
             context.packageManager.getPackageInfo(
                 context.packageName,
                 android.content.pm.PackageManager.GET_PERMISSIONS,
             )
-        assertTrue(info.requestedPermissions.orEmpty().contains(android.Manifest.permission.REQUEST_INSTALL_PACKAGES))
+        assertEquals(
+            !BuildConfig.PLAY_BUILD,
+            info.requestedPermissions.orEmpty().contains(android.Manifest.permission.REQUEST_INSTALL_PACKAGES),
+        )
     }
 
     @Test fun apkMimeOverridesGenericOrZipServerMetadata() {
